@@ -1,143 +1,175 @@
-# sparse-nsnet2
+# eco8-neaixt
 
-Speech-enhancement models trained on
-[VoiceBank-DEMAND-16k](https://huggingface.co/datasets/JacobLinCool/VoiceBank-DEMAND-16k),
-built for benchmarking efficient, quantized, streamable enhancers when
-deployed on hardware.
+Efficient, quantized, streamable speech-enhancement models for edge-AI benchmarking in the context of the [NeAIxt](https://neaixt.eu/) project.
 
-The repo carries **two model families** side by side. They share the
-dataset, training utilities and quantization scaffolding, but are
-otherwise independent — each has its own model, configs, training entry
-point and ONNX/quantization pipeline.
+This repository contains experimental speech-enhancement models trained on [VoiceBank-DEMAND-16k](https://huggingface.co/datasets/JacobLinCool/VoiceBank-DEMAND-16k). The goal is to benchmark compact neural audio models that can be exported, quantized, and evaluated for deployment on constrained edge-AI hardware.
 
-| family | architecture | causal | streams | role |
-| --- | --- | --- | --- | --- |
-| **NSNet2** | GRU recurrent enhancer (Braun & Tashev, ICASSP 2021), with FC/GRU layers swappable between dense, [Butterfly](https://arxiv.org/abs/1903.05895) and [Monarch](https://arxiv.org/abs/2204.00595) structured factorizations | yes | yes | structured-factorization + int8/int4 quantization study |
-| **ConvFSENet** | fully-convolutional ConvTasNet-derived magnitude-mask predictor (stacked Temporal Conv Module blocks); architecture from [Miccini *et al.*, ICASSP 2025](https://arxiv.org/abs/2412.17121) | yes | yes (frame-by-frame, zero lookahead) | fast causal CNN enhancer + int8 quantization study |
+## NeAIxt context
 
-Both export to streaming-shape ONNX and quantize to int8, so they can be
-benchmarked on the same footing (PESQ, RTF, model size) under
-onnxruntime.
+[NeAIxt — Next Generation of edge AI crossing technology fields](https://neaixt.eu/) is a European Chips Joint Undertaking / Horizon Europe project focused on next-generation secure, energy-efficient edge AI. The project combines advanced microelectronics, embedded AI, and non-volatile memory technologies to enable low-power AI directly on devices.
+
+This repository contributes to the NeAIxt consumer use case on **ultra-low-power speech enhancement**. In that use case, the objective is to develop highly compressed neural speech-enhancement models capable of real-time noise reduction on ultra-low-power edge processors for next-generation hearing and audio devices.
+
+The code here focuses on open benchmarking and model exploration: streamable architectures, ONNX export, post-training quantization, quantization-aware training experiments, and runtime/quality evaluation. It is not a hardware-specific SDK and does not include proprietary device integration code.
+
+## Model families
+
+The repo contains two model families. They share the dataset wrapper, training utilities, metrics, and quantization scaffolding, but each model family has its own architecture, configs, training entry point, ONNX export path, and quantization pipeline.
+
+| family         | architecture                                                                                                                                                           | causal | streaming                               | role                                                         |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------- | ------------------------------------------------------------ |
+| **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, and Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
+| **ConvFSENet** | Fully-convolutional ConvTasNet-derived magnitude-mask predictor using stacked Temporal Conv Module blocks. The architecture is based on Miccini *et al.*, ICASSP 2025. | yes    | yes, frame-by-frame with zero lookahead | Fast causal CNN enhancer and int8 quantization study.        |
+
+Both families export to streaming-shape ONNX and support int8 quantization, allowing comparison under the same evaluation conditions: PESQ, real-time factor, and model size under ONNX Runtime.
 
 ## Results
 
-Results live in dedicated files, one per model family:
+Detailed results are kept in separate files:
 
-* **[RESULTS_NSNET2.md](RESULTS_NSNET2.md)** — the 9-config structured
-  sweep, int8 quantization findings, and the int4-weight PTQ + QAT study.
-* **[RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md)** — the v3/v4/v5 causal
-  models, FP32 vs int8, and the magnitude-compression fix that makes int8
-  loss-free.
+* [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
+* [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
 
-Headline: NSNet2 `wide_monarch` tops FP32 PESQ among the recurrent
-variants; ConvFSENet `v5` beats every NSNet2 variant on both FP32 and
-int8 PESQ while running causally at a fraction of the RTF.
+Headline summary:
+
+* `wide_monarch` gives the best FP32 PESQ among the recurrent NSNet2 variants.
+* `monarch_full` gives the best int8 PESQ among the NSNet2 variants.
+* `monarch_8` is much faster than the dense NSNet2 baseline while preserving similar int8 PESQ.
+* ConvFSENet gives the strongest overall result in this repository: higher FP32 and int8 PESQ than the NSNet2 variants, while running causally at a much lower real-time factor.
 
 ## Setup
 
-Requires `uv`, Python 3.11–3.12, and (for CUDA acceleration) a working
-CUDA toolkit + matching PyTorch wheels.
+Requires:
+
+* Python 3.11–3.12
+* [`uv`](https://docs.astral.sh/uv/)
+* CUDA-compatible PyTorch wheels if using GPU acceleration
 
 ```bash
-git clone https://github.com/LarocheC/sparse-nsnet2.git
-cd sparse-nsnet2
+git clone https://github.com/LarocheC/eco8-neaixt.git
+cd eco8-neaixt
 uv sync
 ```
 
-The structured-matrix (Butterfly / Monarch factorizations) and
-GRU-QAT primitives come from the published PyPI packages
-[`torch-structured`](https://pypi.org/project/torch-structured/) and
-[`gru-qat`](https://pypi.org/project/gru-qat/) — no git submodules or
-local CUDA build required. Both ship pure-Python wheels that fall back to
-the Triton / native-PyTorch backend. `torch` is pinned to the cu118 wheels
-in `pyproject.toml` (covers Pascal sm\_61 onwards).
+The structured-matrix and GRU-QAT primitives come from the published PyPI packages:
 
-## Repo layout
+* [`torch-structured`](https://pypi.org/project/torch-structured/)
+* [`gru-qat`](https://pypi.org/project/gru-qat/)
 
-Each model family lives in its own package, with a third package for the
-infrastructure both share. Scripts are run as modules from the repo root,
-e.g. `python -m nsnet2.train ...` or `python -m convfsenet.quant ...`.
+No git submodules or local CUDA builds are required. The packages fall back to Triton or native PyTorch backends depending on availability.
 
-### `common/` — shared infrastructure
+## Repository layout
 
-```
-common/dataset.py        HF VoiceBank-DEMAND-16k wrapper + STFT helpers
-common/env.py            AttrDict config loader
-common/utils.py          checkpoint / misc helpers
-common/metrics.py        PESQ helpers (eval_pesq / pesq_score)
-common/discriminator.py  PESQ-based metric discriminator (both train loops)
-common/quant_fake.py     eager fake-quant (STE) — int4/int8 weight+activation
-                         PTQ and QAT scaffold, shared by BOTH families
-```
+```text
+common/                  Shared infrastructure
+  dataset.py             VoiceBank-DEMAND-16k wrapper and STFT helpers
+  env.py                 Config loader
+  utils.py               Checkpoint and utility helpers
+  metrics.py             PESQ helpers
+  discriminator.py       PESQ-based metric discriminator
+  quant_fake.py          Eager fake-quantization scaffold for PTQ/QAT
 
-Other top-level files: `configs/` (per-run configs for both families,
-incl. the `*_triton.json` variants), `pyproject.toml` / `uv.lock` (dependency lock),
-`tests/` (pytest suite), and the `run_*.sh` NSNet2 sweep drivers. The
-structured-matrix and GRU-QAT primitives now come from the published
-`torch-structured` and `gru-qat` PyPI packages.
+nsnet2/                  GRU recurrent enhancer
+  model.py               NSNet2 model wiring
+  layers.py              Dense / Butterfly / Monarch layer factories
+  streaming.py           Streaming-shape wrapper for ONNX export
+  train.py               Training loop
+  export_onnx.py         FP32 ONNX export
+  quant.py               Static int8 PTQ
+  eval_quant.py          Int4/int8 fake-quant PTQ evaluation
+  qat_train.py           Int4/a8 QAT fine-tuning
 
-### `nsnet2/` — GRU recurrent enhancer
+convfsenet/              Fully-convolutional causal enhancer
+  model.py               ConvFSENet model and causal factory
+  streaming.py           Streaming wrappers
+  train.py               End-to-end training
+  export_onnx.py         FP32 ONNX export
+  quant.py               Static int8 PTQ
+  eval_ptq.py            Low-bit PTQ study
+  qat_train.py           QAT reference scaffold
 
-```
-nsnet2/model.py          NSNet2 (~50 lines, pure wiring)
-nsnet2/layers.py         make_linear / make_gru / StructuredGRU + cell
-                         + butterfly_ortho_penalty (int8-friendly training)
-nsnet2/streaming.py      streaming-shape view of NSNet2 for ONNX export
-nsnet2/train.py          training loop (HF dataset, GAN, validation, ckpt)
-nsnet2/inference.py      single-checkpoint inference (PyTorch)
-nsnet2/inference_onnx.py streaming inference + dual-session PESQ (FP32 vs int8)
-nsnet2/export_onnx.py    streaming FP32 ONNX export (variant-aware)
-nsnet2/eval_torch.py     streaming PESQ eval (PyTorch, used by the int4 study)
-nsnet2/quant.py          static int8 PTQ (QDQ, per-channel, MinMax)
-nsnet2/quant_hook.py     in-training quant validation hook
-nsnet2/calibration.py    VBDCalibrationReader for int8 calibration
-nsnet2/eval_quant.py     int4/int8 fake-quant PTQ evaluation
-nsnet2/sweep_hf_ptq.py   w4/a8 PTQ sweep over HF checkpoints
-nsnet2/qat_train.py      int4/a8 QAT fine-tuning driver
-nsnet2/bench_gru.py      GRU backend microbenchmark
-nsnet2/analyze_sweep.ipynb        NSNet2 results notebook
-nsnet2/inspect_butterfly_activations.py  per-stage activation magnitude trace
+configs/                 Per-run configs for both model families
+tests/                   Pytest suite
+RESULTS_NSNET2.md        NSNet2 results
+RESULTS_CONVFSENET.md    ConvFSENet results
 ```
 
-NSNet2 configs in `configs/`: baseline, butterfly_*, monarch_*, wide_monarch,
-triton_* / tr_* (Triton GRU backend). Sweep drivers at the repo root:
-`run_sweep.sh` (9-run training sweep), `run_quantize_sweep.sh` (per-cp FP32 +
-int8 ONNX export), `run_eval_sweep.sh` (per-cp PESQ eval), `run_qat_sweep.sh`
-(w4/a8 QAT over the HF checkpoints; `EPOCHS`-overridable). Each `run_*.sh`
-overrides its run set and knobs via env vars — see the script header.
+Scripts are run as modules from the repository root, for example:
 
-### `convfsenet/` — fully-convolutional enhancer
-
-```
-convfsenet/model.py           ConvFSENet model + build_causal_model factory
-                              (TCM blocks; mag / mag_compressed extractors)
-convfsenet/streaming.py       streaming wrappers (naive / BN-folded fast /
-                              real-valued ONNX-export wrapper)
-convfsenet/train.py           end-to-end time-domain training (+ metric-GAN)
-convfsenet/export_onnx.py     streaming FP32 ONNX export
-convfsenet/quant.py           static int8 PTQ (keeps compression prologue FP32)
-convfsenet/calibration.py     int8 calibration reader
-convfsenet/inference_onnx.py  dual FP32/int8 ORT eval — PESQ + RTF
-convfsenet/eval_ptq.py        low-bit (w4/w8) fake-quant PTQ study
-convfsenet/qat_train.py       QAT fine-tuning driver (legacy — see results doc)
+```bash
+python -m nsnet2.train --config configs/baseline.json --checkpoint_path cp_baseline
+python -m convfsenet.train --config configs/convfsenet.json --checkpoint_path cp_convfsenet
 ```
 
-ConvFSENet config in `configs/`: `convfsenet.json` (the deployed
-model — mag-compressed feature extractor, 200-epoch GAN-trained).
+## NSNet2 experiments
+
+The NSNet2 branch explores whether structured linear transforms can reduce model size and runtime while preserving speech-enhancement quality after quantization.
+
+Supported layer types include:
+
+```json
+"linear": {"kind": "linear" | "butterfly" | "monarch"},
+"gru": {"kind": "gru" | "butterfly" | "monarch"}
+```
+
+The main sweep scripts are:
+
+```bash
+./run_sweep.sh
+./run_quantize_sweep.sh
+./run_eval_sweep.sh
+./run_qat_sweep.sh
+```
+
+The results show that Monarch-based variants are particularly friendly to int8 QDQ quantization, while Butterfly variants are more sensitive unless constrained by orthogonal initialization or recovered through QAT.
+
+## ConvFSENet experiments
+
+The ConvFSENet branch studies a fast causal CNN-based speech enhancer. It runs frame-by-frame using FIFO state buffers in each Temporal Conv Module block, enabling zero-lookahead streaming inference.
+
+The deployed config is:
+
+```text
+configs/convfsenet.json
+```
+
+Typical workflow:
+
+```bash
+python -m convfsenet.train --config configs/convfsenet.json --checkpoint_path cp_convfsenet --training_epochs 200
+python -m convfsenet.export_onnx --checkpoint_file cp_convfsenet/g_best
+python -m convfsenet.quant --checkpoint_dir cp_convfsenet --num_utterances 200
+python -m convfsenet.inference_onnx --checkpoint_file cp_convfsenet/g_best.onnx
+```
+
+ConvFSENet uses magnitude compression before the frontend convolution. The quantization script keeps this compression prologue in FP32 before applying int8 quantization, which is important for preserving low-energy spectral detail.
+
+## Trained checkpoints
+
+Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
+
+* [`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints)
+* [`claroche1/convfsenet`](https://huggingface.co/claroche1/convfsenet)
+
+See the result files for loading examples and evaluation commands.
 
 ## Acknowledgements
 
-* MP-SENet (Lu et al., 2023) for the training recipe and discriminator.
-* NSNet2 (Braun & Tashev, 2021) for the recurrent model architecture.
-* Miccini, Laroche, Piechowiak & Pezzarossa, *Scalable Speech Enhancement with
-  Dynamic Channel Pruning* ([ICASSP 2025, arXiv:2412.17121](https://arxiv.org/abs/2412.17121))
-  — the ConvFSENet architecture used here is the base enhancer from this paper.
-* ConvTasNet (Luo & Mesgarani, 2019) for the convolutional design ConvFSENet derives from.
-* Butterfly factorization (Dao et al., 2019) and Monarch (Dao et al., 2022),
-  as packaged in [torch-structured](https://github.com/LarocheC/torch-structured).
-* JacobLinCool for the resampled VoiceBank-DEMAND-16k HF dataset.
+This work was carried out in the context of the NeAIxt project.
+
+NeAIxt has received funding from the European Union’s Horizon Europe research and innovation programme under the HORIZON-JU-Chips-2024-1-IA grant agreement No. 101194172, with support from the participating Chips JU member states. The contents of this repository reflect the authors’ views only; the European Union and the granting authority are not responsible for them.
+
+This repository also builds on:
+
+* MP-SENet, for the training recipe and metric discriminator.
+* NSNet2, for the recurrent speech-enhancement architecture.
+* Miccini, Laroche, Piechowiak & Pezzarossa, *Scalable Speech Enhancement with Dynamic Channel Pruning*, ICASSP 2025, for the ConvFSENet base architecture.
+* ConvTasNet, for the convolutional design principles used by ConvFSENet.
+* Butterfly and Monarch structured matrix factorizations, as packaged in `torch-structured`.
+* JacobLinCool’s resampled VoiceBank-DEMAND-16k dataset.
 
 ## License
 
-MIT (inherited from MP-SENet). The `torch-structured` dependency is
-Apache-2.0 (see its PyPI page / upstream repository).
+MIT.
+
+The repository inherits part of its training structure from MP-SENet. The `torch-structured` dependency is Apache-2.0; see its PyPI page and upstream repository for details.
