@@ -1,7 +1,7 @@
 [project]
-name = "sparse-nsnet2"
+name = "eco8-neaixt"
 version = "0.1.0"
-description = "NSNet2 speech enhancement trained on VoiceBank-DEMAND-16k."
+description = "Efficient, quantized, streamable speech-enhancement models for edge-AI benchmarking in the context of the NeAIxt project."
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "torch>=2.6,<2.8",
