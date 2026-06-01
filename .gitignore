@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Compiled extensions (rebuilt by `uv sync`)
+*.so
+*.pyd
+*.dylib
+
+# uv-managed virtualenv
+.venv/
+
+# Training outputs
+cp_*/
+generated_files/
+logs/
+**/.quant_cache/
+*.log
+# Stray deployment ONNX at the repo root (real artifacts live under cp_*/)
+/g_best*.onnx
+
+# GSD planning (kept local — commit_docs=false)
+.planning/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# HF upload staging
+hf_staging/
+
+# ORT / PESQ scratch artifacts
+sym_shape_infer_temp.onnx
+*.data

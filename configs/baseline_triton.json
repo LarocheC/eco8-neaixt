@@ -1,0 +1,34 @@
+{
+    "num_gpus": 0,
+    "batch_size": 256,
+    "learning_rate": 0.003,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.99,
+    "seed": 1234,
+    "hidden_dim": 400,
+    "fc_hidden_dim": 600,
+    "num_gru_layers": 2,
+    "compress_factor": 0.3,
+    "linear": {
+        "kind": "linear"
+    },
+    "gru": {
+        "kind": "triton"
+    },
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "num_workers": 8,
+    "quant": {
+        "enabled": false,
+        "n_calib_utts": 200
+    },
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}

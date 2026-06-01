@@ -1,0 +1,45 @@
+[project]
+name = "sparse-nsnet2"
+version = "0.1.0"
+description = "NSNet2 speech enhancement trained on VoiceBank-DEMAND-16k."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.6,<2.8",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "soundfile>=0.12",
+    "librosa>=0.10",
+    "tensorboard>=2.14",
+    "joblib>=1.3",
+    "pesq>=0.0.4",
+    "datasets>=2.14,<4",
+    "huggingface_hub>=0.20",
+    "rich>=13.0",
+    "einops>=0.7",
+    "opt_einsum>=3.3",
+    "torch-structured>=1.2.4",  # 1.2.4 fixes Butterfly non-contiguous Triton input
+    "gru-qat[triton,structured]>=0.2.0",
+    "jupyter>=1.0",
+    "matplotlib>=3.7",
+    "onnx>=1.21,<1.22",          # DET-01
+    "onnxruntime>=1.25,<1.26",   # DET-01
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
