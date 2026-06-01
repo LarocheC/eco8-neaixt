@@ -30,12 +30,6 @@ Detailed results are kept in separate files:
 * [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
 * [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
 
-Headline summary:
-
-* `wide_monarch` gives the best FP32 PESQ among the recurrent NSNet2 variants.
-* `monarch_full` gives the best int8 PESQ among the NSNet2 variants.
-* `monarch_8` is much faster than the dense NSNet2 baseline while preserving similar int8 PESQ.
-* ConvFSENet gives the strongest overall result in this repository: higher FP32 and int8 PESQ than the NSNet2 variants, while running causally at a much lower real-time factor.
 
 ## Setup
 
