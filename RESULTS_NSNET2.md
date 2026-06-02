@@ -64,6 +64,31 @@ For training-time mitigation when ortho init isn't available, a soft
 orthogonality penalty (`butterfly_ortho_lambda`) is wired into `nsnet2/train.py`
 — see `nsnet2.layers.butterfly_ortho_penalty`.
 
+### Calibration: why un-normalized MinMax
+
+A natural question is whether the static-int8 calibration set should be
+RMS-normalized to match the deployment pipeline — training and
+`inference_onnx.py` both scale each utterance by `sqrt(N / Σx²)` before the
+STFT, whereas `nsnet2/calibration.py` calibrates on the raw audio. An ablation
+on `monarch_8` (full 824-utt test PESQ; FP32 = 2.832) says **keep the
+un-normalized MinMax calibration**:
+
+| calibration                          | int8 PESQ |
+| ------------------------------------ | --------: |
+| un-normalized + MinMax (**default**) | **2.826** |
+| RMS-normalized + Percentile          |     2.795 |
+| RMS-normalized + Entropy             |     2.793 |
+| RMS-normalized + MinMax              |     2.768 |
+
+Matching calibration to the (narrower) RMS-normalized deployment range
+*tightens* the quantization range and clips more activation outliers, costing
+~0.03–0.06 PESQ on the wider monarch variants; the wider un-normalized range
+acts as a beneficial clipping margin. Outlier-robust calibration
+(Entropy/Percentile) recovers part of the gap but does not beat un-normalized
+MinMax. Calibration method and a per-utterance frame cap are exposed via
+`python -m nsnet2.quant --calibration_method {MinMax,Percentile,Entropy}
+--frames_per_utterance N`.
+
 ## Int4 weight + int8 activation (PTQ)
 
 Pushing weights further to int4 (per-channel symmetric) with int8 activations,
