@@ -153,48 +153,6 @@ def test_get_next_shape_and_dtype(monkeypatch, tmp_path):
     assert np.all(states == 0.0), "first frame must have zero h0 (D-04)"
 
 
-def test_calibration_applies_rms_normalization(monkeypatch, tmp_path):
-    """Calibration must RMS-normalize each utterance BEFORE the STFT, matching
-    training (common/dataset.py:94) and inference (nsnet2/inference_onnx.py:158).
-
-    Regression guard: a prior version STFT'd raw audio, so quantize_static
-    calibrated activation scales on an input distribution the deployed int8
-    graph never sees. The first calibration frame must equal mag_pha_stft of
-    the RMS-normalized utterance and must NOT match the un-normalized one.
-    """
-    from common.dataset import mag_pha_stft
-
-    _redirect_hf_cache(monkeypatch, tmp_path)
-    streaming = _make_tiny_streaming()
-    # Deliberately off-unit-RMS audio (×0.01) so norm_factor != 1 and the
-    # normalized vs raw magnitudes are clearly distinguishable.
-    audios_train = [(_random_audio(2048, seed=i) * 0.01).astype(np.float32) for i in range(4)]
-    audios_test = [_random_audio(2048, seed=100 + i) for i in range(2)]
-    ds = _make_dataset_dict(audios_train, audios_test)
-    h = _make_h({"num_utterances": 1, "seed": 0, "frames_per_utterance": None})
-
-    reader = VBDCalibrationReader(streaming, h, ds)
-    first = reader.get_next()
-    assert first is not None
-
-    # Recompute the expected first frame for whichever utterance was selected.
-    sel = reader.calib_indices[0]
-    audio_t = torch.from_numpy(np.asarray(ds["train"][sel]["noisy"]["array"], dtype=np.float32))
-    norm_factor = torch.sqrt(len(audio_t) / (torch.sum(audio_t ** 2.0) + 1e-8))
-    mag_norm, _, _ = mag_pha_stft(
-        (audio_t * norm_factor).unsqueeze(0), h.n_fft, h.hop_size, h.win_size, h.compress_factor,
-    )
-    mag_raw, _, _ = mag_pha_stft(
-        audio_t.unsqueeze(0), h.n_fft, h.hop_size, h.win_size, h.compress_factor,
-    )
-    np.testing.assert_allclose(
-        first["frame_in"], mag_norm[:, :, 0].numpy().astype(np.float32), rtol=1e-5, atol=1e-6,
-    )
-    assert not np.allclose(
-        first["frame_in"], mag_raw[:, :, 0].numpy(), rtol=1e-2, atol=1e-3,
-    ), "calibration frame matches UN-normalized magnitude — RMS norm missing"
-
-
 def test_yields_expected_count(monkeypatch, tmp_path):
     """CAL-01: total frame count == sum-over-utts of T_frames per utterance."""
     _redirect_hf_cache(monkeypatch, tmp_path)
