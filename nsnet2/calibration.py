@@ -117,7 +117,15 @@ class VBDCalibrationReader(CalibrationDataReader):
         item = self.hf["train"][idx]
         # D-02: noisy audio (production input distribution); NOT clean.
         audio_np = np.asarray(item["noisy"]["array"], dtype=np.float32)  # (N,) float32
-        audio = torch.from_numpy(audio_np).unsqueeze(0)                  # (1, N)
+        audio_t = torch.from_numpy(audio_np)                            # (N,)
+        # RMS-normalize per utterance BEFORE the STFT, identical to the training
+        # (common/dataset.py:94) and inference (nsnet2/inference_onnx.py:158)
+        # pipelines. Without this, quantize_static calibrates activation scales
+        # on a raw-amplitude spectrum distribution the deployed int8 graph never
+        # sees (it always runs on RMS-normalized magnitudes), mis-scaling the
+        # frozen int8 activation ranges. norm_factor = sqrt(N / sum(x^2)).
+        norm_factor = torch.sqrt(len(audio_t) / (torch.sum(audio_t ** 2.0) + 1e-8))
+        audio = (audio_t * norm_factor).unsqueeze(0)                    # (1, N)
         # D-03: reuse existing dataset.mag_pha_stft. Magnitude only (ignore pha + com).
         mag, _, _ = mag_pha_stft(
             audio,
@@ -243,6 +251,11 @@ class VBDCalibrationReader(CalibrationDataReader):
                 "frames_per_utterance": self.frames_per_utterance,
                 "calib_indices": sorted(int(i) for i in self.calib_indices),
                 "train_fingerprint": self.hf["train"]._fingerprint,
+                # Preprocessing identity — calibration frames are RMS-normalized
+                # before STFT (matches train/inference). Bump this tag whenever
+                # the calibration preprocessing changes so the hash (and the int8
+                # ONNX metadata stamp) distinguishes otherwise-identical runs.
+                "preproc": "rms_norm_v1",
             },
             sort_keys=True,
         ).encode("utf-8")

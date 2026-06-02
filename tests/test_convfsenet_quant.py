@@ -191,6 +191,42 @@ def test_calibration_reader_yields_frames(fast_view, onnx_view, calib_h, hf_data
     )
 
 
+def test_calibration_reader_applies_rms_normalization(fast_view, onnx_view, calib_h, hf_dataset):
+    """Calibration must RMS-normalize each utterance BEFORE the STFT, matching
+    training (common/dataset.py:94) and inference (convfsenet/inference_onnx.py:133).
+
+    Regression guard: a prior version STFT'd raw audio, so quantize_static froze
+    activation scales on an input distribution the deployed int8 graph never sees.
+    The first 'noisy_mag' frame must equal |stft| of the RMS-normalized utterance
+    (compress_factor pinned to 1.0 — the graph compresses internally) and must
+    NOT match the un-normalized one.
+    """
+    from common.dataset import mag_pha_stft
+
+    reader = ConvFSENetCalibrationReader(fast_view, onnx_view, calib_h, hf_dataset)
+    first = reader.get_next()
+    assert first is not None
+
+    sel = reader.calib_indices[0]
+    audio_t = torch.from_numpy(
+        np.asarray(hf_dataset["train"][sel]["noisy"]["array"], dtype=np.float32)
+    )
+    norm_factor = torch.sqrt(len(audio_t) / (torch.sum(audio_t ** 2.0) + 1e-8))
+    mag_norm, _, _ = mag_pha_stft(
+        (audio_t * norm_factor).unsqueeze(0),
+        calib_h.n_fft, calib_h.hop_size, calib_h.win_size, 1.0,
+    )
+    mag_raw, _, _ = mag_pha_stft(
+        audio_t.unsqueeze(0), calib_h.n_fft, calib_h.hop_size, calib_h.win_size, 1.0,
+    )
+    np.testing.assert_allclose(
+        first["noisy_mag"], mag_norm[:, :, 0].numpy().astype(np.float32), rtol=1e-5, atol=1e-6,
+    )
+    assert not np.allclose(
+        first["noisy_mag"], mag_raw[:, :, 0].numpy(), rtol=1e-2, atol=1e-3,
+    ), "calibration frame matches UN-normalized magnitude — RMS norm missing"
+
+
 def test_calibration_reader_train_test_overlap_rejected(fast_view, onnx_view, calib_h):
     """Disjoint-set assertion fires when train ∩ test ≠ ∅."""
     overlapping = _SyntheticHFDataset(n_train=3, n_test=2)

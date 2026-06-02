@@ -123,7 +123,14 @@ class ConvFSENetCalibrationReader(CalibrationDataReader):
         """
         item = self.hf["train"][idx]
         audio_np = np.asarray(item["noisy"]["array"], dtype=np.float32)   # (N,)
-        audio = torch.from_numpy(audio_np).unsqueeze(0)                   # (1, N)
+        audio_t = torch.from_numpy(audio_np)                             # (N,)
+        # RMS-normalize per utterance BEFORE the STFT, identical to training
+        # (common/dataset.py:94) and inference (convfsenet/inference_onnx.py:133).
+        # Otherwise quantize_static freezes activation scales on a raw-amplitude
+        # magnitude distribution the deployed int8 graph never sees (it always
+        # runs on RMS-normalized magnitudes). norm_factor = sqrt(N / sum(x^2)).
+        norm_factor = torch.sqrt(len(audio_t) / (torch.sum(audio_t ** 2.0) + 1e-8))
+        audio = (audio_t * norm_factor).unsqueeze(0)                      # (1, N)
 
         # Plain magnitude — compress_factor pinned to 1.0 here regardless of
         # the model's extractor. The ONNX `noisy_mag` input is always plain
@@ -202,6 +209,11 @@ class ConvFSENetCalibrationReader(CalibrationDataReader):
                 "frames_per_utterance": self.frames_per_utterance,
                 "calib_indices": sorted(int(i) for i in self.calib_indices),
                 "train_fingerprint": train_fp,
+                # Preprocessing identity — calibration frames are RMS-normalized
+                # before STFT (matches train/inference). Bump this tag whenever
+                # the calibration preprocessing changes so the hash (and the int8
+                # ONNX metadata stamp) distinguishes otherwise-identical runs.
+                "preproc": "rms_norm_v1",
             },
             sort_keys=True,
         ).encode("utf-8")
