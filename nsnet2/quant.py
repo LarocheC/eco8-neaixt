@@ -68,7 +68,8 @@ def _add_metadata(model, key, value):
     model.metadata_props.append(entry)
 
 
-def quantize_checkpoint(cp_dir, n_calib_utts, out_path=None, hf_cache_dir=None) -> Path:
+def quantize_checkpoint(cp_dir, n_calib_utts, out_path=None, hf_cache_dir=None,
+                        frames_per_utterance=None) -> Path:
     """Static int8 quantize a checkpoint dir's FP32 ONNX into g_best.onnx.
 
     cp_dir          : directory containing g_best (PyTorch ckpt), config.json,
@@ -114,8 +115,14 @@ def quantize_checkpoint(cp_dir, n_calib_utts, out_path=None, hf_cache_dir=None) 
 
     # --- 4. n_calib_utts override of h.calibration.num_utterances (D-07) ----
     cal_cfg = getattr(h, "calibration", AttrDict({}))
-    cal_override = AttrDict({**dict(cal_cfg), "num_utterances": int(n_calib_utts)})
-    h.calibration = cal_override
+    cal_dict = {**dict(cal_cfg), "num_utterances": int(n_calib_utts)}
+    # Optional per-utterance frame cap. MinMax calibration accumulates per-tensor
+    # activation stats over every calibration frame, so on memory-limited machines
+    # the wide structured-FC graphs (butterfly) can exceed RAM at full frame counts.
+    # Capping frames/utt bounds calibration memory while keeping all 200 utterances.
+    if frames_per_utterance is not None:
+        cal_dict["frames_per_utterance"] = int(frames_per_utterance)
+    h.calibration = AttrDict(cal_dict)
 
     # --- 5. Build reader (D-08) ---------------------------------------------
     reader = VBDCalibrationReader(streaming, h, hf_dataset)
@@ -261,9 +268,15 @@ def main():
         "--hf_cache_dir", default=None,
         help="HuggingFace datasets cache directory (default: HF_DATASETS_CACHE env var).",
     )
+    parser.add_argument(
+        "--frames_per_utterance", type=int, default=None,
+        help="Cap calibration frames per utterance (default: all). Bounds calibration "
+             "memory for wide structured-FC graphs on memory-limited machines.",
+    )
     a = parser.parse_args()
     out = quantize_checkpoint(
         a.checkpoint_dir, a.num_utterances, a.output, hf_cache_dir=a.hf_cache_dir,
+        frames_per_utterance=a.frames_per_utterance,
     )
     print(f"int8 ONNX written to: {out}")
 

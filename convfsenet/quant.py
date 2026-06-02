@@ -270,6 +270,7 @@ def quantize_checkpoint(
     out_path=None,
     hf_cache_dir=None,
     hf_dataset=None,
+    frames_per_utterance=None,
 ) -> Path:
     """Quantize a checkpoint dir's FP32 ONNX into g_best.onnx.
 
@@ -299,7 +300,11 @@ def quantize_checkpoint(
 
     # n_calib_utts overrides h.calibration.num_utterances.
     cal_cfg = getattr(h, "calibration", AttrDict({}))
-    h.calibration = AttrDict({**dict(cal_cfg), "num_utterances": int(n_calib_utts)})
+    cal_dict = {**dict(cal_cfg), "num_utterances": int(n_calib_utts)}
+    # Optional per-utterance frame cap (bounds calibration memory; see nsnet2/quant.py).
+    if frames_per_utterance is not None:
+        cal_dict["frames_per_utterance"] = int(frames_per_utterance)
+    h.calibration = AttrDict(cal_dict)
 
     fast = ConvFSENetStreamingFast(base).eval()
     onnx_view = ConvFSENetStreamingONNX(fast).eval()
@@ -340,9 +345,14 @@ def main():
         "--hf_cache_dir", default=None,
         help="HuggingFace datasets cache directory (default: HF env var).",
     )
+    parser.add_argument(
+        "--frames_per_utterance", type=int, default=None,
+        help="Cap calibration frames per utterance (default: all). Bounds calibration memory.",
+    )
     a = parser.parse_args()
     out = quantize_checkpoint(
         a.checkpoint_dir, a.num_utterances, a.output, hf_cache_dir=a.hf_cache_dir,
+        frames_per_utterance=a.frames_per_utterance,
     )
     print(f"int8 ONNX written to: {out}")
 
