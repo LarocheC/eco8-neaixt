@@ -69,7 +69,7 @@ def _add_metadata(model, key, value):
 
 
 def quantize_checkpoint(cp_dir, n_calib_utts, out_path=None, hf_cache_dir=None,
-                        frames_per_utterance=None) -> Path:
+                        frames_per_utterance=None, calibration_method=None) -> Path:
     """Static int8 quantize a checkpoint dir's FP32 ONNX into g_best.onnx.
 
     cp_dir          : directory containing g_best (PyTorch ckpt), config.json,
@@ -133,7 +133,8 @@ def quantize_checkpoint(cp_dir, n_calib_utts, out_path=None, hf_cache_dir=None,
     # getattr() on the inner block silently falls through to defaults — a real
     # bug masked by the assertion below. quant_cfg.get() works for both.
     quant_cfg = dict(h.get("quantization", {}))
-    method_str = quant_cfg.get("calibration_method", "MinMax")
+    # CLI/arg override takes precedence over the config's quantization block.
+    method_str = calibration_method or quant_cfg.get("calibration_method", "MinMax")
     if method_str not in _METHOD_MAP:
         raise ValueError(
             f"Unknown calibration_method {method_str!r}; "
@@ -273,10 +274,14 @@ def main():
         help="Cap calibration frames per utterance (default: all). Bounds calibration "
              "memory for wide structured-FC graphs on memory-limited machines.",
     )
+    parser.add_argument(
+        "--calibration_method", default=None, choices=["MinMax", "Percentile", "Entropy"],
+        help="Override the calibration method (default: config's, else MinMax).",
+    )
     a = parser.parse_args()
     out = quantize_checkpoint(
         a.checkpoint_dir, a.num_utterances, a.output, hf_cache_dir=a.hf_cache_dir,
-        frames_per_utterance=a.frames_per_utterance,
+        frames_per_utterance=a.frames_per_utterance, calibration_method=a.calibration_method,
     )
     print(f"int8 ONNX written to: {out}")
 
