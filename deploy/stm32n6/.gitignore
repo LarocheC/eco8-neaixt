@@ -1,0 +1,12 @@
+# Credentials — never commit
+cloud/.env
+
+# Generated model output (regenerate with `make generate`)
+st_ai_output/
+
+# Cloned ST application package (fetch with `make bootstrap`)
+STM32N6-GettingStarted-Audio/
+
+# Signed firmware + flashable weights (build artifacts)
+GS_Audio_N6_sign.bin
+*.stldr

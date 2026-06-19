@@ -1,0 +1,160 @@
+# STM32N6570-DK deployment (fully scripted, no STM32CubeIDE)
+
+Deploy this repo's streaming speech-enhancement ONNX models to the STM32N6570-DK
+(Neural-ART NPU + Cortex-M55) from the command line only — generate → build → sign →
+flash, plus board-free benchmarking on ST's cloud farm. Designed for agent-driven
+iteration: every step is a non-interactive `make` target.
+
+> **Deploy ConvFSENet first.** It is the only model family that compiles on the
+> Neural-ART today. Empirically, on the locally-installed `stedgeai` v3.0.0:
+>
+> | model | result |
+> |---|---|
+> | `cp_convfsenet/g_best.onnx` (pure Conv1d) | ✅ compiles (10 in / 10 out, 1.42 MB weights) |
+> | `cp_baseline/g_best.onnx` (NSNet2 dense, GRU→Gemm) | ❌ `TOOL ERROR: list index out of range` |
+> | monarch / butterfly (Einsum/Split/Pad) | ❌ `Error in computation of shapes` |
+>
+> NSNet2 needs graph surgery before it will map; the structured variants need Einsum
+> rewritten to Gemm/Conv. See `RESULTS_*` and the project memory for context.
+
+## Layout
+
+```
+deploy/stm32n6/
+  Makefile            orchestrates the whole pipeline (run `make help`)
+  config.mk           all machine-local paths + the N6 memory map (edit this)
+  scripts/
+    doctor.sh         validate toolchain paths/versions  → make doctor
+    generate.sh       stedgeai ONNX → Neural-ART C        → make generate
+    flash.sh          sign + 3× STM32_Programmer_CLI write → make flash
+  host/
+    gen_io_layout.py  emits app/model_io_layout.h from the compiled model
+  app/
+    model_io_layout.h AUTO-GENERATED I/O map (counts, dtypes, mask dequant, feedback)
+    ai_dpu_se_stream.c/.h  multi-I/O + recurrent-state DPU glue (the real C work)
+  cloud/
+    dev_cloud_bench.py     benchmark on ST's N6 board farm (no local board)
+    .env.example           MyST credential template (copy to .env, gitignored)
+```
+
+## 1. Prerequisites
+
+| tool | needed for | status on this machine |
+|---|---|---|
+| **ST Edge AI Core** (`stedgeai`) | ONNX → NPU C | ✅ installed, `v3.0.0` — **but see version caveat** |
+| **Arm GNU toolchain** | cross-compile | ⚠️ `arm-none-eabi-gcc 10.3.1`; ST validates **13.3.rel1** for Cortex-M55 |
+| **STM32CubeProgrammer 2.21+** | sign + flash | ❌ not installed (`STM32_Programmer_CLI`, `STM32_SigningTool_CLI`) |
+| **STM32N6570-DK board** | flash + run | needed for `flash` / `validate-target` |
+
+Install the two missing pieces, edit paths in `config.mk`, then:
+
+```bash
+cd deploy/stm32n6
+make doctor      # green-lights paths/versions, warns on the caveats below
+make bootstrap   # clones STM32N6-GettingStarted-Audio (the ready-made app)
+```
+
+### ⚠️ Version caveat (read before building)
+`STM32N6-GettingStarted-Audio` was generated with **STEdgeAI 4.0.0**, and its bundled
+`ll_aton` NPU middleware is version-locked to the generator. Compiling a model with our
+`stedgeai 3.0.0` and dropping it into the 4.0.0 app raises **“Possible mismatch in
+ll_aton library used.”** Fix: **update ST Edge AI Core to 4.x** (headless installer:
+`/home/claroche/stedgeai/stedgeai-linux-onlineinstaller --accept-licenses --confirm-command update`)
+so the generator and the app agree. `make doctor` flags this automatically.
+
+## 2. The pipeline
+
+```bash
+make generate        # ONNX → network.c/.h, stai_network.c/.h, int8 weights (.raw)
+make io-layout       # regenerate app/model_io_layout.h from the compiled model
+make model-install   # copy generated files into the app + objcopy weights → .hex
+make build           # arm-none-eabi-gcc, pure Makefile (no IDE)
+make sign            # add the STM32N6 boot header (dev mode, no key)
+make flash           # FSBL + signed app + weights over SWD
+# …or all at once:
+make deploy
+```
+
+- **`generate`** runs from the Neural-ART profile dir so `default@neural_art.json`
+  resolves its `stm32n6.mpool`, pins batch with `--fix-parametric-shapes "{'B':1}"`,
+  and does **not** force int8 I/O (ConvFSENet's `noisy_mag` can't be folded to int8 —
+  it stays float32; the states/mask are int8 automatically).
+- **`io-layout`** re-derives `app/model_io_layout.h` and **hard-fails** if any
+  `state_out[k]`/`state_in[k]` pair stops sharing an int8 scale (which would break the
+  memcpy feedback — see §6).
+- **`model-install`** sets the weights base to `0x70180000`; this **must** match the
+  `objcopy --change-addresses` and the `flash` address.
+
+## 3. Boot & flash reality (STM32N6 has no internal flash)
+
+The ROM bootloader loads an FSBL from **external xSPI flash** at `0x70000000`. So:
+- The board must be in **development boot mode** (BOOT1 DIP switch) before `make flash`,
+  or the external loader can't write — this is a **manual, non-scriptable** step.
+- Every image the ROM jumps to needs an **authentication header** even in dev mode
+  (`-nk` = header, no key). Production secure-boot needs real ECDSA keys + OTP fuses.
+- Flashing is 3 independent writes (FSBL `.hex`, signed app `.bin` @ `0x70100000`,
+  weights `.hex`). Weights flash **separately**, so you can push a re-quantized model
+  without rebuilding firmware.
+- After flashing, set BOOT1 back to flash-boot and power-cycle.
+
+## 4. Board-free benchmarking (recommended for iteration)
+
+Get real NPU latency/cycles/RAM/ROM from ST's cloud board farm before you even wire up
+hardware:
+
+```bash
+cp cloud/.env.example cloud/.env && $EDITOR cloud/.env   # your MyST login (gitignored)
+git clone --depth 1 https://github.com/STMicroelectronics/stm32ai-modelzoo-services  # has the client
+make bench-cloud      # uploads MODEL, benchmarks STM32N6570-DK, prints JSON
+```
+
+Credentials are the **same MyST account** you used in the web GUI; the password is read
+from `cloud/.env` (never the command line) and the client caches a JWT in `~/.stmai_token`.
+Note: the local `stedgeai validate` has **no** cloud backend — remote on-target runs go
+only through this client.
+
+## 5. On-target numerical validation (board wired over UART)
+
+```bash
+make validate-target   # stedgeai validate --mode target -d serial:921600
+```
+`--mode host` is **not** supported for Neural-ART, so accuracy validation needs the board.
+
+## 6. The one piece of real integration: `ai_dpu_se_stream.c`
+
+The stock audio app's `ai_dpu.c` asserts a single input and single output. Our models
+have 10 of each with recurrent state, so this module replaces that glue. Verified facts
+it relies on (all from the compiled `g_best.onnx`, see `model_io_layout.h`):
+
+- **I/O order** = ONNX order: index 0 = `noisy_mag`(float32, 257) / `mask`(int8, 257);
+  indices 1..9 = state tensors. Feedback is simply `out[k] → in[k]`.
+- **State feedback is a raw `memcpy`**: each `state_out[k]` shares an *identical* int8
+  scale + zero-point (zp = −128) with `state_in[k]` — verified, and re-checked on every
+  `make io-layout`. No per-frame requantization.
+- **Zero-state = `memset(0x80)`**, not `0x00` (int8 code for float 0.0 when zp = −128).
+- **Mask dequant** = `(q − (−128)) · 0.003922` → a `[0,1]` mask.
+- **Cache discipline**: clean D-cache after writing NPU inputs, invalidate before reading
+  outputs (top cause of garbage NPU output). Uses the package's `mcu_cache_*` helpers.
+
+Wire it into the app's audio loop:
+```c
+se_stream_init();                              // once at boot
+/* per frame, after the M55 STFT produces a 257-bin magnitude: */
+se_stream_process_frame(mag257, mask257);      // float in → float mask out
+/* then apply mask to the saved complex spectrum and iSTFT/overlap-add on the M55 */
+```
+STFT/iSTFT stay on the M55 (CMSIS-DSP `arm_rfft_fast_f32`, wrapped by the package's
+`STM32_AI_AudioPreprocessing_Library`); the NPU only predicts the mask.
+
+**Zero-copy option:** to drop the state memcpy, regenerate with
+`--no-inputs-allocation --no-outputs-allocation` and alias `out[k]`/`in[k]` to the same
+32-byte-aligned RAM via `stai_network_set_inputs/outputs` (not compatible with `--reloc`).
+
+## 7. Performance note
+
+ConvFSENet compiles to **88 epochs: 30 on the NPU, 27 hybrid, 31 in software on the M55**
+— the SW epochs are the streaming FIFO plumbing (`Slice/Gather/Dequantize/Quantize`) plus
+the float boundary, so per-frame latency is M55-bound, not NPU-bound. Activations are
+~42 KiB (on-chip SRAM); weights 1.42 MiB (external xSPI). Measure real latency with
+`make bench-cloud` or `make validate-target` before optimizing; the lever is rethinking
+how the FIFO state is expressed in the ONNX export so those ops stay int8 / map to HW.
