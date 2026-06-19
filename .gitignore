@@ -41,3 +41,6 @@ sym_shape_infer_temp.onnx
 
 # STM deployment artifacts
 deploy/stm32n6/cloud/.env
+
+# STM32CubeProgrammer installer download
+SetupSTM32CubeProgrammer_linux_64.zip
