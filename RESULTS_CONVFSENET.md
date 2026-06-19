@@ -94,6 +94,20 @@ the validation firmware is a volatile RAM image; and the headline
 on-device factor. See `deploy/stm32n6/` for the generate → build → flash
 → gdb-load → validate procedure.
 
+**Optimization — weight locality (npuRAM vs external flash).** The
+`allmems` profile parks all 1.44 MB of weights in external octoFlash, and
+the counters show the NPU is memory-bound: it re-reads the full weight set
+from flash every frame (201 MB/s avg) at only ~27% core compute
+utilization. The model is small enough to fit entirely on-chip, so
+regenerating with the `n6-noextmem` profile packs weights into internal
+npuRAM3/4/5/6. On-board latency then drops **7.14 → 4.40 ms/frame (1.62×;
+RTF 0.45 → 0.275)**, NPU core time 3.73 → 1.26 ms, and core compute
+utilization rises to **81%** — the NPU flips from memory-bound to
+compute-bound. The remaining ~3.1 ms is the Cortex-M55 software share (the
+per-frame FIFO state + int8 quant boundary). Caveat: in this layout the
+weights load over the debugger (gdb) rather than being flashed; a
+standalone power-on deploy needs an on-chip-resident boot layout.
+
 ## Low-bit weight PTQ study
 
 `convfsenet/eval_ptq.py` sweeps `(w_bits, a_bits)` via the eager
