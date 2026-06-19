@@ -41,26 +41,51 @@ deploy/stm32n6/
 
 | tool | needed for | status on this machine |
 |---|---|---|
-| **ST Edge AI Core** (`stedgeai`) | ONNX → NPU C | ✅ installed, `v3.0.0` — **but see version caveat** |
-| **Arm GNU toolchain** | cross-compile | ⚠️ `arm-none-eabi-gcc 10.3.1`; ST validates **13.3.rel1** for Cortex-M55 |
-| **STM32CubeProgrammer 2.21+** | sign + flash | ❌ not installed (`STM32_Programmer_CLI`, `STM32_SigningTool_CLI`) |
+| **ST Edge AI Core** (`stedgeai`) | ONNX → NPU C | ✅ `v4.0.1` at `install/4.0` (matches the app's ll_aton) |
+| **Arm GNU toolchain** | cross-compile | ✅ `13.3.Rel1` at `~/toolchains/arm-gnu-toolchain-13.3.rel1-...` |
+| **STM32CubeProgrammer 2.21+** | sign + flash | ❌ to install in WSL (see "WSL flashing" below) |
 | **STM32N6570-DK board** | flash + run | needed for `flash` / `validate-target` |
 
-Install the two missing pieces, edit paths in `config.mk`, then:
+`make doctor` is green for stedgeai + gcc; install CubeProgrammer, then:
 
 ```bash
 cd deploy/stm32n6
-make doctor      # green-lights paths/versions, warns on the caveats below
+make doctor      # confirms paths/versions
 make bootstrap   # clones STM32N6-GettingStarted-Audio (the ready-made app)
 ```
 
-### ⚠️ Version caveat (read before building)
-`STM32N6-GettingStarted-Audio` was generated with **STEdgeAI 4.0.0**, and its bundled
-`ll_aton` NPU middleware is version-locked to the generator. Compiling a model with our
-`stedgeai 3.0.0` and dropping it into the 4.0.0 app raises **“Possible mismatch in
-ll_aton library used.”** Fix: **update ST Edge AI Core to 4.x** (headless installer:
-`/home/claroche/stedgeai/stedgeai-linux-onlineinstaller --accept-licenses --confirm-command update`)
-so the generator and the app agree. `make doctor` flags this automatically.
+### ⚠️ Version caveat (largely resolved)
+`STM32N6-GettingStarted-Audio`'s bundled `ll_aton` NPU middleware is version-locked to
+the `stedgeai` that generated it (**4.0.0**). We installed **4.0.1** (a patch off) so the
+generator and app agree on the 4.0 major/minor. If `make build` still warns *"Possible
+mismatch in ll_aton library used"*, refresh the app's `ll_aton` per ST's "update project
+with a new version of ST Edge AI Core" procedure (or `git checkout` an app tag built with
+4.0.1). The old 3.0 install remains at `install/3.0` if you ever need to compare.
+
+### WSL flashing (usbipd path — chosen)
+WSL2 can't see USB devices natively, so the ST-LINK on the STM32N6570-DK is passed in
+from Windows with **usbipd-win**:
+
+```powershell
+# On the Windows host (PowerShell as Administrator), once:
+winget install usbipd
+usbipd list                                   # find the ST-Link bus id
+usbipd bind   --busid <id>                    # one-time
+# each session — --auto-attach survives the re-enumeration the flasher triggers on reset:
+usbipd attach --wsl --busid <id> --auto-attach
+```
+```bash
+# In WSL, once: usbip client + let the attached ST-LINK be seen
+sudo apt install -y linux-tools-generic usbutils hwdata
+lsusb | grep -i st-link                        # confirm it's visible
+# install CubeProgrammer's udev rules for non-root access (ships in the package):
+sudo cp ~/STMicroelectronics/STM32Cube/STM32CubeProgrammer/Drivers/rules/*.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+Caveat: the STM32N6 ST-LINK re-enumerates across the reset each flash triggers, which can
+drop the usbip attachment mid-`flash`; `--auto-attach` mitigates it but expect the
+occasional re-attach. config.mk's `PROG_CLI`/`SIGN_CLI`/`EXT_LOADER` already point at the
+default WSL install path (`~/STMicroelectronics/STM32Cube/STM32CubeProgrammer/...`).
 
 ## 2. The pipeline
 
