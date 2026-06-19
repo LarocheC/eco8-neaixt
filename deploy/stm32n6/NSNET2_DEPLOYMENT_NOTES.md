@@ -11,15 +11,17 @@ TL;DR:
 
 | model | int8 PESQ | int8 weights | NPU result |
 |---|---:|---:|---|
+| NSNet2 `monarch_8` (sparse) | 2.826 | 0.37 MB on-chip | ✅ **2.89 ms/frame, RTF 0.18** (real-time, fastest — after the conv-native re-export, §4) |
 | ConvFSENet (conv) | 2.911 | 1.40 MB | ✅ **4.40 ms/frame, RTF 0.275** (real-time) |
 | NSNet2 dense (`baseline`) | 2.833 | 2.70 MB | ✅ **22.94 ms/frame, RTF 1.43** (deployed, *not* real-time) |
-| NSNet2 `monarch_8` (sparse) | 2.826 | 1.47 MB | ⛔ compiler can't map the monarch block layout (see §3) |
-| other monarch / butterfly | varies | 0.48–9.5 MB | ⛔ same layout blocker; butterfly also loses int8 quality |
+| other monarch / butterfly | varies | 0.19–9.5 MB | see §2 — bigger ones don't fit on-chip; butterfly loses int8 quality |
 
-The one-line story: **the Neural-ART is a 4-D convolution engine.** Models
-that are natively convolutional map cleanly; the FC/GRU/structured-matrix
-models need their graph reshaped into that world first, and how hard that is
-ranges from "a re-quantize flag" (dense) to "re-export the model" (monarch).
+The one-line story: **the Neural-ART is a small-tensor matmul/conv engine that
+wants its weights in on-chip RAM.** ConvFSENet and the *sparse* `monarch_8` fit
+and run real-time; the *dense* GRU baseline runs but its 2.70 MB weights
+overflow on-chip RAM so it stays memory-bound. Getting the FC/GRU/structured
+models to map ranges from "a re-quantize flag" (dense, §1) to "re-export the
+model into the right op vocabulary" (monarch, §4).
 
 ---
 
@@ -162,7 +164,7 @@ compression), small enough to fit on-chip and therefore the only NSNet2 that
 
 ---
 
-## 3. Why `monarch_8` still won't compile (the monarch block layout)
+## 3. Why the stock `monarch_8` doesn't compile — and the re-export that fixes it
 
 `monarch_8`'s structured FC/GRU projections are exported as a per-block
 batched matmul:
@@ -178,55 +180,73 @@ fails early:
 TOOL ERROR: Error in computation of shapes
 ```
 
-Progress made (all reproducible):
+What the stock export does NOT support, and what does:
 
-1. **`Einsum` itself is lowerable.** `bkp,kqp->bkq` is exactly a **grouped
-   1×1 convolution** (`groups=8`): reshape `A→[1,k·p,1,1]`, weight
-   `[k·q, p, 1, 1]`, `Conv2d(groups=8, kernel=[1,1])`, reshape back. We do
-   this mechanically for all 8 Einsums.
-2. **The dynamic-shape scaffolding folds away.** The export emits a
-   `Shape`/`Gather`/`ConstantOfShape`/`Slice`/`Pad`/`Reshape` subgraph to pad
-   the input to a multiple of the block count. Fixing `B=1` and constant-folding
-   with ORT (`ORT_ENABLE_EXTENDED`) collapses all of it to static tensors.
-3. **But the residual layout still breaks the compiler.** After (1)+(2) the
-   graph is clean and statically shaped, yet it crashes with
-   `Error in computation of shapes` (full model) / `INTERNAL ERROR: Unknown
-   dimensions: H` (isolated block). The cause is **rank/layout mixing**: the
-   monarch graph carries rank-2 FC activations (`[1,257]`, `[1,400]`,
-   `[1,1200]`) and rank-changing `Pad`/`Reshape` ops feeding the block matmul.
-   The Neural-ART compiler models tensors as 4-D `NCHW` and cannot assign a
-   consistent `H`/`W` to the rank-2 / padded / reshaped intermediates.
+1. **`Einsum` is lowerable but not the real issue.** `bkp,kqp->bkq` is a
+   grouped 1×1 conv; lowering it (and constant-folding the dynamic-shape
+   `Pad`/`Reshape` scaffolding with `B=1` + ORT `ORT_ENABLE_EXTENDED`) gets a
+   clean, statically-shaped graph — which *still* crashes
+   (`Error in computation of shapes` / `Unknown dimensions: H`).
+2. **A 4-D grouped-conv re-export compiles in FP32 but not int8.** Rebuilding
+   the model with everything as `Conv2d` on `[1,C,1,1]` (grouped for the
+   blocks, dense for the boundary layers, channel `Slice` for the trims, **no
+   `Pad`**) compiles in FP32. But int8 hits Neural-ART HW-lowering assertions
+   (`lower_arith_set_in_batch`, `conf_CONV_IN_ACTIVATION` — batch-dim asserts)
+   on the convs that consume the GRU's elementwise outputs. An isolated grouped
+   1×1 int8 conv maps to HW fine; chained through the gate math on degenerate
+   `1×1` spatial, the conv-DMA path breaks.
 
-**Conclusion.** The blocker is not the `Einsum` (that maps to grouped conv) and
-not the dynamic shapes (those fold). It is that the monarch model lives in a
-**rank-2 FC + block-reshape world**, and the Neural-ART wants a **4-D
-conv-native** world. Making `monarch_8` deployable means **re-exporting the
-whole model conv-native** — every FC/projection as a 1×1 conv on a
-`[1, C, 1, 1]` tensor, the block structure as grouped convs, the GRU gates as
-elementwise conv-domain ops, and **no rank-2 intermediates or `Pad`/block
-`Reshape`**. That is model-export surgery (in `nsnet2/` + `torch_structured`),
-not an ONNX patch.
+### The fix that works: rank-2 `MatMul`, the dense-baseline op vocabulary (§1)
 
-This is the same wall the dense baseline hit in a milder form — there the FC
-reshapes landed as the 21 SW (M55) epochs rather than crashing. The conv model
-(ConvFSENet) never hits it because it is 4-D throughout.
+The dense baseline compiles because it is **rank-2 `MatMul` + `Add` on
+`[1,N]`** — no `Pad`, no `Einsum`, no grouped conv. So re-express each monarch
+block-diagonal projection the same way: **per-block `Slice` + `MatMul` +
+`Concat`** (the block-diagonal structure made explicit), states as two flat
+`[1,400]` tensors (no `[2,B,400]`+`Gather`), and the gate rewritten
+`(1-z)*n + z*h == n + z*(h-n)` to drop the scalar-constant `Sub` that trips the
+int8 elementwise HW lowering. This is exactly the op set the compiler already
+maps to HW.
+
+`deploy/stm32n6/host/export_monarch8_npu.py` does this end-to-end: builds the
+rank-2 model from the trained `cp_monarch_8` weights (parity ~5e-7 vs the
+trained streaming model), exports FP32, then int8-quantizes with the same VBD
+recipe + `skip_optimization=True`.
+
+**Result (int8, `n6-noextmem`, weights on-chip):**
+
+| metric | value |
+| --- | ---: |
+| int8 ONNX | 0.578 MB (weights **0.37 MB in npuRAM5, on-chip**) |
+| epochs | 134 (**76 HW / 30 SW**) |
+| MACC / frame | 387,740 |
+| **on-target latency** | **2.891 ms/frame** (min 2.885 / max 2.910) |
+| frame period (hop 256 @ 16 kHz) | 16 ms |
+| **RTF** | **0.18 — real-time, ~5.5× headroom (fastest of the three models)** |
+| on-target cosine vs FP32 (mask / h0 / h1) | 0.99994 / 0.99993 / 0.99995 |
+| equivalence to stock `monarch_8` int8 (host) | mask cos 0.9990 → same 2.826 PESQ |
+
+Unlike the dense baseline, `stedgeai validate --mode target` **works** here (no
+GRU `Gemm` fusion to re-introduce), so latency + on-target cross-accuracy come
+straight from `validate`; the per-layer `npu_profiler` also works but is slow
+over serial for a 134-node graph.
 
 ---
 
-## 4. Recommendations / next steps
+## 5. Status / next steps
 
-- **Dense NSNet2** is deployed and measured. Keep it as the "recurrent
-  baseline on real silicon" data point: it runs, but at RTF 1.43 it misses
-  real-time by ~1.4× because its weights overflow the NPU's fast RAM — a clean
-  argument for the convolutional family on edge NPUs.
-- **If a real-time NSNet2 is wanted**, `monarch_8` is the target (1.47 MB fits
-  on-chip), but it needs a **conv-native re-export** so the monarch blocks
-  become grouped convs end-to-end with no rank-2/`Pad`/`Reshape` plumbing.
-  Scoped, but it's an export-pipeline change with a parity + PESQ gate, best
-  done as its own effort.
-- **Wiring the fix into the pipeline (optional):** expose
-  `skip_optimization=True` as a deploy-only flag on
-  `nsnet2.quant.quantize_checkpoint` (e.g. `--deploy-npu`) so the un-fused int8
-  artifact is reproducible without the one-off script. Left out for now to
-  avoid changing the default quantization path that the `RESULTS_NSNET2.md`
-  numbers were produced with.
+- **Three models now run on the N6**, and the sparse `monarch_8` is the fastest
+  and most accurate-on-target: **2.89 ms, RTF 0.18**, weights fully on-chip.
+  The arc is the headline result — *structured sparsity is what lets a
+  recurrent model hit real-time on this NPU*: dense overflows fast RAM (RTF
+  1.43), the 7.7×-smaller monarch_8 fits and runs 7.9× faster at the same int8
+  PESQ.
+- **PESQ of the deployed artifact:** it is numerically the stock `monarch_8`
+  int8 (host cos 0.9990), so it carries the published 2.826. A from-scratch
+  PESQ run on the re-exported int8 over the full test split would make that
+  airtight (not yet done).
+- **Productionizing:** the export script targets `monarch_8` specifically
+  (hard-codes 2 layers / hidden 400 / 8 blocks). Generalizing `BlockLin` to any
+  monarch/`nblocks` config would let `wide_monarch` / `monarch_full` deploy too
+  (both hold int8 PESQ; `monarch_full` is 0.70 M so it also fits on-chip).
+- **Wiring `skip_optimization` into `nsnet2.quant`** as a deploy flag remains a
+  small optional cleanup (see §1).
