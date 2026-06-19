@@ -4,11 +4,12 @@
 
 # ---------------------------------------------------------------------------
 # ST Edge AI Core — the ONNX -> Neural-ART model compiler.
-# This machine has v3.0.0 installed (confirmed). See README "Version caveat":
-# STM32N6-GettingStarted-Audio was generated with STEdgeAI 4.0.0; mixing major
-# versions raises "Possible mismatch in ll_aton library used" at app build time.
+# v4.0.1 installed (alongside the old 3.0) to match STM32N6-GettingStarted-Audio's
+# ll_aton middleware. The app was generated with 4.0.0 and we have 4.0.1 (a patch off):
+# if `make build` still warns "Possible mismatch in ll_aton library used", refresh the
+# app's bundled ll_aton per ST's "update project with a new ST Edge AI Core" procedure.
 # ---------------------------------------------------------------------------
-STEDGEAI_DIR    ?= /home/claroche/stedgeai/install/3.0
+STEDGEAI_DIR    ?= /home/claroche/stedgeai/install/4.0
 STEDGEAI        ?= $(STEDGEAI_DIR)/Utilities/linux/stedgeai
 # Dir holding neural_art.json + stm32n6.mpool (the bundled Neural-ART profile).
 NPU_PROFILE_DIR ?= $(STEDGEAI_DIR)/Utilities/linux/targets/stm32/resources/NPU/STM32N6xx
@@ -28,7 +29,7 @@ EXT_LOADER      ?= $(CUBEPROG_DIR)/bin/ExternalLoader/MX66UW1G45G_STM32N6570-DK.
 # -mcmse -mfpu=fpv5-d16). This machine has 10.3.1, which predates good M55
 # support — install Arm GNU Toolchain 13.3.Rel1 and point GCC_PATH at its bin/.
 # ---------------------------------------------------------------------------
-GCC_PATH        ?= /usr/bin
+GCC_PATH        ?= $(HOME)/toolchains/arm-gnu-toolchain-13.3.rel1-x86_64-arm-none-eabi/bin
 
 # ---------------------------------------------------------------------------
 # ST ready-made application (cloned by `make bootstrap`). Ships the Speech
