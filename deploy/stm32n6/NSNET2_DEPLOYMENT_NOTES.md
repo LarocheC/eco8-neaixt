@@ -11,10 +11,11 @@ TL;DR:
 
 | model | int8 PESQ | int8 weights | NPU result |
 |---|---:|---:|---|
-| NSNet2 `monarch_8` (sparse) | 2.826 | 0.37 MB on-chip | ✅ **2.89 ms/frame, RTF 0.18** (real-time, fastest — after the conv-native re-export, §4) |
+| NSNet2 `monarch_full` (sparse) | 2.848 | 0.72 MB on-chip | ✅ **2.13 ms/frame, RTF 0.13** (real-time, fastest *and* best PESQ — §3) |
+| NSNet2 `monarch_8` (sparse) | 2.826 | 0.37 MB on-chip | ✅ **2.89 ms/frame, RTF 0.18** (real-time — §3) |
 | ConvFSENet (conv) | 2.911 | 1.40 MB | ✅ **4.40 ms/frame, RTF 0.275** (real-time) |
 | NSNet2 dense (`baseline`) | 2.833 | 2.70 MB | ✅ **22.94 ms/frame, RTF 1.43** (deployed, *not* real-time) |
-| other monarch / butterfly | varies | 0.19–9.5 MB | see §2 — bigger ones don't fit on-chip; butterfly loses int8 quality |
+| other monarch / butterfly | varies | 0.19–9.5 MB | see §2 — `wide_monarch` too big for on-chip; butterfly loses int8 quality |
 
 The one-line story: **the Neural-ART is a small-tensor matmul/conv engine that
 wants its weights in on-chip RAM.** ConvFSENet and the *sparse* `monarch_8` fit
@@ -207,46 +208,48 @@ block-diagonal projection the same way: **per-block `Slice` + `MatMul` +
 int8 elementwise HW lowering. This is exactly the op set the compiler already
 maps to HW.
 
-`deploy/stm32n6/host/export_monarch8_npu.py` does this end-to-end: builds the
+`deploy/stm32n6/host/export_monarch_npu.py` does this end-to-end: builds the
 rank-2 model from the trained `cp_monarch_8` weights (parity ~5e-7 vs the
 trained streaming model), exports FP32, then int8-quantizes with the same VBD
 recipe + `skip_optimization=True`.
 
-**Result (int8, `n6-noextmem`, weights on-chip):**
+**Result (int8, `n6-noextmem`, weights on-chip) — two variants measured:**
 
-| metric | value |
-| --- | ---: |
-| int8 ONNX | 0.578 MB (weights **0.37 MB in npuRAM5, on-chip**) |
-| epochs | 134 (**76 HW / 30 SW**) |
-| MACC / frame | 387,740 |
-| **on-target latency** | **2.891 ms/frame** (min 2.885 / max 2.910) |
-| frame period (hop 256 @ 16 kHz) | 16 ms |
-| **RTF** | **0.18 — real-time, ~5.5× headroom (fastest of the three models)** |
-| on-target cosine vs FP32 (mask / h0 / h1) | 0.99994 / 0.99993 / 0.99995 |
-| equivalence to stock `monarch_8` int8 (host) | mask cos 0.9990 → same 2.826 PESQ |
+| metric | `monarch_8` (nblocks 8) | `monarch_full` (nblocks 4) |
+| --- | ---: | ---: |
+| int8 ONNX | 0.578 MB (0.37 MB on-chip) | 0.859 MB (0.72 MB on-chip) |
+| epochs | 134 (76 HW / 30 SW) | 88 (53 HW / 18 SW) |
+| MACC / frame | 387,740 | 912,779 |
+| **on-target latency** | 2.891 ms (2.885/2.910) | **2.128 ms (2.123/2.146)** |
+| **RTF** (16 ms frame) | 0.18 | **0.13** |
+| on-target cos (mask / h0 / h1) | 0.99994 / 0.99993 / 0.99995 | 0.99979 / 0.99997 / 0.99990 |
+| host equiv. to stock int8 | cos 0.9990 → 2.826 PESQ | cos 0.9995 → 2.848 PESQ |
 
-Unlike the dense baseline, `stedgeai validate --mode target` **works** here (no
-GRU `Gemm` fusion to re-introduce), so latency + on-target cross-accuracy come
-straight from `validate`; the per-layer `npu_profiler` also works but is slow
-over serial for a 134-node graph.
+`monarch_full` is **fastest and best-quality** despite being larger: nblocks=4
+means fewer, bigger blocks → fewer/larger matmuls that map more efficiently to
+the NPU (88 epochs vs 134). Both fit on-chip and clear real-time comfortably.
+
+Unlike the dense baseline, `stedgeai validate --mode target` **works** for the
+monarch models (no GRU `Gemm` fusion to re-introduce), so latency + on-target
+cross-accuracy come straight from `validate`; `npu_profiler` PER_LAYER also
+works but is slow over serial for a 100+-node graph.
 
 ---
 
 ## 5. Status / next steps
 
-- **Three models now run on the N6**, and the sparse `monarch_8` is the fastest
-  and most accurate-on-target: **2.89 ms, RTF 0.18**, weights fully on-chip.
-  The arc is the headline result — *structured sparsity is what lets a
-  recurrent model hit real-time on this NPU*: dense overflows fast RAM (RTF
-  1.43), the 7.7×-smaller monarch_8 fits and runs 7.9× faster at the same int8
-  PESQ.
-- **PESQ of the deployed artifact:** it is numerically the stock `monarch_8`
-  int8 (host cos 0.9990), so it carries the published 2.826. A from-scratch
-  PESQ run on the re-exported int8 over the full test split would make that
-  airtight (not yet done).
-- **Productionizing:** the export script targets `monarch_8` specifically
-  (hard-codes 2 layers / hidden 400 / 8 blocks). Generalizing `BlockLin` to any
-  monarch/`nblocks` config would let `wide_monarch` / `monarch_full` deploy too
-  (both hold int8 PESQ; `monarch_full` is 0.70 M so it also fits on-chip).
+- **Four models now run on the N6.** The sparse monarch variants dominate:
+  `monarch_full` **2.13 ms / RTF 0.13** (best PESQ too, 2.848) and `monarch_8`
+  2.89 ms / RTF 0.18, both weights-on-chip, vs ConvFSENet 4.40 ms and dense
+  22.94 ms (RTF 1.43, memory-bound). *Structured sparsity is what lets a
+  recurrent model hit real-time on this NPU* — it fits the weights in fast RAM.
+- **Reproducible & general:** `host/export_monarch_npu.py` deploys any
+  fully-monarch config (dims read from the checkpoint; `monarch_8` and
+  `monarch_full` both verified end-to-end on the board). `wide_monarch` holds
+  int8 PESQ but at 9.5 MB int8 it would not fit on-chip; `monarch_fc` has a
+  dense GRU and is rejected by the exporter.
+- **PESQ of the deployed artifacts:** each is numerically the stock int8 (host
+  mask cos 0.999), so they carry the published PESQ. A from-scratch full-split
+  PESQ run on the re-exported int8 would make that airtight (not yet done).
 - **Wiring `skip_optimization` into `nsnet2.quant`** as a deploy flag remains a
   small optional cleanup (see §1).

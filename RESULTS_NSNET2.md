@@ -44,7 +44,8 @@ STM32CubeIDE). On-target latency is per streaming frame (hop 256 @
 
 | model (int8)            | int8 PESQ | weights | on-chip? | latency/frame |     RTF | on-target cos |
 | ----------------------- | --------: | ------: | :------: | ------------: | ------: | ------------: |
-| **`monarch_8`** (sparse)|     2.826 | 0.37 MB |    ✅    |  **2.89 ms**  |**0.18** |      0.99994  |
+| **`monarch_full`** (sparse)| **2.848** | 0.72 MB |  ✅    |  **2.13 ms**  |**0.13** |      0.99979  |
+| `monarch_8` (sparse)    |     2.826 | 0.37 MB |    ✅    |     2.89 ms   |   0.18  |      0.99994  |
 | ConvFSENet (conv)       |     2.911 | 1.40 MB |    ✅    |     4.40 ms   |   0.275 |      0.990    |
 | `baseline` (dense GRU)  |     2.833 | 2.70 MB |    ✗     |    22.94 ms   |   1.43  |      0.9946   |
 
@@ -52,9 +53,12 @@ STM32CubeIDE). On-target latency is per streaming frame (hop 256 @
 this NPU.** The Neural-ART runs fastest when weights live in on-chip
 npuRAM. The dense GRU baseline's 2.70 MB int8 weights overflow it, so it
 streams them from external octoFlash every frame and lands at RTF 1.43 —
-*not* real-time. `monarch_8` is 7.7× smaller (0.37 MB), fits entirely
-on-chip, and runs **7.9× faster than dense and 1.5× faster than
-ConvFSENet** — at essentially the same int8 PESQ as the dense baseline.
+*not* real-time. The sparse monarch variants are 4–8× smaller, fit
+entirely on-chip, and dominate: **`monarch_full` is the best of all four**
+— fastest (2.13 ms, RTF 0.13 — **11× faster than dense, 2× faster than
+ConvFSENet**) *and* highest int8 PESQ (2.848). `monarch_8` (more, smaller
+blocks: nblocks 8 vs 4) is a touch slower at 2.89 ms; fewer larger blocks
+map more efficiently to the NPU (88 epochs vs 134).
 
 Two deployment subtleties, both detailed in
 [`deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md`](deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md):
@@ -64,23 +68,24 @@ Two deployment subtleties, both detailed in
   Neural-ART int8 lowering can't index. Re-quantizing with
   `quant_pre_process(skip_optimization=True)` keeps them separate; the
   result is numerically identical to the published int8.
-* **`monarch_8`** doesn't compile as-exported either — the monarch
+* **The monarch variants** don't compile as-exported either — the monarch
   block-matmul (`Einsum` + `Pad` + block reshapes) defeats the compiler's
   shape engine, and a 4-D grouped-conv re-export compiles in FP32 but
   hits int8 HW-lowering batch-dim asserts. The fix is to re-express the
   blocks in the *rank-2 `MatMul`* op vocabulary that the dense baseline
   already maps to HW: per-block `Slice` + `MatMul` + `Concat`, flat
   states, and the gate rewritten `(1-z)·n + z·h = n + z·(h-n)`.
-  `deploy/stm32n6/host/export_monarch8_npu.py` does this from the trained
-  checkpoint (parity ~5e-7), then int8-quantizes with the same recipe.
-  The deployed artifact is the stock `monarch_8` int8 to mask cosine
-  0.9990, so it carries the 2.826 PESQ above.
+  `deploy/stm32n6/host/export_monarch_npu.py` does this from the trained
+  checkpoint (parity ~5e-7, any fully-monarch config — dims read from the
+  checkpoint), then int8-quantizes with the same recipe. Each deployed
+  artifact matches its stock int8 to mask cosine 0.999, so it carries the
+  published PESQ.
 
 Caveats: on-target cosine is vs the FP32 ONNX reference over a 10-sample
 `stedgeai validate` run; the validation firmware is a volatile RAM image;
-and these are single-run latencies. `wide_monarch` / `monarch_full` also
-hold int8 PESQ and `monarch_full` (0.70 M) would fit on-chip too — the
-export script currently hard-codes `monarch_8`'s shape.
+and these are single-run latencies. `wide_monarch` also holds int8 PESQ
+but at 2.36 M / 9.5 MB int8 it would not fit on-chip; the export script
+handles any fully-monarch config (`monarch_fc`'s dense GRU is rejected).
 
 ### Int8 quantization findings
 
