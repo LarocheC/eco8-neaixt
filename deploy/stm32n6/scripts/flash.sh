@@ -19,7 +19,8 @@ CONN=(-c port=SWD mode=HOTPLUG -el "$EXT_LOADER" -hardRst)
 # 1. Sign the app binary (skip if APP_SIGNED already provided pre-signed).
 if [[ -n "${APP_BIN}" && -f "${APP_BIN}" ]]; then
   echo "[flash] signing $APP_BIN -> $APP_SIGNED"
-  "${SIGN_CLI:?set SIGN_CLI to sign}" -bin "$APP_BIN" -nk -t ssbl -hv 2.3 -o "$APP_SIGNED"
+  # -align is mandatory on STM32CubeProgrammer 2.21+ (incl. 2.22.0): no more auto-pad to 0x400.
+  "${SIGN_CLI:?set SIGN_CLI to sign}" -bin "$APP_BIN" -nk -t ssbl -hv 2.3 -align -o "$APP_SIGNED"
 fi
 test -f "$APP_SIGNED" || { echo "ERROR: signed app $APP_SIGNED not found"; exit 1; }
 
