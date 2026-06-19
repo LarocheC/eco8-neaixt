@@ -9,16 +9,18 @@ iteration: every step is a non-interactive `make` target.
 >
 > | model | result |
 > |---|---|
-> | `monarch_8` sparse NSNet2 (re-exported) | ✅ **2.89 ms/frame, RTF 0.18** — real-time, fastest, weights on-chip |
+> | `monarch_full` sparse NSNet2 (re-exported) | ✅ **2.13 ms/frame, RTF 0.13** — fastest *and* best PESQ, weights on-chip |
+> | `monarch_8` sparse NSNet2 (re-exported) | ✅ **2.89 ms/frame, RTF 0.18** — real-time, weights on-chip |
 > | `cp_convfsenet/g_best.onnx` (pure Conv1d) | ✅ **4.40 ms/frame, RTF 0.275** (real-time) |
 > | `cp_baseline/g_best.onnx` (NSNet2 dense) | ✅ **22.94 ms/frame, RTF 1.43** — deployable after a re-quant, but *not* real-time |
 >
-> All three speech-enhancement models now run on the N6. The sparse `monarch_8` is the
-> fastest (its 0.37 MB weights fit on-chip), then ConvFSENet; the dense GRU baseline runs
+> All four speech-enhancement models now run on the N6. The sparse monarch variants are
+> fastest (their <1 MB weights fit on-chip), then ConvFSENet; the dense GRU baseline runs
 > but is memory-bound (2.70 MB weights overflow on-chip RAM → RTF 1.43). NSNet2 dense needs
-> a `skip_optimization` re-quant to compile; `monarch_8` needs a conv-native rank-2
-> re-export (`host/export_monarch8_npu.py`). Full analysis — root causes, the fixes, the
-> deployed numbers, variant selection: **[NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md)**.
+> a `skip_optimization` re-quant to compile; the monarch variants need a conv-native rank-2
+> re-export (`host/export_monarch_npu.py`, any fully-monarch config). Full analysis — root
+> causes, the fixes, the deployed numbers, variant selection:
+> **[NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md)**.
 
 ## Layout
 

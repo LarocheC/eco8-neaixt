@@ -1,13 +1,20 @@
-"""Export the trained monarch_8 NSNet2 into an NPU-deployable int8 ONNX.
+"""Export a trained fully-monarch NSNet2 into an NPU-deployable int8 ONNX.
+
+Works for any NSNet2 config whose `linear` AND `gru` backends are both
+`monarch` (e.g. `monarch_8` nblocks=8, `monarch_full` nblocks=4,
+`wide_monarch`) — the architecture dims (n_freq, hidden, num GRU layers, block
+count) are all read from the checkpoint, nothing is hard-coded. Configs with a
+dense GRU (`monarch_fc`) are rejected: their GRU has no block structure to
+re-express here.
 
 Why this exists
 ---------------
-The stock monarch ONNX (`cp_monarch_8/g_best.onnx`) does NOT compile for the
-STM32N6 Neural-ART: the monarch block-matmul exports as `Einsum 'bkp,kqp->bkq'`
-wrapped in dynamic-shape `Pad`/`Reshape` plumbing that the compiler's shape
-engine rejects (`Error in computation of shapes`). Lowering the `Einsum` and
-constant-folding the shapes is not enough — the residual rank-2/`Pad` layout
-still fails.
+The stock monarch ONNX (e.g. `cp_monarch_8/g_best.onnx`) does NOT compile for
+the STM32N6 Neural-ART: the monarch block-matmul exports as
+`Einsum 'bkp,kqp->bkq'` wrapped in dynamic-shape `Pad`/`Reshape` plumbing that
+the compiler's shape engine rejects (`Error in computation of shapes`).
+Lowering the `Einsum` and constant-folding the shapes is not enough — the
+residual rank-2/`Pad` layout still fails.
 
 What works (this script)
 ------------------------
@@ -31,8 +38,8 @@ does not re-fuse anything (see NSNET2_DEPLOYMENT_NOTES.md).
 Usage
 -----
     python deploy/stm32n6/host/export_monarch8_npu.py \
-        --checkpoint_dir cp_monarch_8 --num_utterances 200 \
-        --out_fp32 /tmp/monarch8_npu_fp32.onnx --out_int8 /tmp/monarch8_npu_int8.onnx
+        --checkpoint_dir cp_monarch_full --num_utterances 200 \
+        --out_fp32 /tmp/monarch_npu_fp32.onnx --out_int8 /tmp/monarch_npu_int8.onnx
 
 Then generate/load/profile per ONBOARD_MEASUREMENT.md, e.g.:
     stedgeai generate -m <out_int8> --target stm32n6 \
@@ -46,7 +53,6 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-import onnx
 import torch
 import torch.nn as nn
 from onnxruntime.quantization import (CalibrationDataReader, CalibrationMethod,
@@ -87,93 +93,113 @@ class BlockLin(nn.Module):
         return torch.cat(ys, dim=-1)[:, :self.out_f] + self.bias
 
 
-class Monarch8NPU(nn.Module):
-    """Streaming monarch_8 with flat [1,400] states and the gate rewritten to
-    avoid the constant-Sub. forward(frame_in, h0_in, h1_in) -> mask, h0, h1."""
+class MonarchNPU(nn.Module):
+    """Streaming fully-monarch NSNet2 with flat per-layer states and the GRU
+    gate rewritten to avoid the constant-Sub. Dims (n_freq, hidden, num layers)
+    are read from the trained model. forward(frame_in, h0_in, ..., h{L-1}_in)
+    -> (mask, h0_out, ..., h{L-1}_out)."""
 
     def __init__(self, st: NSNet2Streaming):
         super().__init__()
         b = st.base
-        assert b.gru_kind == "monarch" and st.num_layers == 2 and st.hidden_size == 400
+        if b.gru_kind != "monarch":
+            raise ValueError(
+                f"gru_kind={b.gru_kind!r}; this exporter needs a fully-monarch "
+                f"config (both linear and gru = 'monarch'). monarch_fc (dense GRU) "
+                f"is not supported.")
+        self.L = int(st.num_layers)
+        self.H = int(st.hidden_size)
+        self.n_freq = int(b.fc_in.in_features)
         self.fc_in = BlockLin(b.fc_in)
-        self.x0 = BlockLin(b.gru.cells[0].x_proj); self.h0 = BlockLin(b.gru.cells[0].h_proj)
-        self.x1 = BlockLin(b.gru.cells[1].x_proj); self.h1 = BlockLin(b.gru.cells[1].h_proj)
-        self.fc1 = BlockLin(b.fc1); self.fc2 = BlockLin(b.fc2); self.fc_out = BlockLin(b.fc_out)
+        self.cells_x = nn.ModuleList([BlockLin(b.gru.cells[k].x_proj) for k in range(self.L)])
+        self.cells_h = nn.ModuleList([BlockLin(b.gru.cells[k].h_proj) for k in range(self.L)])
+        self.fc1 = BlockLin(b.fc1)
+        self.fc2 = BlockLin(b.fc2)
+        self.fc_out = BlockLin(b.fc_out)
 
-    @staticmethod
-    def _cell(xp, hp, x, h):
-        gx, gh = xp(x), hp(h)
-        xr, xz, xn = gx[:, :400], gx[:, 400:800], gx[:, 800:1200]
-        hr, hz, hn = gh[:, :400], gh[:, 400:800], gh[:, 800:1200]
+    def _cell(self, k, x, h):
+        H = self.H
+        gx, gh = self.cells_x[k](x), self.cells_h[k](h)
+        xr, xz, xn = gx[:, :H], gx[:, H:2 * H], gx[:, 2 * H:3 * H]
+        hr, hz, hn = gh[:, :H], gh[:, H:2 * H], gh[:, 2 * H:3 * H]
         r = torch.sigmoid(xr + hr)
         z = torch.sigmoid(xz + hz)
         n = torch.tanh(xn + r * hn)
         return n + z * (h - n)                         # == (1-z)*n + z*h
 
-    def forward(self, frame_in, h0_in, h1_in):         # [1,257],[1,400],[1,400]
-        h = torch.relu(self.fc_in(frame_in))
-        a0 = self._cell(self.x0, self.h0, h, h0_in)
-        a1 = self._cell(self.x1, self.h1, a0, h1_in)
-        y = torch.relu(self.fc1(a1))
+    def forward(self, frame_in, *states):              # [1,n_freq], L x [1,H]
+        x = torch.relu(self.fc_in(frame_in))
+        outs = []
+        for k in range(self.L):
+            x = self._cell(k, x, states[k])
+            outs.append(x)
+        y = torch.relu(self.fc1(x))
         y = torch.relu(self.fc2(y))
         mask = torch.sigmoid(self.fc_out(y))
-        return mask, a0, a1
+        return (mask, *outs)
 
 
 # --- calibration adapter -------------------------------------------------------
 
 class _Rank2Reader(CalibrationDataReader):
     """Reshape the (frame_in,states_in) VBD calib stream into the flat-state inputs."""
-    def __init__(self, inner): self.inner = inner
+    def __init__(self, inner, n_freq, hidden, num_layers):
+        self.inner, self.n_freq, self.H, self.L = inner, n_freq, hidden, num_layers
 
     def get_next(self):
         d = self.inner.get_next()
         if d is None:
             return None
         fr, st = d["frame_in"], d["states_in"]
-        return {"frame_in": fr.reshape(1, 257).astype(np.float32),
-                "h0_in": st[0].reshape(1, 400).astype(np.float32),
-                "h1_in": st[1].reshape(1, 400).astype(np.float32)}
+        out = {"frame_in": fr.reshape(1, self.n_freq).astype(np.float32)}
+        for k in range(self.L):
+            out[f"h{k}_in"] = st[k].reshape(1, self.H).astype(np.float32)
+        return out
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint_dir", default="cp_monarch_8")
     ap.add_argument("--num_utterances", type=int, default=200)
-    ap.add_argument("--out_fp32", default="/tmp/monarch8_npu_fp32.onnx")
-    ap.add_argument("--out_int8", default="/tmp/monarch8_npu_int8.onnx")
+    ap.add_argument("--out_fp32", default="/tmp/monarch_npu_fp32.onnx")
+    ap.add_argument("--out_int8", default="/tmp/monarch_npu_int8.onnx")
     a = ap.parse_args()
 
     st = NSNet2Streaming.from_checkpoint(str(Path(a.checkpoint_dir) / "g_best")).eval()
-    model = Monarch8NPU(st).eval()
+    model = MonarchNPU(st).eval()
+    L, H, n_freq = model.L, model.H, model.n_freq
+    print(f"config: n_freq={n_freq} hidden={H} num_layers={L}")
 
     # parity gate
     torch.manual_seed(0)
-    sref = torch.zeros(2, 1, 400)
-    h0 = torch.zeros(1, 400); h1 = torch.zeros(1, 400)
+    sref = torch.zeros(L, 1, H)
+    states = [torch.zeros(1, H) for _ in range(L)]
     err = 0.0
     for _ in range(30):
-        fr = torch.randn(1, 257) * 0.5
+        fr = torch.randn(1, n_freq) * 0.5
         with torch.no_grad():
             mref, sref = st.forward_step(fr, sref)
-            m, h0, h1 = model(fr, h0, h1)
+            out = model(fr, *states)
+        m, states = out[0], list(out[1:])
         err = max(err, (mref - m).abs().max().item(),
-                  (sref[0] - h0).abs().max().item(), (sref[1] - h1).abs().max().item())
+                  max((sref[k] - states[k]).abs().max().item() for k in range(L)))
     print(f"parity max abs err vs trained streaming: {err:.3e}")
     assert err < 1e-4, "conv-native model diverged from the trained model"
 
-    torch.onnx.export(
-        model, (torch.randn(1, 257), torch.zeros(1, 400), torch.zeros(1, 400)),
-        a.out_fp32, input_names=["frame_in", "h0_in", "h1_in"],
-        output_names=["mask", "h0_out", "h1_out"], opset_version=17)
-    print(f"wrote FP32 ONNX: {a.out_fp32}")
+    in_names = ["frame_in"] + [f"h{k}_in" for k in range(L)]
+    out_names = ["mask"] + [f"h{k}_out" for k in range(L)]
+    dummy = (torch.randn(1, n_freq), *[torch.zeros(1, H) for _ in range(L)])
+    torch.onnx.export(model, dummy, a.out_fp32, input_names=in_names,
+                      output_names=out_names, opset_version=17)
+    print(f"wrote FP32 ONNX: {a.out_fp32} (inputs={in_names})")
 
     # int8 PTQ (same recipe as nsnet2.quant, skip_optimization to avoid re-fusion)
     h = st.base.h
     cal = dict(getattr(h, "calibration", AttrDict({})))
     cal["num_utterances"] = int(a.num_utterances)
     h.calibration = AttrDict(cal)
-    reader = _Rank2Reader(VBDCalibrationReader(st, h, load_voicebank_demand()))
+    reader = _Rank2Reader(VBDCalibrationReader(st, h, load_voicebank_demand()),
+                          n_freq, H, L)
     with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as t:
         pre = Path(t.name)
     try:
