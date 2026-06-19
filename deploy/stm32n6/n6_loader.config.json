@@ -1,0 +1,8 @@
+{
+	"compiler_type": "gcc",
+	"gdb_server_path": "/home/claroche/opt/st/stm32cubeclt_1.21.0/STLink-gdb-server/bin",
+	"gcc_binary_path": "/home/claroche/opt/st/stm32cubeclt_1.21.0/GNU-tools-for-STM32/bin",
+	"make_binary_path": "/usr/bin/make",
+	"objcopy_binary_path": "/home/claroche/opt/st/stm32cubeclt_1.21.0/GNU-tools-for-STM32/bin/arm-none-eabi-objcopy",
+	"cubeProgrammerCLI_binary_path": "/home/claroche/STMicroelectronics/STM32Cube/STM32CubeProgrammer/bin/STM32_Programmer_CLI"
+}
