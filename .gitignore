@@ -38,3 +38,6 @@ hf_staging/
 # ORT / PESQ scratch artifacts
 sym_shape_infer_temp.onnx
 *.data
+
+# STM deployment artifacts
+deploy/stm32n6/cloud/.env
