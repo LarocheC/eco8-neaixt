@@ -57,6 +57,43 @@ raw `|stft|` onto a coarse int8 grid before the compression runs,
 destroying exactly the low-energy detail the compression exists to
 preserve.
 
+## STM32N6 on-board deployment (preliminary)
+
+First measurements of the int8 streaming model on real hardware: an
+**STM32N6570-DK** (STM32N657 — Cortex-M55 @ 800 MHz + Neural-ART NPU @
+1 GHz), compiled with ST Edge AI Core 4.0.1 and run via the bundled
+`NPU_Validation` firmware. Single on-target `stedgeai validate` run
+(10 random samples) of the per-frame graph, weights in external xSPI
+flash, fully scripted — no STM32CubeIDE — through the `deploy/stm32n6/`
+setup. **Preliminary** numbers, one model, one run.
+
+| metric (on-target)                  |       value |
+| ----------------------------------- | ----------: |
+| inference latency / frame           | **7.21 ms** |
+| frame period (hop 256 @ 16 kHz)     |       16 ms |
+| hardware real-time factor           |  **≈ 0.45** |
+| compute split (NPU / SW / SW-ctrl)  | 51.7% / 20.9% / 27.4% |
+| mask cosine vs FP32 ONNX (on-target)|       0.990 |
+| MACC / frame                        |      1.47 M |
+| weights (external xSPI flash)       |    1.40 MiB |
+| activations (on-chip SRAM)          |     ~34 KiB |
+
+Real-time with ~2.2× headroom (7.2 ms inference against the 16 ms frame
+budget, before the M55 STFT/iSTFT front-end). Note that **~48% of the
+time runs on the Cortex-M55, not the NPU**: the convolutions map to the
+Neural-ART accelerator, but the per-frame FIFO state handling
+(Slice/Gather) and the int8 quant boundary fall back to software. That
+software share — not the convs — is the lever for going faster. The
+on-target int8 mask tracks the FP32 ONNX reference at cosine 0.990,
+consistent with the loss-free PTQ above.
+
+Caveats: only ConvFSENet currently compiles for the Neural-ART — NSNet2
+(dense and structured) crashes the ST Edge AI compiler at this version;
+the validation firmware is a volatile RAM image; and the headline
+`int8 RTF 0.017` above is onnxruntime-CPU, not comparable to this 0.45
+on-device factor. See `deploy/stm32n6/` for the generate → build → flash
+→ gdb-load → validate procedure.
+
 ## Low-bit weight PTQ study
 
 `convfsenet/eval_ptq.py` sweeps `(w_bits, a_bits)` via the eager
