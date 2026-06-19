@@ -5,17 +5,19 @@ Deploy this repo's streaming speech-enhancement ONNX models to the STM32N6570-DK
 flash, plus board-free benchmarking on ST's cloud farm. Designed for agent-driven
 iteration: every step is a non-interactive `make` target.
 
-> **Deploy ConvFSENet first.** It is the only model family that compiles on the
-> Neural-ART today. Empirically, on the locally-installed `stedgeai` v3.0.0:
+> **Deploy ConvFSENet first.** On `stedgeai` 4.0.1, measured on-board:
 >
 > | model | result |
 > |---|---|
-> | `cp_convfsenet/g_best.onnx` (pure Conv1d) | ✅ compiles (10 in / 10 out, 1.42 MB weights) |
-> | `cp_baseline/g_best.onnx` (NSNet2 dense, GRU→Gemm) | ❌ `TOOL ERROR: list index out of range` |
-> | monarch / butterfly (Einsum/Split/Pad) | ❌ `Error in computation of shapes` |
+> | `cp_convfsenet/g_best.onnx` (pure Conv1d) | ✅ **4.40 ms/frame, RTF 0.275** (real-time) |
+> | `cp_baseline/g_best.onnx` (NSNet2 dense) | ✅ **22.94 ms/frame, RTF 1.43** — deployable after a re-quant, but *not* real-time |
+> | monarch / butterfly (structured) | ⛔ monarch block layout doesn't map; butterfly also loses int8 quality |
 >
-> NSNet2 needs graph surgery before it will map; the structured variants need Einsum
-> rewritten to Gemm/Conv. See `RESULTS_*` and the project memory for context.
+> ConvFSENet is the only family that is *real-time* on the N6. NSNet2 dense needs a
+> `skip_optimization` re-quant to compile (the GRU `MatMul`+`Add`→`Gemm` fusion crashes
+> the int8 lowering) and is memory-bound once it runs; `monarch_8` is the best sparse
+> candidate but needs a conv-native re-export. Full analysis (root causes, the fix, the
+> deployed numbers, variant selection): **[NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md)**.
 
 ## Layout
 
