@@ -44,3 +44,7 @@ deploy/stm32n6/cloud/.env
 
 # STM32CubeProgrammer installer download
 SetupSTM32CubeProgrammer_linux_64.zip
+
+# STM32CubeCLT installer download
+st-stm32cubeclt_*.zip
+st-stm32cubeclt_*.sh
