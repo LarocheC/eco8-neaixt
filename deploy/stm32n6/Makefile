@@ -66,7 +66,9 @@ build: ## Cross-compile the app (pure Makefile, no STM32CubeIDE)
 	$(MAKE) -C "$(APP_GS_DIR)" $(APP_CONFIG) -j8 GCC_PATH="$(GCC_PATH)"
 
 sign: ## Add the STM32N6 boot header to the built app binary (dev mode, no key)
-	"$(SIGN_CLI)" -bin "$(APP_BIN)" -nk -t ssbl -hv 2.3 -o "$(APP_SIGNED)"
+	# -align is REQUIRED on STM32CubeProgrammer 2.21+ (incl. 2.22.0) — the SigningTool no
+	# longer auto-pads to 0x400. Match -t/-hv to the audio package's sign-and-flash-model.sh.
+	"$(SIGN_CLI)" -bin "$(APP_BIN)" -nk -t ssbl -hv 2.3 -align -o "$(APP_SIGNED)"
 	@echo "[sign] signed -> $(APP_SIGNED)"
 
 flash: ## Flash FSBL + signed app + weights over SWD (board must be in dev-boot mode)
