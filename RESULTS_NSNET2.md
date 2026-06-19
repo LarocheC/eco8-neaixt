@@ -34,6 +34,54 @@ under onnxruntime CPU; lower is faster.
 loss-free). `monarch_8` runs at RTF 0.025 — over 18× faster than the
 dense baseline at the same int8 PESQ.
 
+## STM32N6 on-board deployment
+
+All three speech-enhancement models in this repo now run on the
+**STM32N6570-DK** (STM32N657 — Cortex-M55 @ 800 MHz + Neural-ART NPU @
+1 GHz), compiled with ST Edge AI Core 4.0.1, fully scripted (no
+STM32CubeIDE). On-target latency is per streaming frame (hop 256 @
+16 kHz = 16 ms budget); RTF < 1 is real-time.
+
+| model (int8)            | int8 PESQ | weights | on-chip? | latency/frame |     RTF | on-target cos |
+| ----------------------- | --------: | ------: | :------: | ------------: | ------: | ------------: |
+| **`monarch_8`** (sparse)|     2.826 | 0.37 MB |    ✅    |  **2.89 ms**  |**0.18** |      0.99994  |
+| ConvFSENet (conv)       |     2.911 | 1.40 MB |    ✅    |     4.40 ms   |   0.275 |      0.990    |
+| `baseline` (dense GRU)  |     2.833 | 2.70 MB |    ✗     |    22.94 ms   |   1.43  |      0.9946   |
+
+**Structured sparsity is what lets the recurrent model hit real-time on
+this NPU.** The Neural-ART runs fastest when weights live in on-chip
+npuRAM. The dense GRU baseline's 2.70 MB int8 weights overflow it, so it
+streams them from external octoFlash every frame and lands at RTF 1.43 —
+*not* real-time. `monarch_8` is 7.7× smaller (0.37 MB), fits entirely
+on-chip, and runs **7.9× faster than dense and 1.5× faster than
+ConvFSENet** — at essentially the same int8 PESQ as the dense baseline.
+
+Two deployment subtleties, both detailed in
+[`deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md`](deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md):
+
+* **Dense** doesn't compile as-exported — onnxruntime fuses the GRU
+  `MatMul`+`Add` into a `Gemm` with an *activation* `C`, which the
+  Neural-ART int8 lowering can't index. Re-quantizing with
+  `quant_pre_process(skip_optimization=True)` keeps them separate; the
+  result is numerically identical to the published int8.
+* **`monarch_8`** doesn't compile as-exported either — the monarch
+  block-matmul (`Einsum` + `Pad` + block reshapes) defeats the compiler's
+  shape engine, and a 4-D grouped-conv re-export compiles in FP32 but
+  hits int8 HW-lowering batch-dim asserts. The fix is to re-express the
+  blocks in the *rank-2 `MatMul`* op vocabulary that the dense baseline
+  already maps to HW: per-block `Slice` + `MatMul` + `Concat`, flat
+  states, and the gate rewritten `(1-z)·n + z·h = n + z·(h-n)`.
+  `deploy/stm32n6/host/export_monarch8_npu.py` does this from the trained
+  checkpoint (parity ~5e-7), then int8-quantizes with the same recipe.
+  The deployed artifact is the stock `monarch_8` int8 to mask cosine
+  0.9990, so it carries the 2.826 PESQ above.
+
+Caveats: on-target cosine is vs the FP32 ONNX reference over a 10-sample
+`stedgeai validate` run; the validation firmware is a volatile RAM image;
+and these are single-run latencies. `wide_monarch` / `monarch_full` also
+hold int8 PESQ and `monarch_full` (0.70 M) would fit on-chip too — the
+export script currently hard-codes `monarch_8`'s shape.
+
 ### Int8 quantization findings
 
 All checkpoints export to streaming-shape FP32 ONNX and quantize to int8:
