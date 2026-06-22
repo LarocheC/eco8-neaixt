@@ -1,5 +1,17 @@
 # Plan — STM32N6 efficient speech enhancement: implement / test / deploy under ≤40 ms latency
 
+> **Status (Track 1 — host work DONE, M1 reached).** Stateless-windowed ConvFSENet
+> implemented + tested (34/34) + int8-PESQ'd on the full VBD test. The int8 deploy
+> graph is stateless (zero `Gather`/`Pad`/state/BatchNorm). **Host int8 PESQ:
+> windowed-256 = 2.913 (FP32 2.933), matching the streaming 2.911 — gate ≥2.85 met,
+> no retrain.** Two findings refined the plan: (1) the 257→256 Nyquist drop is
+> PESQ-neutral, so no 256-fine-tune; (2) the windowed ring-buffer cold start needs
+> `replicate` (repeat first frame), not zeros, to avoid a ~0.045-PESQ frontend-bias
+> transient (the `coldstart=zero` number is only 2.843). Gate-0 (`stedgeai generate`)
+> and Phase-4 (on-board latency) run on the **deploy box** — this is the training box
+> (no stedgeai/board). Handoff + commands: `WINDOWED_DEPLOY_HANDOFF.md`. Track 2
+> (small-STFT retrain) launched on the 4090. Track 3 leg-C probe built (`gate0_artifacts/`).
+
 ## Context
 
 This session deployed four speech-enhancement models on an STM32N6570-DK and characterized the

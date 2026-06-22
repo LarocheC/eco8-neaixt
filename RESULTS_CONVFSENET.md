@@ -108,6 +108,50 @@ per-frame FIFO state + int8 quant boundary). Caveat: in this layout the
 weights load over the debugger (gdb) rather than being flashed; a
 standalone power-on deploy needs an on-chip-resident boot layout.
 
+## Stateless-windowed rework (Track 1 — removes the FIFO M55 floor)
+
+That remaining ~3.1 ms M55 share is the per-block FIFO state plumbing
+(`Slice`/`Concat`/`Gather`, always Hybrid). Track 1 of the efficiency rework
+(`deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md`) removes it entirely: instead of
+threading per-block FIFO state across single frames, the host keeps a ring
+buffer of the last `L = sum_blocks (K-1)*D = 42` magnitude columns and feeds a
+fixed `[1, n_freq, L+T]` window through the BN-folded offline-causal model run as
+**valid (padding-0) convs**. The dilated dconvs shrink the time axis by `(K-1)*D`
+per block (residual cropped to match), so `L+T → T` with no state I/O and no Pad.
+The exported int8 graph is **stateless** — `Conv`/`Add`/`Relu`/`Sigmoid` + 9
+static residual-crop `Slice`s, **zero `Gather`/`Pad`/state/BatchNorm**
+(`convfsenet/streaming.py:ConvFSENetWindowedONNX`, exported via
+`export_onnx.py --windowed`, quantized via `quant_windowed.py`). FP32 is bit-exact
+(<1e-6) to the offline causal model on full-context frames
+(`tests/test_convfsenet_windowed_parity.py`, 34/34).
+
+**Host PESQ (full 824-utt VBD test, no retrain — same v5 weights):**
+
+| variant (int8) | FP32 PESQ | int8 PESQ | Δ |
+| --- | ---: | ---: | ---: |
+| streaming reference (deployed) | 2.931 | 2.911 | +0.020 |
+| windowed-257, `coldstart=zero` | 2.858 | 2.836 | +0.022 |
+| windowed-256, `coldstart=zero` | 2.865 | 2.843 | +0.022 |
+| windowed-257, `coldstart=replicate` | 2.923 | 2.904 | +0.019 |
+| **windowed-256, `coldstart=replicate` (deploy)** | **2.933** | **2.913** | +0.020 |
+
+The 256-bin variant drops the Nyquist bin (frontend input + backend output) for
+power-of-two HW alignment — it is **PESQ-neutral** (256 ≥ 257), so no 256-native
+fine-tune was needed. The whole apparent gap was the **cold start**: the model
+was trained with a zero-*activation* history before t=0, but a zero-*magnitude*
+ring buffer feeds the frontend bias (`frontend(0) ≠ 0`) for the first `<L` frames
+→ out-of-distribution, costing ~0.045 PESQ on short clips. Seeding the ring
+buffer by **replicating the first frame** (`coldstart=replicate`, the default —
+causal, no look-ahead, on-device deployable) recovers it: the windowed-256 int8
+**2.913 matches/slightly beats the streaming 2.911**, at the documented int8 gate
+≥2.85 (target 2.90–2.91, exceeded).
+
+Net: same quality as the deployed streaming model, but the int8 deploy graph has
+**no FIFO/state/Pad** class — the M55-Hybrid floor that capped ConvFSENet at 4.40
+ms. On-board latency (does the per-frame epoch count drop, do the convs fill the
+array at `h:43`?) is the Gate-0/Phase-4 verdict on the deploy box — see
+[deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md](deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md).
+
 ## Low-bit weight PTQ study
 
 `convfsenet/eval_ptq.py` sweeps `(w_bits, a_bits)` via the eager
