@@ -527,3 +527,185 @@ class ConvFSENetStreamingONNX(nn.Module):
         """
         mask, states_out = self.fast.forward_mask_step(noisy_mag, list(states_in))
         return (mask, *states_out)
+
+
+# =============================================================================
+# Stateless-windowed view (no FIFO state — the STM32N6 efficiency rework).
+#
+# Removes the per-block FIFO state plumbing that is ConvFSENet's M55 floor on
+# the Neural-ART (the Slice/Concat/Gather class, always Hybrid). Instead of
+# threading per-block state across single frames, the host keeps a ring buffer
+# of the last L = sum_blocks (K-1)*D magnitude columns and feeds a fixed window
+#
+#     noisy_mag_window  [B, n_freq, L + T]
+#
+# through the BN-folded offline-causal model run with VALID (padding-0) convs.
+# Each TCM block's valid dilated dconv shrinks the time axis by (K-1)*D and
+# crops the residual to match, so the window collapses L+T -> T with no padding
+# and no state I/O. The emitted T mask columns are bit-exact to the offline
+# causal model on those frames (full real left context — same receptive-field
+# algebra the FIFO wrappers above parity-test). See deploy/stm32n6/
+# EFFICIENCY_REWORK_PLAN.md (Track 1).
+# =============================================================================
+
+
+class _WindowedTCMBlockQF(nn.Module):
+    """Valid-conv windowed forward for one TCMBlock_QuantFriendly (causal=True).
+
+    Runs the BN-folded block over a [B, n_channels_res, W] window with VALID
+    (padding-0) convs. The dilated dconv shrinks the time axis by trim=(K-1)*D;
+    the residual is cropped by the same trim so it aligns with the surviving
+    (rightmost) outputs. Equivalent to the offline causal block on its last
+    (W-trim) output positions.
+
+    Reuses the same fold/clone helpers as ConvFSENetStreamingFast — the only
+    difference vs the FIFO block is that there is NO state buffer and NO gather:
+    the dilation lives natively in the conv (padding=0), operating over the full
+    context columns the host already supplied.
+    """
+
+    def __init__(self, src: TCMBlock_QuantFriendly):
+        super().__init__()
+        if not src.causal:
+            raise ValueError(
+                "Windowed wrapper requires causal=True; got causal=False on a "
+                "TCM block. Train the model with causal=true in config."
+            )
+        K = int(src.kernel_size)
+        D = int(src.dilation)
+        self.kernel_size = K
+        self.dilation = D
+        self.groups = int(src.dconv.groups)
+        self.trim = (K - 1) * D                       # time columns the valid dconv removes
+        self.n_channels_res = int(src.n_channels_res)
+        self.n_channels_conv = int(src.n_channels_conv)
+
+        # Folded (BN absorbed) + padding=0 — _fold_bn_into_conv copies the
+        # dilation, so dconv_folded is a *native* valid dilated conv (no gather).
+        self.conv1x1_folded = _fold_bn_into_conv(src.conv1x1, src.norm1)   # k=1
+        self.dconv_folded = _fold_bn_into_conv(src.dconv, src.norm2)       # k=K, dilation=D
+        self.conv1x1_out = _clone_conv1d(src.conv1x1_out)                  # k=1, no BN
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, n_channels_res, W] -> [B, n_channels_res, W - trim]."""
+        y = self.conv1x1_folded(x)                    # [B, C', W]
+        y = torch.relu(y)
+        y = self.dconv_folded(y)                      # valid -> [B, C', W - trim]
+        y = torch.relu(y)
+        z = self.conv1x1_out(y)                       # [B, n_channels_res, W - trim]
+        # Residual: valid output[j] aligns to causal position j+trim (its
+        # right-most input), so add the trim-cropped block input.
+        res = x[..., self.trim:] if self.trim > 0 else x
+        return z + res
+
+
+class ConvFSENetWindowedONNX(nn.Module):
+    """Stateless windowed view of ConvFSENet_QuantFriendly (causal=True).
+
+    ONNX-exportable. No FIFO state — the entire left context arrives as columns
+    of a fixed window.
+
+      Input:  noisy_mag_window [B, n_freq, L + T]  — plain |stft| context window.
+      Output: mask            [B, n_freq, T]       — last T mask columns, in (0,1).
+
+    L = sum_blocks (K-1)*D (the receptive field minus one). Magnitude
+    compression (mag_compressed models) is the first op of the graph — an FP32
+    Pow over the window, ahead of every quantized conv, exactly like
+    ConvFSENetStreamingFast.forward_mask_step.
+
+    256-bin alignment (`drop_nyquist=True`): the trained model carries 257 freq
+    bins; the Neural-ART maps a power-of-two channel count more cleanly. With
+    drop_nyquist the frontend Conv's Nyquist *input* column and the backend
+    Conv's Nyquist *output* row+bias are sliced off, so n_freq becomes 256. The
+    host then drops the Nyquist magnitude bin before the graph and pads the mask
+    back to 257 after it. This slices trained weights (an approximation, not
+    bit-exact to the 257 model) — verify PESQ; fine-tune if it shifts results.
+    """
+
+    def __init__(self, base: ConvFSENet_QuantFriendly, T: int = 1, drop_nyquist: bool = False):
+        super().__init__()
+        if not base.causal:
+            raise ValueError(
+                "ConvFSENetWindowedONNX requires causal=True on the base model "
+                "(non-causal dilated conv has no streaming/windowed form). "
+                "Re-train with causal=true."
+            )
+        if base.extractor_type not in _SUPPORTED_EXTRACTORS:
+            raise NotImplementedError(
+                f"Windowed wrapper supports extractor_type in {_SUPPORTED_EXTRACTORS} "
+                f"(got {base.extractor_type!r})."
+            )
+        if base.training:
+            raise ValueError(
+                "Base model must be in .eval() mode before folding BatchNorm "
+                "(running_mean / running_var only stabilize after .eval())."
+            )
+        self.T = int(T)
+        if self.T < 1:
+            raise ValueError(f"T (emitted frames) must be >= 1; got {self.T}.")
+        self.drop_nyquist = bool(drop_nyquist)
+        self.n_features_full = int(base.n_features)
+        self.n_features = self.n_features_full - (1 if self.drop_nyquist else 0)
+
+        # Frontend / backend convs (k=1, no surrounding BN). Optionally slice
+        # the Nyquist bin so the graph is 256-wide.
+        front = _clone_conv1d(base.frontend[0])
+        back = _clone_conv1d(base.backend[0])
+        if self.drop_nyquist:
+            front, back = self._slice_nyquist(front, back)
+        self.frontend_conv = front
+        self.backend_conv = back
+
+        self.blocks = nn.ModuleList(_WindowedTCMBlockQF(m) for m in base.tcm)
+        self.n_blocks_total = len(self.blocks)
+        # L = total time shrink across all blocks = receptive field minus one.
+        self.L = int(sum(blk.trim for blk in self.blocks))
+
+        self.extractor_type = base.extractor_type
+        self.compress_factor = (
+            float(base.compress_factor)
+            if base.extractor_type == "mag_compressed" and base.compress_factor
+            else 0.3
+        )
+
+    @staticmethod
+    def _slice_nyquist(front: nn.Conv1d, back: nn.Conv1d):
+        """Drop the Nyquist bin: front loses its last *input* channel, back
+        loses its last *output* channel (+bias). Both are k=1 convs."""
+        new_front = nn.Conv1d(
+            front.in_channels - 1, front.out_channels, 1,
+            bias=front.bias is not None,
+        )
+        new_back = nn.Conv1d(
+            back.in_channels, back.out_channels - 1, 1,
+            bias=back.bias is not None,
+        )
+        with torch.no_grad():
+            new_front.weight.copy_(front.weight[:, :-1, :])
+            if front.bias is not None:
+                new_front.bias.copy_(front.bias)
+            new_back.weight.copy_(back.weight[:-1, :, :])
+            if back.bias is not None:
+                new_back.bias.copy_(back.bias[:-1])
+        return new_front, new_back
+
+    @property
+    def window_length(self) -> int:
+        """L + T — the time width of the input window the host must feed."""
+        return self.L + self.T
+
+    def forward_mask_window(self, noisy_mag_window: torch.Tensor) -> torch.Tensor:
+        """noisy_mag_window [B, n_freq, L+T] -> mask [B, n_freq, T]."""
+        if self.extractor_type == "mag_compressed":
+            feats = compress_magnitude(noisy_mag_window, self.compress_factor)
+        else:
+            feats = noisy_mag_window
+        x = self.frontend_conv(feats)                 # [B, C_res, L+T]
+        x = torch.relu(x)
+        for blk in self.blocks:
+            x = blk(x)                                # shrinks by trim each -> [B, C_res, T]
+        mask = torch.sigmoid(self.backend_conv(x))    # [B, n_freq, T]
+        return mask
+
+    def forward(self, noisy_mag_window: torch.Tensor) -> torch.Tensor:
+        return self.forward_mask_window(noisy_mag_window)

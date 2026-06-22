@@ -17,9 +17,14 @@ dist/
 # Training outputs
 cp_*/
 generated_files/
+generated_files_*/
 logs/
 **/.quant_cache/
 *.log
+# Windowed-rework eval outputs (regenerable: deploy/stm32n6/scripts/run_windowed_eval.sh)
+deploy/stm32n6/windowed_eval/
+# Gate-0 probe ONNX (regenerable: deploy/stm32n6/scripts/build_gate0d_probe.py)
+deploy/stm32n6/gate0_artifacts/
 # Stray deployment ONNX at the repo root (real artifacts live under cp_*/)
 /g_best*.onnx
 
