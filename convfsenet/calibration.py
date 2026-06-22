@@ -40,7 +40,11 @@ from onnxruntime.quantization import CalibrationDataReader
 
 from common.dataset import mag_pha_stft
 from common.env import AttrDict
-from convfsenet.streaming import ConvFSENetStreamingFast, ConvFSENetStreamingONNX
+from convfsenet.streaming import (
+    ConvFSENetStreamingFast,
+    ConvFSENetStreamingONNX,
+    ConvFSENetWindowedONNX,
+)
 
 
 class ConvFSENetCalibrationReader(CalibrationDataReader):
@@ -206,3 +210,99 @@ class ConvFSENetCalibrationReader(CalibrationDataReader):
             sort_keys=True,
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
+
+
+class ConvFSENetWindowedCalibrationReader(ConvFSENetCalibrationReader):
+    """ORT CalibrationDataReader for the stateless-windowed ConvFSENet ONNX.
+
+    Yields per-window dicts with a single key matching the windowed graph:
+
+        {"noisy_mag_window": (B=1, n_freq, L+T) float32}
+
+    There is NO per-block state (the rework's whole point), so calibration is
+    just a slide of fixed L+T windows over each utterance's plain |stft|
+    magnitude. The left of the stream is zero-padded by L columns, mirroring
+    the host ring buffer at start-up (and the offline causal left-padding), so
+    the calibrator sees the same start-of-stream window distribution the
+    deployed graph will. Windows slide with hop = T (matching how the host
+    advances), capped by `frames_per_utterance` output frames.
+
+    Reuses ConvFSENetCalibrationReader's seeded index sampling, train/test
+    disjoint check and calibration_hash verbatim — only the per-utterance
+    materialization and the ONNX feed key differ.
+    """
+
+    def __init__(
+        self,
+        onnx_view: ConvFSENetWindowedONNX,
+        h: AttrDict,
+        hf_dataset,
+    ):
+        # Bypass the parent __init__ (it wants fast/onnx_view streaming
+        # wrappers); reuse its sampling + pitfall closures directly.
+        self.onnx_view = onnx_view
+        self.h = h
+        self.hf = hf_dataset
+        self.L = int(onnx_view.L)
+        self.T = int(onnx_view.T)
+        self.drop_nyquist = bool(onnx_view.drop_nyquist)
+
+        cal_cfg = getattr(h, "calibration", AttrDict({}))
+        self.num_utterances = int(getattr(cal_cfg, "num_utterances", 200))
+        self.seed = int(getattr(cal_cfg, "seed", getattr(h, "seed", 0)))
+        self.frames_per_utterance = getattr(cal_cfg, "frames_per_utterance", None)
+
+        n_train = len(hf_dataset["train"])
+        if self.num_utterances > n_train:
+            raise ValueError(
+                f"num_utterances={self.num_utterances} exceeds train split size {n_train}"
+            )
+        rng = random.Random(self.seed)
+        self.calib_indices = rng.sample(range(n_train), self.num_utterances)
+
+        self._assert_train_test_disjoint()
+        self.calibration_hash = self._compute_calibration_hash()
+        print(
+            f"ConvFSENetWindowedCalibrationReader: calib_hash={self.calibration_hash} "
+            f"(utts={self.num_utterances}, seed={self.seed}, L={self.L}, T={self.T}, "
+            f"drop_nyquist={self.drop_nyquist}, "
+            f"frames_per_utterance={self.frames_per_utterance})"
+        )
+
+        self._utt_iter = iter(self.calib_indices)
+        self._frame_cache: list[dict] = []
+
+    def _load_next_utterance(self, idx: int) -> None:
+        """Slide fixed L+T windows over one calibration utterance's magnitude."""
+        item = self.hf["train"][idx]
+        audio_np = np.asarray(item["noisy"]["array"], dtype=np.float32)
+        audio = torch.from_numpy(audio_np).unsqueeze(0)                   # (1, N)
+
+        # Plain |stft| — the graph applies its own compression Pow internally.
+        mag, _, _ = mag_pha_stft(
+            audio, self.h.n_fft, self.h.hop_size, self.h.win_size, 1.0,
+        )                                                                 # (1, F, T_total)
+        if self.drop_nyquist:
+            mag = mag[:, : self.onnx_view.n_features, :]                  # drop Nyquist bin
+        T_total = mag.shape[2]
+
+        # Left-pad by L (start-of-stream zeros) so the first output frame's
+        # window matches the host ring buffer at t=0.
+        pad = torch.zeros(mag.shape[0], mag.shape[1], self.L, dtype=mag.dtype)
+        mag_padded = torch.cat([pad, mag], dim=-1)                        # (1, F, L+T_total)
+
+        # Full windows only, hop = T (how the host advances). A window emitting
+        # output frames [k*T, k*T+T-1] spans mag_padded[:, :, k*T : k*T+L+T];
+        # the last full window starts at T_total-T. Any partial tail is dropped
+        # (calibration only needs representative distributions, not every frame).
+        W = self.L + self.T
+        max_start = (mag_padded.shape[-1] - W)                            # = T_total - T
+        n_windows = max_start // self.T + 1 if max_start >= 0 else 0
+        if self.frames_per_utterance is not None:
+            n_windows = min(n_windows, int(self.frames_per_utterance))
+        for k in range(n_windows):
+            start = k * self.T
+            window = mag_padded[:, :, start : start + W]
+            self._frame_cache.append({
+                "noisy_mag_window": window.detach().cpu().contiguous().numpy().astype(np.float32),
+            })
