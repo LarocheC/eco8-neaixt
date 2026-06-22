@@ -1,0 +1,55 @@
+{
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0008,
+    "lr_min": 0.00001,
+    "scheduler": "cosine",
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "lr_decay": 0.9985,
+    "seed": 1234,
+
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+
+    "n_fft": 512,
+    "win_length": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "n_features": 257,
+
+    "n_channels_res": 192,
+    "n_channels_conv": 384,
+    "kernel_size": 3,
+    "n_blocks": 3,
+    "n_stacks": 3,
+    "extractor_type": "mag_compressed",
+    "compress_factor": 0.3,
+    "causal": true,
+
+    "gan": {
+        "enabled": true,
+        "metric_loss_lambda": 0.05,
+        "disc_compress_factor": 0.3
+    },
+
+    "windowed": {
+        "_comment": "Track 1 (deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md): stateless-windowed export of the SAME 192/384 mag_compressed backbone. L = sum_blocks (K-1)*D = 3 stacks * (1+2+4) * 2 = 42 (RF = L+1 = 43). emit_T mask columns per call; window width = L + emit_T. drop_nyquist slices the Nyquist bin so the deployed graph is 256-wide. n_features stays 257 here: Track 1's no-retrain path slices trained weights at export. A 256-native fine-tune would set n_features 256 and drop the Nyquist bin in the data path (only if the 256-slice int8 PESQ drops below 2.85).",
+        "L": 42,
+        "emit_T": 1,
+        "drop_nyquist": true
+    },
+
+    "calibration": {
+        "num_utterances": 200,
+        "seed": 1234,
+        "frames_per_utterance": 80
+    },
+
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
