@@ -22,7 +22,7 @@ wants its weights in on-chip RAM.** ConvFSENet and the *sparse* `monarch_8` fit
 and run real-time; the *dense* GRU baseline runs but its 2.70 MB weights
 overflow on-chip RAM so it stays memory-bound. Getting the FC/GRU/structured
 models to map ranges from "a re-quantize flag" (dense, §1) to "re-export the
-model into the right op vocabulary" (monarch, §4).
+model into the right op vocabulary" (monarch, §3).
 
 ---
 
@@ -147,21 +147,30 @@ decide deployability:
 2. **Weights must fit on-chip (~< 2 MB int8)** — otherwise it is
    memory-bound and not real-time, exactly like the dense baseline above.
 
-| variant | params | int8 PESQ | int8 ONNX | fits on-chip? | quality OK? |
+The `int8 ONNX` column below is the **stock** (Einsum) export size — what you
+get before the rank-2 re-export of §3. The re-export produces a much leaner
+graph (`monarch_8` 1.47→0.58 MB file / 0.37 MB on-chip; `monarch_full`
+2.85→0.86 MB file / 0.72 MB on-chip), so the "fits on-chip?" verdict is given
+for the **deployable re-exported** model, not the stock size.
+
+| variant | params | int8 PESQ | stock int8 ONNX | fits on-chip? (re-exported) | quality OK? |
 | --- | ---: | ---: | ---: | :---: | :---: |
-| `baseline` (dense) | 2.78 M | 2.833 | 2.70 MB | ✗ | ✓ |
-| `wide_monarch` | 2.36 M | 2.842 | 9.46 MB | ✗ | ✓ |
-| `monarch_full` | 0.70 M | **2.848** | 2.85 MB | ✗ | ✓ |
-| **`monarch_8`** | **0.36 M** | **2.826** | **1.47 MB** | **✓** | **✓** |
-| `monarch_fc` | 2.14 M | 2.789 | 2.89 MB | ✗ | ~ |
+| `baseline` (dense) | 2.78 M | 2.833 | 2.70 MB | ✗ (2.70 MB) | ✓ |
+| `wide_monarch` | 2.36 M | 2.842 | 9.46 MB | ✗ (~2.4 MB, too big) | ✓ |
+| **`monarch_full`** | **0.70 M** | **2.848** | 2.85 MB | **✓ (0.72 MB)** | **✓** |
+| **`monarch_8`** | **0.36 M** | **2.826** | 1.47 MB | **✓ (0.37 MB)** | **✓** |
+| `monarch_fc` | 2.14 M | 2.789 | 2.89 MB | (dense GRU → exporter rejects) | ~ |
 | `butterfly_ortho` | 0.19 M | 2.577 | 0.48 MB | ✓ | ✗ |
 | `butterfly_2blocks` | 0.36 M | 2.202 | 0.82 MB | ✓ | ✗ |
 
-**`monarch_8` is the right target**: it is the only variant that clears *both*
-gates — int8 PESQ 2.826 (matching the dense baseline) at 1.47 MB int8 (7.7×
-compression), small enough to fit on-chip and therefore the only NSNet2 that
-*could* be real-time on the N6. (`monarch_full` has the best int8 PESQ but at
-2.85 MB hits the same memory wall as dense.)
+**Both `monarch_full` and `monarch_8` clear both gates and deploy real-time**
+(§3). `monarch_full` is the **best of the family** — fastest *and* highest int8
+PESQ — once re-exported it fits on-chip too (0.72 MB), so the earlier worry that
+it "hits the dense memory wall" was an artifact of the bloated *stock* Einsum
+size, not the deployable graph. `wide_monarch` holds int8 PESQ but is too big to
+fit on-chip even re-exported; the butterfly variants lose int8 quality; and
+`monarch_fc` keeps a dense GRU (exporter rejects it — no block structure to
+re-express).
 
 ---
 
@@ -236,7 +245,7 @@ works but is slow over serial for a 100+-node graph.
 
 ---
 
-## 5. Status / next steps
+## 4. Status / next steps
 
 - **Four models now run on the N6.** The sparse monarch variants dominate:
   `monarch_full` **2.13 ms / RTF 0.13** (best PESQ too, 2.848) and `monarch_8`

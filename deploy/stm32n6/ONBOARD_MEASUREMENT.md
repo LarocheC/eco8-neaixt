@@ -90,11 +90,40 @@ per-region memory bandwidth that exposed the external-flash bottleneck.
 | weights in octoFlash (`n6-allmems-O3`) | 7.14 ms | 0.45 | 3.73 ms | 27% (memory-bound) | 0.990 |
 | weights in npuRAM (`n6-noextmem`)      | **4.40 ms** | **0.275** | 1.26 ms | **81% (compute-bound)** | 0.990 |
 
+## Results — all four models (same generate → load → validate/profile flow)
+On-board, int8, STM32N657 @ MCU 800 MHz / NPU 1 GHz; frame period = hop 256 @ 16 kHz = 16 ms.
+The NSNet2 family needed graph surgery first (see
+[NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md)).
+
+| model (int8) | profile | latency/frame | RTF | weights | on-target mask cos | method |
+|---|---|---:|---:|---:|---:|---|
+| **NSNet2 `monarch_full`** (sparse, re-exported) | `n6-noextmem` | **2.13 ms** | **0.13** | 0.72 MB on-chip | 0.99979 | `validate` |
+| NSNet2 `monarch_8` (sparse, re-exported)        | `n6-noextmem` | 2.89 ms | 0.18 | 0.37 MB on-chip | 0.99994 | `validate` |
+| ConvFSENet (conv)                                | `n6-noextmem` | 4.40 ms | 0.275 | 1.40 MB on-chip | 0.990 | `npu_profiler` |
+| NSNet2 dense (`baseline`)                        | `n6-allmems-O3` | 22.94 ms | 1.43 | 2.70 MB octoFlash | 0.9946 | `npu_profiler` |
+
+Fastest real-time model: **`monarch_full` (2.13 ms / RTF 0.13)**; ConvFSENet wins int8 PESQ
+(2.91 vs 2.85). Dense overflows on-chip RAM → memory-bound → not real-time.
+
 ## Caveats
-- Only **ConvFSENet** compiles for the Neural-ART today; NSNet2 (dense + structured) crashes
-  the ST Edge AI compiler at this version.
+- **All four models above now deploy** on the Neural-ART. NSNet2 dense needs a
+  `skip_optimization` re-quant to compile; the sparse monarch variants need the conv-native
+  rank-2 re-export (`host/export_monarch_npu.py`). **Butterfly is NPU-hostile** (6-D
+  reshape/reduce — doesn't compile). Full root-cause analysis:
+  [NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md).
+- `stedgeai validate --mode target` works for ConvFSENet and the monarch models, but **crashes
+  for the un-fused dense NSNet2** (it re-runs ORT optimization and re-introduces the GRU fusion)
+  → measure dense via `npu_profiler` instead. `npu_profiler` PER_LAYER is slow over serial for
+  100+-node graphs (it can time out); `validate`'s `duration ... by sample` runs ~1 ms higher
+  than the profiler's pure-inference figure, so compare like-for-like.
 - The validation firmware is a **volatile RAM image** — re-run step 2 after any power-cycle.
+  After a `validate` run the ST-LINK/loader state can wedge (`Loading memories failed` /
+  `DEV_USB_COMM_ERR`); recover by re-plugging the USB (then `usbipd attach --wsl`) — an SWD
+  software reset does **not** clear it.
 - With `n6-noextmem`, weights load over **gdb** (not flashed). That's fine for measurement; a
   standalone power-on deploy needs an on-chip-resident boot layout (separate effort).
-- Lever 2 (move the M55 software share — per-frame FIFO state + int8 quant boundary — onto the
-  NPU) requires re-quantizing the streaming export and is **not yet done**.
+- **Lever 2** (move ConvFSENet's M55 software share onto the NPU) was attempted and **closed**:
+  Y1 (native dilation, kill the FIFO `Gather`) is a wash — the `Gather` is cheap SW and the
+  compiler's `SpaceToDepth` dilation realization costs more; Y2 (int8 states) is a no-op —
+  stedgeai already optimizes the state boundary. ConvFSENet is at its N6 floor (~4.40 ms).
+  See [TODO.md](TODO.md).
