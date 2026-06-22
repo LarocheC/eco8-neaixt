@@ -48,15 +48,18 @@ so the `--input-data-type` quirk in `scripts/generate.sh` does not apply here.
   on 200 VBD utts (FP32-256): zero **2.939** → replicate **2.983** → reflect
   **2.984** (reflect needs look-ahead → not deployable). The on-device C glue
   must seed the ring buffer with the first received magnitude column, not zeros.
-- **Host int8 PESQ (full 824-utt VBD test):** see [windowed_eval/](windowed_eval/).
+- **Host int8 PESQ (full 824-utt VBD test, `coldstart=replicate`, no retrain):**
 
-| variant | n_freq | int8 PESQ | FP32 PESQ | Δ | note |
-|---|---:|---:|---:|---:|---|
-| windowed-257 (reference, iso to deployed) | 257 | _see windowed_eval/pesq257.log_ | ~2.93 | — | bit-exact arch to 2.911 streaming |
-| **windowed-256 (deploy target)** | 256 | _see windowed_eval/pesq256.log_ | — | — | Nyquist dropped, HW-aligned |
+| variant | n_freq | FP32 PESQ | int8 PESQ | gate ≥2.85 |
+|---|---:|---:|---:|:--:|
+| streaming reference (deployed) | 257 | 2.931 | 2.911 | — |
+| windowed-257 | 257 | 2.923 | 2.904 | ✓ |
+| **windowed-256 (deploy target)** | 256 | **2.933** | **2.913** | ✓ |
 
-(The streaming reference is FP32 2.931 / int8 2.911. The windowed-257 int8 should
-land at ~2.91; windowed-256 is the deploy target and gates at **≥ 2.85**.)
+The windowed-256 int8 **2.913 matches/slightly beats the streaming 2.911** — same
+quality, but the graph has no FIFO/state/Pad class. (With `coldstart=zero` the
+windowed-256 int8 is only 2.843 — the cold-start fix is load-bearing; the on-device
+C glue must seed the ring buffer with the first frame, not zeros.)
 
 ## Artifacts to copy to the deploy box
 
