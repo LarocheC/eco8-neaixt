@@ -152,6 +152,18 @@ ms. On-board latency (does the per-frame epoch count drop, do the convs fill the
 array at `h:43`?) is the Gate-0/Phase-4 verdict on the deploy box — see
 [deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md](deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md).
 
+### Track 2 (small-STFT block) — rejected on quality
+
+Track 2 retrained the same 192/384 windowed backbone at a **smaller STFT**
+(`n_fft 256 / hop 128`, 129 bins, 16 ms/8 ms framing, emit T=2) for 2× block
+amortization under ~30 ms latency (`configs/convfsenet_win_smallstft.json`,
+200-epoch GAN from scratch). The coarser frequency resolution costs too much
+quality: windowed-128 int8 PESQ **2.725** (FP32 2.783) — **0.13 below the ≥2.85
+gate**, ~0.19 below Track 1's 2.913. This is the plan's flagged Config-C risk
+("accept only if PESQ holds ≥2.85") materializing. **Rejected** — Track 1
+(512/256 windowed) stays the winner; the small-STFT latency win isn't worth the
+PESQ loss.
+
 ## Low-bit weight PTQ study
 
 `convfsenet/eval_ptq.py` sweeps `(w_bits, a_bits)` via the eager
