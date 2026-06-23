@@ -9,8 +9,11 @@
 > `replicate` (repeat first frame), not zeros, to avoid a ~0.045-PESQ frontend-bias
 > transient (the `coldstart=zero` number is only 2.843). Gate-0 (`stedgeai generate`)
 > and Phase-4 (on-board latency) run on the **deploy box** — this is the training box
-> (no stedgeai/board). Handoff + commands: `WINDOWED_DEPLOY_HANDOFF.md`. Track 2
-> (small-STFT retrain) launched on the 4090. Track 3 leg-C probe built (`gate0_artifacts/`).
+> (no stedgeai/board). Handoff + commands: `WINDOWED_DEPLOY_HANDOFF.md`. **Track 2
+> (small-STFT 256/128) trained to completion and was REJECTED on quality: int8 PESQ
+> 2.725 (FP32 2.783), 0.13 below the ≥2.85 gate — the coarser 129-bin STFT costs ~0.19
+> PESQ vs Track 1. Track 1 (512/256 windowed) is the winner.** Track 3 leg-C probe
+> built (`gate0_artifacts/`), gated on the deploy-box Gate-0D.
 
 ## Context
 
