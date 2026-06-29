@@ -16,11 +16,24 @@ Pipeline (Fig. 1 of the paper)
       -> split into B Bark-scale frequency bands
       -> per-band Efficient-DenseNet encoder, depth L_b scaled by band density
       -> Cross-Band Attention (per-frame inter-band exchange, Eqs. 6-12)
-      -> Fusion & Projection (+ freq pooling for the recurrent bottleneck)
+      -> Fusion & Projection: full-res skip (S) + freq-pooled CRN input
       -> CRN temporal model (GRU + GLU conv block)
-      -> Efficient magnitude-mask decoder  -> M_hat  (LearnableSigmoid)
-      -> Efficient phase decoder           -> X_hat_p (atan2, anti-wrapping)
+      -> decoders fuse the CRN output with the full-res skip S, then:
+         -> Efficient magnitude-mask decoder -> M_hat  (LearnableSigmoid)
+         -> Efficient phase decoder          -> X_hat_p (atan2, anti-wrapping)
     X_hat_m^c = Y_m^c (x) M_hat            (Eq. 1)
+
+Frequency skip connection
+-------------------------
+The CRN pools 201 frequency bins down to `crn_freq` for the recurrent
+bottleneck. Magnitude tolerates that coarse representation (spectral envelopes
+are smooth), but *phase* decorrelates rapidly across frequency and cannot be
+reconstructed from it — in a no-skip version the phase loss stays pinned at its
+random-init level and validation PESQ never rises above the noisy input. So
+each decoder also receives the full-resolution fusion output as a skip
+connection (the U-Net structure of the CRN the paper cites, ref. [20]),
+carrying per-bin spectral detail around the bottleneck. This is causal: the
+skip is built from causal ops and merged by a 1x1 conv.
 
 The input representation is exactly what ``common.dataset.mag_pha_stft`` already
 produces (power-law compressed magnitude with ``compress_factor=0.3`` and phase),
@@ -401,8 +414,8 @@ class FusionProjection(nn.Module):
 
     def forward(self, x):
         x = self.act(self.norm(self.conv(x)))
-        x = self.ir(x)
-        return self.pool(x)
+        x = self.ir(x)                              # (B, C, F, N) full frequency resolution
+        return x, self.pool(x)                      # (skip, pooled CRN input)
 
 
 class CRN(nn.Module):
@@ -473,33 +486,49 @@ class LearnableSigmoid2d(nn.Module):
 
 
 class MagMaskDecoder(nn.Module):
-    """Predict a bounded magnitude mask and apply it to the (compressed) input."""
+    """Predict a bounded magnitude mask and apply it to the (compressed) input.
+
+    Fuses the decoder body's output with the full-resolution `skip` features
+    (the fusion output before the CRN's frequency pooling) so the head sees
+    per-bin spectral detail, not just the coarse recurrent bottleneck.
+    """
 
     def __init__(self, channels, depth, n_freq, expand_ratio=4, causal=True):
         super().__init__()
         self.body = EfficientDecoder(channels, depth, n_freq, expand_ratio, causal)
+        self.merge = nn.Conv2d(channels * 2, channels, 1)
+        self.merge_norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
         self.out = nn.Conv2d(channels, 1, 1)
         self.lsig = LearnableSigmoid2d(n_freq)
 
-    def forward(self, x, mag_in):                  # x: (B, C, crn_freq, N)
-        y = self.out(self.act(self.body(x))).squeeze(1)   # (B, F, N)
-        mask = self.lsig(y)
+    def forward(self, x, skip, mag_in):            # x: (B,C,crn_freq,N), skip: (B,C,F,N)
+        y = self.body(x)                           # (B, C, F, N)
+        y = self.act(self.merge_norm(self.merge(torch.cat([y, skip], dim=1))))
+        mask = self.lsig(self.out(y).squeeze(1))   # (B, F, N)
         return mag_in * mask, mask
 
 
 class PhaseDecoder(nn.Module):
-    """Predict enhanced phase via a two-head atan2 projection (anti-wrapping)."""
+    """Predict enhanced phase via a two-head atan2 projection (anti-wrapping).
+
+    Like the magnitude decoder, it fuses in the full-resolution `skip` features.
+    This matters most here: phase decorrelates rapidly across frequency, so the
+    head needs per-bin detail the coarse CRN bottleneck cannot provide.
+    """
 
     def __init__(self, channels, depth, n_freq, expand_ratio=4, causal=True):
         super().__init__()
         self.body = EfficientDecoder(channels, depth, n_freq, expand_ratio, causal)
+        self.merge = nn.Conv2d(channels * 2, channels, 1)
+        self.merge_norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
         self.conv_r = nn.Conv2d(channels, 1, 1)
         self.conv_i = nn.Conv2d(channels, 1, 1)
 
-    def forward(self, x):
-        y = self.act(self.body(x))
+    def forward(self, x, skip):
+        y = self.body(x)
+        y = self.act(self.merge_norm(self.merge(torch.cat([y, skip], dim=1))))
         real = self.conv_r(y).squeeze(1)           # (B, F, N)
         imag = self.conv_i(y).squeeze(1)
         return torch.atan2(imag, real)
@@ -556,10 +585,10 @@ class BASENet(nn.Module):
         feats = [enc(band) for enc, band in zip(self.encoders, bands)]
         feats = self.cross_band(feats)
         fused = torch.cat(feats, dim=2)            # (B, C, F, N)
-        z = self.fusion(fused)                     # (B, C, crn_freq, N)
-        z = self.crn(z)
-        mag_g, _ = self.mag_decoder(z, mag)
-        pha_g = self.phase_decoder(z)
+        skip, z = self.fusion(fused)               # full-res skip + pooled CRN input
+        z = self.crn(z)                            # (B, C, crn_freq, N)
+        mag_g, _ = self.mag_decoder(z, skip, mag)
+        pha_g = self.phase_decoder(z, skip)
         com_g = torch.stack((mag_g * torch.cos(pha_g), mag_g * torch.sin(pha_g)), dim=-1)
         return mag_g, pha_g, com_g
 

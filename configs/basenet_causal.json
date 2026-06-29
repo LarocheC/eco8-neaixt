@@ -1,8 +1,8 @@
 {
-    "_comment": "Causal BASENet (arXiv:2606.12662), MP-SENet training recipe. STFT/optimizer follow the paper's Sec. 3.1 (n_fft=400, hop=100, 16 kHz, batch 8, Adam lr=1e-3, exponential decay 0.98, 100 epochs). Band layout / depths are the paper's BASENet-3 config; widths give ~0.81M params.",
+    "_comment": "Causal BASENet (arXiv:2606.12662), MP-SENet training recipe. STFT/optimizer follow the paper's Sec. 3.1 (n_fft=400, hop=100, 16 kHz, Adam lr=1e-3, exponential decay 0.98, 100 epochs). Band layout / depths are the paper's BASENet-3 config; widths give ~0.81M params. batch_size is 4 (not the paper's 8): the model is activation-heavy (~3.1 GB/sample at 2s segments, matching its 7.1 GMACs), so batch 8 OOMs a 24 GB GPU; batch 4 peaks ~12.6 GB. Raise on a bigger GPU, or add gradient accumulation, to recover the paper's effective batch.",
 
     "num_gpus": 0,
-    "batch_size": 8,
+    "batch_size": 4,
     "learning_rate": 0.001,
     "lr_min": 0.00001,
     "scheduler": "exponential",
