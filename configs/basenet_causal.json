@@ -1,0 +1,50 @@
+{
+    "_comment": "Causal BASENet (arXiv:2606.12662), MP-SENet training recipe. STFT/optimizer follow the paper's Sec. 3.1 (n_fft=400, hop=100, 16 kHz, batch 8, Adam lr=1e-3, exponential decay 0.98, 100 epochs). Band layout / depths are the paper's BASENet-3 config; widths give ~0.81M params.",
+
+    "num_gpus": 0,
+    "batch_size": 8,
+    "learning_rate": 0.001,
+    "lr_min": 0.00001,
+    "scheduler": "exponential",
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "lr_decay": 0.98,
+    "seed": 1234,
+
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+
+    "n_fft": 400,
+    "hop_size": 100,
+    "win_size": 400,
+    "compress_factor": 0.3,
+
+    "base_channels": 32,
+    "expand_ratio": 4,
+    "attn_reduction": 4,
+    "band_edges_hz": [0, 1000, 4000, 8000],
+    "band_depths": [4, 3, 2],
+    "crn_freq": 16,
+    "crn_hidden": 128,
+    "dec_depth": 2,
+    "causal": true,
+
+    "loss": {
+        "magnitude": 0.9,
+        "phase": 0.3,
+        "complex": 0.1,
+        "time": 0.2
+    },
+
+    "gan": {
+        "enabled": true,
+        "metric_loss_lambda": 0.05
+    },
+
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
