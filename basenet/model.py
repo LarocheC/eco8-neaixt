@@ -193,16 +193,47 @@ def make_norm(num_channels, causal):
     return nn.InstanceNorm2d(num_channels, affine=True)
 
 
-def resize_freq(x, freq_out):
-    """Resample the frequency axis to `freq_out`, leaving the time axis untouched.
+def _adaptive_avg_pool_matrix(in_size, out_size):
+    """(out_size, in_size) matrix replicating AdaptiveAvgPool1d, derived by
+    pooling the identity so it matches PyTorch's variable-window averaging
+    exactly."""
+    ident = torch.eye(in_size).unsqueeze(0)                  # (1, in, in)
+    pooled = F.adaptive_avg_pool1d(ident, out_size)[0]       # (in, out)
+    return pooled.t().contiguous()                           # (out, in)
 
-    Uses nearest-neighbour interpolation with the output time size pinned to the
-    input time size, so the mapping along time is the identity (causal-safe).
+
+def _nearest_upsample_matrix(in_size, out_size):
+    """(out_size, in_size) 0/1 matrix replicating nearest-neighbour upsampling,
+    derived from F.interpolate itself so the indexing matches exactly."""
+    ident = torch.eye(in_size).unsqueeze(0)                  # (1, in, in)
+    up = F.interpolate(ident, size=out_size, mode="nearest")[0]   # (in, out)
+    return up.t().contiguous()                               # (out, in)
+
+
+class FreqResample(nn.Module):
+    """Resample the frequency axis by a fixed matrix, leaving time untouched.
+
+    Replaces AdaptiveAvgPool2d (down) and nearest interpolation (up) over the
+    frequency axis with an equivalent constant matmul. Two wins: it exports to
+    ONNX cleanly (ONNX rejects adaptive pooling / Resize with a non-constant
+    output size), and it stays causal (per-frame — the time axis is never
+    mixed). The matrix is a non-persistent buffer (no parameters), so a
+    checkpoint trained against the original pooling/interp ops loads with
+    strict=True and behaves identically.
     """
-    n = x.shape[-1]
-    if x.shape[-2] == freq_out:
-        return x
-    return F.interpolate(x, size=(freq_out, n), mode="nearest")
+
+    def __init__(self, in_size, out_size, mode):
+        super().__init__()
+        if mode == "avg":
+            w = _adaptive_avg_pool_matrix(in_size, out_size)
+        elif mode == "nearest":
+            w = _nearest_upsample_matrix(in_size, out_size)
+        else:
+            raise ValueError(f"unsupported FreqResample mode {mode!r}")
+        self.register_buffer("w", w, persistent=False)       # (out_size, in_size)
+
+    def forward(self, x):                                    # (B, C, F_in, N)
+        return torch.einsum("of,bcfn->bcon", self.w, x)
 
 
 class SEBlock(nn.Module):
@@ -404,13 +435,13 @@ class FusionProjection(nn.Module):
     in Fig. 1). Pooling is over frequency only, so it stays causal.
     """
 
-    def __init__(self, channels, crn_freq, expand_ratio=4, causal=True):
+    def __init__(self, channels, n_features, crn_freq, expand_ratio=4, causal=True):
         super().__init__()
         self.conv = TFConv(channels, channels, kf=3, kt=3, causal=causal)
         self.norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
         self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal)
-        self.pool = nn.AdaptiveAvgPool2d((crn_freq, None))
+        self.pool = FreqResample(n_features, crn_freq, "avg")
 
     def forward(self, x):
         x = self.act(self.norm(self.conv(x)))
@@ -456,16 +487,16 @@ class CRN(nn.Module):
 class EfficientDecoder(nn.Module):
     """Decoder body (Fig. 1): EfficientDenseNet -> upscale frequency -> IR -> norm."""
 
-    def __init__(self, channels, depth, full_freq, expand_ratio=4, causal=True):
+    def __init__(self, channels, depth, in_freq, full_freq, expand_ratio=4, causal=True):
         super().__init__()
-        self.full_freq = full_freq
         self.dense = EfficientDenseNet(channels, depth, expand_ratio, causal)
+        self.upsample = FreqResample(in_freq, full_freq, "nearest")
         self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal)
         self.norm = make_norm(channels, causal)
 
     def forward(self, x):
         x = self.dense(x)
-        x = resize_freq(x, self.full_freq)
+        x = self.upsample(x)
         return self.norm(self.ir(x))
 
 
@@ -493,9 +524,9 @@ class MagMaskDecoder(nn.Module):
     per-bin spectral detail, not just the coarse recurrent bottleneck.
     """
 
-    def __init__(self, channels, depth, n_freq, expand_ratio=4, causal=True):
+    def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True):
         super().__init__()
-        self.body = EfficientDecoder(channels, depth, n_freq, expand_ratio, causal)
+        self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal)
         self.merge = nn.Conv2d(channels * 2, channels, 1)
         self.merge_norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
@@ -517,9 +548,9 @@ class PhaseDecoder(nn.Module):
     head needs per-bin detail the coarse CRN bottleneck cannot provide.
     """
 
-    def __init__(self, channels, depth, n_freq, expand_ratio=4, causal=True):
+    def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True):
         super().__init__()
-        self.body = EfficientDecoder(channels, depth, n_freq, expand_ratio, causal)
+        self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal)
         self.merge = nn.Conv2d(channels * 2, channels, 1)
         self.merge_norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
@@ -573,10 +604,10 @@ class BASENet(nn.Module):
             EfficientDenseNet(C, depth, expand_ratio, causal) for depth in band_depths
         )
         self.cross_band = CrossBandAttention(C, n_bands, attn_reduction, causal)
-        self.fusion = FusionProjection(C, crn_freq, expand_ratio, causal)
+        self.fusion = FusionProjection(C, self.n_features, crn_freq, expand_ratio, causal)
         self.crn = CRN(C, crn_freq, crn_hidden, causal)
-        self.mag_decoder = MagMaskDecoder(C, dec_depth, self.n_features, expand_ratio, causal)
-        self.phase_decoder = PhaseDecoder(C, dec_depth, self.n_features, expand_ratio, causal)
+        self.mag_decoder = MagMaskDecoder(C, dec_depth, crn_freq, self.n_features, expand_ratio, causal)
+        self.phase_decoder = PhaseDecoder(C, dec_depth, crn_freq, self.n_features, expand_ratio, causal)
 
     def forward(self, mag, pha):                   # (B, F, N) each
         x = torch.stack([mag, pha], dim=1)         # (B, 2, F, N)
