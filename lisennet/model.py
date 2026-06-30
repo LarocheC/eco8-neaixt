@@ -30,6 +30,45 @@ the enhanced waveform ``est`` plus spectra/magnitudes for the CMGAN losses.
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+# =============================================================================
+# Frame-by-frame streaming helper
+# =============================================================================
+#
+# LiSenNet is causal in time by construction: every time convolution left-pads
+# the time axis (``(kt-1, 0)``) so frame n never reads a future frame, and the
+# only time-recurrent module — the DPR "inter" GRU — is already unidirectional.
+# (The DPR "intra" GRU is bidirectional only over *frequency*, which is fully
+# available at each frame, so it streams fine.) Real-time inference therefore
+# replaces each causal conv's start-of-sequence zero padding with a ``(kt-1)``-
+# frame ring buffer and carries the inter-GRU hidden state across frames — the
+# same pattern as ``basenet/streaming.py``. Streaming is gated by a ``streaming``
+# flag (default off, so training/export/whole-utterance forward are unchanged)
+# and each stateful module preserves its ``state_dict`` keys, so a checkpoint
+# trained offline streams without retraining.
+
+
+def _causal_conv_stream(pad_mod, conv, buf, x):
+    """One streaming step of a causal-in-time ``(ConstantPad2d, Conv2d)`` pair.
+
+    Tensors are ``(B, C, T, Fr)`` (time = dim 2, freq = dim 3). ``x`` is a single
+    time frame ``(B, C, 1, Fr)``; ``buf`` holds the previous ``kt-1`` input frames
+    (or ``None`` at stream start). The frequency padding is read from ``pad_mod``
+    (the offline ``ConstantPad2d``) so freq handling is bit-identical to offline;
+    the time padding is supplied by the ring buffer instead of zeros, making the
+    step numerically identical to the offline conv on a steady stream.
+    """
+    f_left, f_right, _t_top, _t_bot = pad_mod.padding
+    kt = conv.kernel_size[0]
+    k = kt - 1
+    if buf is None:
+        buf = x.new_zeros(x.shape[0], x.shape[1], k, x.shape[3])
+    win = torch.cat([buf, x], dim=2)                     # (B, C, kt, Fr)
+    new_buf = win[:, :, 1:, :] if k > 0 else buf         # keep last kt-1 input frames
+    win = F.pad(win, (f_left, f_right, 0, 0))            # freq pad only (time supplied by buf)
+    return conv(win), new_buf
 
 
 # =============================================================================
@@ -77,6 +116,14 @@ class DualPathRNN(nn.Module):
         self.intra_rnn_attn = RNN(emb_dim, hidden_dim // 2, dropout_p, bidirectional=True)
         self.inter_norm = nn.LayerNorm((n_freqs, emb_dim))
         self.inter_rnn_attn = RNN(emb_dim, hidden_dim, dropout_p, bidirectional=False)
+        # Streaming: the inter-time GRU hidden state, carried across frames. The
+        # intra GRU runs over frequency (fully available per frame) and is
+        # stateless across time. Default off.
+        self.streaming = False
+        self._h = None
+
+    def stream_reset(self):
+        self._h = None
 
     def forward(self, x):                                    # (b, d, t, f)
         b, d, t, f = x.size()
@@ -89,7 +136,12 @@ class DualPathRNN(nn.Module):
 
         x_res = x
         x = self.inter_norm(x).permute(0, 2, 1, 3).reshape(b * f, t, d)   # inter-time
-        x = self.inter_rnn_attn(x).reshape(b, f, t, d).permute(0, 2, 1, 3)
+        if self.streaming:                                   # carry GRU hidden across frames
+            g, self._h = self.inter_rnn_attn.rnn(x, self._h)
+            x = self.inter_rnn_attn.dense(g)
+        else:
+            x = self.inter_rnn_attn(x)
+        x = x.reshape(b, f, t, d).permute(0, 2, 1, 3)
         x = x + x_res
 
         return x.permute(0, 3, 1, 2)                         # (b, d, t, f)
@@ -108,12 +160,22 @@ class ConvolutionalGLU(nn.Module):
         self.act = nn.Mish()
         self.fc2 = nn.Conv2d(hidden_dim, emb_dim, 1)
         self.dropout = nn.Dropout(dropout_p)
+        # Streaming: the causal depthwise conv keeps a (kt-1)-frame ring buffer.
+        self.streaming = False
+        self._buf = None
+
+    def stream_reset(self):
+        self._buf = None
 
     def forward(self, x):                                    # (b, d, t, f)
         res = x
         x = self.norm(x)
         x, v = self.fc1(x).chunk(2, dim=1)
-        x = self.act(self.dwconv(x)) * v
+        if self.streaming:
+            x, self._buf = _causal_conv_stream(self.dwconv[0], self.dwconv[1], self._buf, x)
+        else:
+            x = self.dwconv(x)
+        x = self.act(x) * v
         x = self.dropout(x)
         return self.fc2(x) + res
 
@@ -178,10 +240,24 @@ class DSConv(nn.Module):
         )
         self.norm = CustomLayerNorm((1, n_freqs // 2), stat_dims=(1, 3))
         self.act = nn.PReLU(out_channels)
+        # Streaming: low and high sub-band convs each keep their own ring buffer.
+        self.streaming = False
+        self._buf_low = None
+        self._buf_high = None
+
+    def stream_reset(self):
+        self._buf_low = None
+        self._buf_high = None
 
     def forward(self, x):                                    # (b, d, t, f)
-        x_low = self.low_conv(x[..., :self.low_freqs])
-        x_high = self.high_conv(x[..., self.low_freqs:])
+        if self.streaming:
+            x_low, self._buf_low = _causal_conv_stream(
+                self.low_conv[0], self.low_conv[1], self._buf_low, x[..., :self.low_freqs])
+            x_high, self._buf_high = _causal_conv_stream(
+                self.high_conv[0], self.high_conv[1], self._buf_high, x[..., self.low_freqs:])
+        else:
+            x_low = self.low_conv(x[..., :self.low_freqs])
+            x_high = self.high_conv(x[..., self.low_freqs:])
         return self.act(self.norm(torch.cat([x_low, x_high], dim=-1)))
 
 
@@ -238,12 +314,25 @@ class MaskDecoder(nn.Module):
             nn.Conv2d(out_channel, out_channel, (1, 1)),
         )
         self.lsigmoid = LearnableSigmoid2d(num_features, beta=beta)
+        # Streaming: the first mask conv (kernel (2,2)) is causal in time and keeps
+        # a 1-frame ring buffer; the rest of mask_conv is per-frame.
+        self.streaming = False
+        self._buf = None
+
+    def stream_reset(self):
+        self._buf = None
 
     def forward(self, x, encoder_out_list):
         x = self.up1(torch.cat([x, encoder_out_list.pop()], dim=1))
         x = self.up2(torch.cat([x, encoder_out_list.pop()], dim=1))
         x = self.up3(torch.cat([x, encoder_out_list.pop()], dim=1))
-        x = self.mask_conv(x)                                # (B, out_channel, T, F)
+        if self.streaming:
+            x, self._buf = _causal_conv_stream(self.mask_conv[0], self.mask_conv[1], self._buf, x)
+            x = self.mask_conv[2](x)                          # CustomLayerNorm (per-frame)
+            x = self.mask_conv[3](x)                          # PReLU
+            x = self.mask_conv[4](x)                          # 1x1 conv
+        else:
+            x = self.mask_conv(x)                            # (B, out_channel, T, F)
         x = x.permute(0, 3, 2, 1)                            # (B, F, T, out_channel)
         return self.lsigmoid(x).permute(0, 3, 2, 1)
 
@@ -318,6 +407,30 @@ class LiSenNet(nn.Module):
             tprev = rebuilt
         return pha
 
+    # ----- mask sub-network (the deployable / streamable core) --------------
+    def build_features(self, src_mag, src_pha):
+        """Stack the 3-channel network input: [compressed mag, GD/pi, IFD/pi]."""
+        src_gd = self.cal_gd(src_pha)
+        src_ifd = self.cal_ifd(src_pha)
+        return torch.stack([src_mag, src_gd / torch.pi, src_ifd / torch.pi], dim=1)  # (B, 3, T, F)
+
+    def predict_mask(self, feat):
+        """Encoder -> DPR blocks -> decoder. feat (B, 3, T, F) -> mask (B, 2, T, F).
+
+        Pure tensor ops (no STFT / Griffin-Lim), causal in time — this is the
+        sub-network that is exported to ONNX and run frame-by-frame for real-time
+        inference. STFT, feature extraction, the magnitude combination and the
+        phase recovery live outside it.
+        """
+        encoder_out_list = self.encoder(feat)
+        x = self.blocks(encoder_out_list[-1])
+        return self.decoder(x, encoder_out_list)              # (B, 2, T, F)
+
+    @staticmethod
+    def apply_mask(mask, src_mag):
+        """Combine the 2-channel mask with the noisy magnitude (upstream Eq.)."""
+        return (mask[:, 0] + 1e-8) * src_mag + (mask[:, 1] + 1e-8) * src_mag
+
     # ----- forward ----------------------------------------------------------
     def forward(self, src, tgt=None):
         if tgt is None:
@@ -325,19 +438,14 @@ class LiSenNet(nn.Module):
         src_spec = self.power_compress(self.apply_stft(src))  # (B, T, F)
         src_mag = src_spec.abs()
         src_pha = src_spec.angle()
-        src_gd = self.cal_gd(src_pha)
-        src_ifd = self.cal_ifd(src_pha)
 
         tgt_spec = self.power_compress(self.apply_stft(tgt))
         tgt_mag = tgt_spec.abs()
 
-        x = torch.stack([src_mag, src_gd / torch.pi, src_ifd / torch.pi], dim=1)  # (B, 3, T, F)
+        x = self.build_features(src_mag, src_pha)             # (B, 3, T, F)
+        x = self.predict_mask(x)                              # (B, 2, T, F)
 
-        encoder_out_list = self.encoder(x)
-        x = self.blocks(encoder_out_list[-1])
-        x = self.decoder(x, encoder_out_list)                 # (B, 2, T, F)
-
-        est_mag = (x[:, 0] + 1e-8) * src_mag + (x[:, 1] + 1e-8) * src_mag
+        est_mag = self.apply_mask(x, src_mag)
 
         est_pha = self.griffinlim(est_mag.detach(), src_pha, tgt.size(-1))
         est_spec = torch.complex(est_mag * est_pha.cos(), est_mag * est_pha.sin())
