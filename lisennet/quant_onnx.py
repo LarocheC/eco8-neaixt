@@ -107,7 +107,10 @@ def main():
         from common.env import AttrDict
         with open(a.config) as f:
             h = AttrDict(json.load(f))
-        quantize_static_int8(a.fp32, out, VBDCalibrationReader(h, a.calib_utts))
+        # per_channel=False: ORT's per-channel int32-bias scale adjustment trips
+        # on this graph's biases (see module docstring / RESULTS_LISENNET.md).
+        quantize_static_int8(a.fp32, out, VBDCalibrationReader(h, a.calib_utts),
+                             per_channel=False)
     print(f"Wrote {out} ({out.stat().st_size / 1e6:.2f} MB, mode={a.mode})")
 
 

@@ -38,6 +38,3 @@ hf_staging/
 # ORT / PESQ scratch artifacts
 sym_shape_infer_temp.onnx
 *.data
-
-# LiSenNet deploy artifacts (generated ONNX / int8 graphs)
-/deploy/

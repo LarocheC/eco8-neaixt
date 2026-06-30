@@ -193,7 +193,7 @@ est_mag = sess.run(["est_mag"], {"feat": np.zeros((1, 3, 100, 257), np.float32)}
 To (re-)publish from a fresh run:
 
 ```bash
-python push_lisennet_hf.py            # cp_lisennet/ + deploy/lisennet/ -> claroche1/LiSenNet
+python push_lisennet_hf.py            # cp_lisennet/ -> claroche1/LiSenNet
 ```
 
 (needs `huggingface-cli login` or `HF_TOKEN`; idempotent — re-running just makes

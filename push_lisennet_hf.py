@@ -5,12 +5,12 @@ the static int8 ONNX graph (the embedded-deployable quantization), and the
 training config to `claroche1/LiSenNet` (or any repo via --repo-id), plus a
 generated model card. Idempotent: re-runs just create new commits.
 
-The checkpoint comes from a training run dir (default `cp_lisennet/`); the ONNX
-graphs come from the deploy dir produced by `lisennet.eval_deploy` /
-`lisennet.export_onnx` + `lisennet.quant_onnx` (default `deploy/lisennet/`).
+The checkpoint and the exported ONNX graphs both come from the training run dir
+(default `cp_lisennet/`): `lisennet.export_onnx` / `lisennet.quant_onnx` /
+`lisennet.eval_deploy` all write the ONNX next to `g_best`.
 
 Usage:
-    # uploads cp_lisennet/ + deploy/lisennet/ -> claroche1/LiSenNet
+    # uploads cp_lisennet/ -> claroche1/LiSenNet
     python push_lisennet_hf.py
 
     # preview without uploading
@@ -151,8 +151,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--checkpoint_dir", default="cp_lisennet",
                    help="Dir with config.json + g_best (default: cp_lisennet).")
-    p.add_argument("--onnx_dir", default="deploy/lisennet",
-                   help="Dir with the exported ONNX graphs (default: deploy/lisennet).")
+    p.add_argument("--onnx_dir", default=None,
+                   help="Dir with the exported ONNX graphs "
+                        "(default: same as --checkpoint_dir, the run dir).")
     p.add_argument("--repo-id", default="claroche1/LiSenNet",
                    help="Target HF model repo (default: claroche1/LiSenNet).")
     p.add_argument("--commit-message", default="upload LiSenNet checkpoint + ONNX (fp32, static int8)",
@@ -164,7 +165,7 @@ def main():
     a = p.parse_args()
 
     ckpt_dir = Path(a.checkpoint_dir).resolve()
-    onnx_dir = Path(a.onnx_dir).resolve()
+    onnx_dir = Path(a.onnx_dir).resolve() if a.onnx_dir else ckpt_dir
     dirs = {"ckpt": ckpt_dir, "onnx": onnx_dir}
 
     resolved = {}
