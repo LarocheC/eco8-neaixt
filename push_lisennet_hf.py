@@ -1,9 +1,9 @@
 """Upload a LiSenNet checkpoint + ONNX artifacts to a HuggingFace model repo.
 
 Pushes the trained PyTorch checkpoint, the FP32 ONNX of the mask sub-network,
-the dynamic and static int8 ONNX graphs, and the training config to
-`claroche1/LiSenNet` (or any repo via --repo-id), plus a generated model card.
-Idempotent: re-runs just create new commits.
+the static int8 ONNX graph (the embedded-deployable quantization), and the
+training config to `claroche1/LiSenNet` (or any repo via --repo-id), plus a
+generated model card. Idempotent: re-runs just create new commits.
 
 The checkpoint comes from a training run dir (default `cp_lisennet/`); the ONNX
 graphs come from the deploy dir produced by `lisennet.eval_deploy` /
@@ -37,7 +37,6 @@ FILE_MAP = {
     "config.json": ("ckpt", "config.json"),
     "g_best": ("ckpt", "g_best"),
     "g_best_fp32.onnx": ("onnx", "g_best_fp32.onnx"),
-    "g_best_int8_dyn.onnx": ("onnx", "g_best_int8_dyn.onnx"),
     "g_best_int8_static.onnx": ("onnx", "g_best_int8_static.onnx"),
 }
 
@@ -79,17 +78,17 @@ Training / export / quantization code and the full write-up:
 
 PESQ is wideband, on the full 824-utterance VoiceBank-DEMAND test split.
 
-| metric                                  |     value |
-| --------------------------------------- | --------: |
-| params                                  | 36,783    |
-| FP32 PESQ (torch / ONNX, Griffin-Lim)   | **3.006** |
-| dynamic-int8 PESQ (Griffin-Lim)         |     2.995 |
-| **real-time PESQ (int8 + noisy phase)** | **2.982** |
-| static-int8 PESQ (Griffin-Lim)          |     2.897 |
-| RTF (1 thread CPU)                      |     0.15  |
+| metric                                          |     value |
+| ----------------------------------------------- | --------: |
+| params                                          | 36,783    |
+| FP32 PESQ (torch / ONNX, Griffin-Lim)           | **3.006** |
+| static-int8 PESQ (Griffin-Lim)                  |     2.920 |
+| **real-time PESQ (static int8 + noisy phase)**  | **2.930** |
+| RTF (1 thread CPU)                              |     0.13  |
 
-The ONNX export is loss-free; dynamic weight-only int8 costs ~0.012 PESQ. The
-reproduction lands within ~0.06 of the paper's reported ~3.07.
+The ONNX export is loss-free; static int8 (the embedded-deployable
+quantization) costs ~0.086 PESQ. The reproduction lands within ~0.06 of the
+paper's reported ~3.07.
 
 ## Files
 
@@ -97,8 +96,7 @@ reproduction lands within ~0.06 of the paper's reported ~3.07.
 | ------------------------- | --- |
 | `g_best`                  | PyTorch checkpoint (`{"generator": state_dict}`) |
 | `g_best_fp32.onnx`        | FP32 ONNX of the mask sub-network: `feat (B,3,T,F)` -> `est_mag (B,T,F)`, dynamic batch/time |
-| `g_best_int8_dyn.onnx`    | Dynamic weight-only int8 (robust, near loss-free) — **recommended** |
-| `g_best_int8_static.onnx` | Static full int8 (QDQ, per-tensor, percentile calibration; QAT-grade) |
+| `g_best_int8_static.onnx` | Static full int8 (QDQ, per-tensor, percentile calibration; embedded-deployable) |
 | `config.json`             | Training + architecture config (STFT, channels, blocks) |
 
 The ONNX graphs cover only the mask sub-network (the pure tensor-op core). The
@@ -135,7 +133,7 @@ from huggingface_hub import hf_hub_download
 
 REPO = "{repo_id}"
 sess = ort.InferenceSession(
-    hf_hub_download(REPO, "g_best_int8_dyn.onnx"),   # or _fp32 / _int8_static
+    hf_hub_download(REPO, "g_best_int8_static.onnx"),   # or g_best_fp32.onnx
     providers=["CPUExecutionProvider"],
 )
 # input  feat: (B, 3, T, F=257) = [compressed_mag, group_delay/pi, ifd/pi]
@@ -157,7 +155,7 @@ def main():
                    help="Dir with the exported ONNX graphs (default: deploy/lisennet).")
     p.add_argument("--repo-id", default="claroche1/LiSenNet",
                    help="Target HF model repo (default: claroche1/LiSenNet).")
-    p.add_argument("--commit-message", default="upload LiSenNet checkpoint + ONNX (fp32, int8 dyn/static)",
+    p.add_argument("--commit-message", default="upload LiSenNet checkpoint + ONNX (fp32, static int8)",
                    help="Commit message for the HF upload.")
     p.add_argument("--private", action="store_true",
                    help="Create the HF repo as private (default: public).")

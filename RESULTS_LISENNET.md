@@ -19,9 +19,9 @@ the standalone `NoiseDetector`) and reuses this repo's CMGAN
 
 It runs **frame-by-frame**: the mask sub-network is causal in time, so each
 causal time-conv keeps a `(kt-1)`-frame ring buffer and the DPR inter-time GRU
-carries its hidden state. The streaming reference, the FP32 ONNX export, and
-the dynamic/static int8 quantization are all parity-checked against the offline
-model (`tests/test_lisennet_*`).
+carries its hidden state. The streaming reference, the FP32 ONNX export, and the
+int8 quantization are all parity-checked against the offline model
+(`tests/test_lisennet_*`).
 
 See [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md) and
 [RESULTS_NSNET2.md](RESULTS_NSNET2.md) for the other model families, and the
@@ -35,15 +35,15 @@ full 824-utterance VBD test split. The model is trained with the offline
 Griffin-Lim phase; for real-time deployment the non-causal Griffin-Lim is
 dropped in favour of the noisy phase (its own seed).
 
-| metric                              |     value |
-| ----------------------------------- | --------: |
-| params                              | 36,783    |
-| FP32 PESQ (torch, Griffin-Lim)      | **3.006** |
-| FP32 PESQ (ONNX, Griffin-Lim)       | **3.006** |
-| dynamic-int8 PESQ (Griffin-Lim)     |     2.995 |
-| **real-time PESQ (int8 + noisy phase)** | **2.982** |
-| int8 RTF (1 thread CPU)             |     0.15  |
-| FP32 ONNX size                      | 0.27 MiB  |
+| metric                                          |     value |
+| ----------------------------------------------- | --------: |
+| params                                          | 36,783    |
+| FP32 PESQ (torch, Griffin-Lim)                  | **3.006** |
+| FP32 PESQ (ONNX, Griffin-Lim)                   | **3.006** |
+| static-int8 PESQ (Griffin-Lim)                  |     2.920 |
+| **real-time PESQ (static int8 + noisy phase)**  | **2.930** |
+| int8 RTF (1 thread CPU)                         |     0.13  |
+| FP32 ONNX size                                  | 0.27 MiB  |
 
 The reproduction lands at **PESQ 3.006**, within ~0.06 of the paper's reported
 ~3.07 — a faithful from-scratch reproduction in this framework's pipeline.
@@ -82,44 +82,50 @@ deployment step's cost is isolated. (Hold phase = Griffin-Lim and vary the
 backend to read the export/quant cost; hold backend = torch and vary the phase
 to read the cost of dropping Griffin-Lim.)
 
-| variant                                          |  PESQ | Δ vs offline |
-| ------------------------------------------------ | ----: | -----------: |
-| torch + Griffin-Lim (offline recipe)             | 3.006 |            — |
-| FP32 ONNX + Griffin-Lim                           | 3.006 |    **0.000** |
-| dynamic-int8 ONNX + Griffin-Lim                   | 2.995 |       −0.012 |
-| torch + noisy phase (real-time phase)             | 2.989 |       −0.017 |
-| **dynamic-int8 ONNX + noisy phase (full real-time)** | 2.982 |   **−0.025** |
-| static-int8 ONNX + Griffin-Lim                    | 2.897 |       −0.109 |
+Static int8 is the quantization reported here because it is the
+embedded-deployable path — dynamic weight-only int8 is not supported by the
+target edge runtimes (e.g. stedgeai), so it is not measured.
+
+| variant                                            |  PESQ | Δ vs offline |
+| -------------------------------------------------- | ----: | -----------: |
+| torch + Griffin-Lim (offline recipe)               | 3.006 |            — |
+| FP32 ONNX + Griffin-Lim                             | 3.006 |    **0.000** |
+| torch + noisy phase (real-time phase)              | 2.989 |       −0.017 |
+| static-int8 ONNX + Griffin-Lim                     | 2.920 |       −0.086 |
+| **static-int8 ONNX + noisy phase (full real-time)** | 2.930 |   **−0.076** |
 
 Takeaways:
 
 * **The ONNX export is loss-free** (3.006 → 3.006): the exported mask
   sub-network is numerically the torch model.
-* **Dynamic weight-only int8 is near-loss-free** (−0.012 PESQ) and is the
-  recommended PTQ path.
-* **Dropping the non-causal Griffin-Lim costs only ~0.017 PESQ**, so the
+* **Dropping the non-causal Griffin-Lim costs only ~0.017 PESQ** on FP32, so the
   causal real-time pipeline stays close to the offline model.
-* The full real-time deployable config — **dynamic int8 mask + noisy phase** —
-  lands at **2.982**, just 0.025 below the offline model.
-* **Static full int8** degrades more (−0.109) and would need quantization-aware
-  training, the same conclusion the BASENet and ConvFSENet int8 studies reached
-  here — but it is a mild drop, not a collapse, because the mask is
-  magnitude-only (no sensitive `atan2` phase path).
+* **Static int8 PTQ costs ~0.08 PESQ** — a moderate drop, not a collapse (the
+  mask is magnitude-only, with no sensitive `atan2` phase path); QAT could
+  recover part of it, the same direction the BASENet and ConvFSENet int8 studies
+  point. The static-int8 PESQ has ~±0.02 run-to-run variance from the stochastic
+  calibration crops.
+* For the quantized model, the **noisy phase is marginally better than
+  Griffin-Lim** (2.930 vs 2.920): GL refinement seeded from the *quantized*
+  magnitude no longer helps, so the causal real-time path costs nothing extra
+  over GL here.
+* The full real-time deployable config — **static int8 mask + noisy phase** —
+  lands at **2.930**, 0.076 below the offline model, at RTF ≈ 0.13.
 
 ### Real-time factor
 
 Frame-by-frame mask compute under a single onnxruntime / PyTorch CPU thread is
-**~2.4 ms per 16 ms frame → RTF ≈ 0.15**, i.e. ~6.6× faster than real time,
+**~2.1 ms per 16 ms frame → RTF ≈ 0.13**, i.e. ~7.5× faster than real time,
 with the bounded per-frame state described above.
 
 ### Note — int8 file size
 
 Unlike the larger models here, the int8 ONNX **file is not smaller** than FP32
-(~0.32 MiB vs 0.27 MiB). At ~37 K parameters the per-weight-tensor quant
-metadata (DequantizeLinear nodes, scale / zero-point initializers, int32
-biases) outweighs the byte saving on such small weights — the model is already
-tiny in FP32. The win from int8 here is integer-arithmetic compute on edge
-hardware, not graph footprint. (Static int8 additionally needs
+(static int8 ~0.44 MiB vs 0.27 MiB). At ~37 K parameters the per-weight-tensor
+quant metadata (QuantizeLinear / DequantizeLinear nodes, scale / zero-point
+initializers, int32 biases) outweighs the byte saving on such small weights —
+the model is already tiny in FP32. The win from int8 here is integer-arithmetic
+compute on edge hardware, not graph footprint. (Static int8 also needs
 `per_channel=False` to dodge an onnxruntime int32-bias-scale-adjustment bug on
 this graph.)
 
@@ -132,8 +138,9 @@ python -m lisennet.train --config configs/lisennet.json \
     --checkpoint_path cp_lisennet --training_epochs 100
 # FP32 ONNX export of the mask sub-network (feat -> est_mag, dynamic B/T)
 python -m lisennet.export_onnx --checkpoint_file cp_lisennet/g_best
-# dynamic weight-only int8 (robust) — or --mode static (QAT-grade)
-python -m lisennet.quant_onnx --fp32 cp_lisennet/g_best_fp32.onnx --mode dynamic
+# static full int8 (QDQ, per-tensor, percentile calibration) — embedded-deployable
+python -m lisennet.quant_onnx --fp32 cp_lisennet/g_best_fp32.onnx --mode static \
+    --config cp_lisennet/config.json
 # full deploy eval: PESQ across backend × phase + streaming RTF
 python -m lisennet.eval_deploy --checkpoint_file cp_lisennet/g_best --n_utts 824
 ```
@@ -148,8 +155,8 @@ streaming flag is off, and the offline forward stays bit-identical).
 ## Trained checkpoint
 
 The best-PESQ generator (`g_best`), the FP32 ONNX (`g_best_fp32.onnx`), the
-dynamic and static int8 ONNX (`g_best_int8_dyn.onnx`, `g_best_int8_static.onnx`),
-and the training config are mirrored on HuggingFace at
+static int8 ONNX (`g_best_int8_static.onnx`), and the training config are
+mirrored on HuggingFace at
 [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet).
 
 PyTorch:
@@ -177,7 +184,7 @@ from huggingface_hub import hf_hub_download
 
 REPO = "claroche1/LiSenNet"
 sess = ort.InferenceSession(
-    hf_hub_download(REPO, "g_best_int8_dyn.onnx"),   # or _fp32 / _int8_static
+    hf_hub_download(REPO, "g_best_int8_static.onnx"),   # or g_best_fp32.onnx
     providers=["CPUExecutionProvider"],
 )
 est_mag = sess.run(["est_mag"], {"feat": np.zeros((1, 3, 100, 257), np.float32)})[0]

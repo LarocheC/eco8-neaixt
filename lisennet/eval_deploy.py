@@ -37,9 +37,7 @@ from common.dataset import Dataset, load_voicebank_demand
 from common.env import AttrDict
 from common.metrics import pesq_score
 from lisennet.export_onnx import _load_from_checkpoint, export_fp32
-from lisennet.quant_onnx import (
-    VBDCalibrationReader, quantize_dynamic_int8, quantize_static_int8,
-)
+from lisennet.quant_onnx import VBDCalibrationReader, quantize_static_int8
 from lisennet.streaming import LiSenNetStreamer
 
 
@@ -65,14 +63,15 @@ def evaluate(model, sessions, h, n_utts, device="cpu"):
     ds = Dataset(hf["test"], h.segment_size, h.sampling_rate, split=False, shuffle=False, seed=h.seed)
     n_utts = min(n_utts, len(ds))
 
-    # variant -> (mask backend key, use_gl)
+    # variant -> (mask backend key, use_gl). Static int8 is the embedded-
+    # deployable quantization (dynamic weight-only int8 is not supported by the
+    # target edge runtimes), so it is the int8 path reported here.
     variants = {
         "torch + GL (offline recipe)": ("torch", True),
         "torch + noisy phase (real-time phase)": ("torch", False),
         "fp32 ONNX + GL": ("fp32", True),
-        "int8-dyn ONNX + GL": ("int8_dyn", True),
         "int8-static ONNX + GL": ("int8_static", True),
-        "int8-dyn ONNX + noisy phase (full real-time)": ("int8_dyn", False),
+        "int8-static ONNX + noisy phase (full real-time)": ("int8_static", False),
     }
     refs = []
     ests = {name: [] for name in variants}
@@ -91,7 +90,7 @@ def evaluate(model, sessions, h, n_utts, device="cpu"):
         masks = {}
         masks["torch"] = model.apply_mask(model.predict_mask(feat), src_mag)
         feat_np = feat.cpu().numpy()
-        for key in ("fp32", "int8_dyn", "int8_static"):
+        for key in ("fp32", "int8_static"):
             if key in sessions:
                 em = sessions[key].run(["est_mag"], {"feat": feat_np})[0]
                 masks[key] = torch.from_numpy(em).to(device)
@@ -159,9 +158,8 @@ def main():
     work = Path(a.workdir)
     work.mkdir(parents=True, exist_ok=True)
     fp32 = export_fp32(model, work / "g_best_fp32.onnx")
-    int8_dyn = quantize_dynamic_int8(fp32, work / "g_best_int8_dyn.onnx")
-    sessions = {"fp32": _session(fp32), "int8_dyn": _session(int8_dyn)}
-    sizes = {"fp32": fp32.stat().st_size, "int8_dyn": int8_dyn.stat().st_size}
+    sessions = {"fp32": _session(fp32)}
+    sizes = {"fp32": fp32.stat().st_size}
     if not a.skip_static:
         try:
             # per_channel=False: ORT's per-channel int32-bias scale adjustment

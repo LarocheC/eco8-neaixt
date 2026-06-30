@@ -30,7 +30,7 @@ Detailed results are kept in separate files:
 
 * [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
 * [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
-* [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/dynamic-int8 ONNX, and the real-time (noisy-phase) deployment eval.
+* [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/static-int8 ONNX, and the real-time (noisy-phase) deployment eval.
 
 
 ## Setup
@@ -89,7 +89,7 @@ lisennet/                Ultra-compact sub-band + dual-path enhancer
   streaming.py           Frame-by-frame streamer (bounded state)
   train.py               CMGAN training loop
   export_onnx.py         FP32 ONNX export of the mask sub-network
-  quant_onnx.py          Dynamic + static int8 quantization
+  quant_onnx.py          Static (+ dynamic) int8 quantization
   eval_deploy.py         PESQ (backend × phase) + streaming RTF eval
 
 configs/                 Per-run configs for all model families
@@ -161,11 +161,11 @@ Typical workflow:
 ```bash
 python -m lisennet.train --config configs/lisennet.json --checkpoint_path cp_lisennet --training_epochs 100
 python -m lisennet.export_onnx --checkpoint_file cp_lisennet/g_best
-python -m lisennet.quant_onnx --fp32 cp_lisennet/g_best_fp32.onnx --mode dynamic
+python -m lisennet.quant_onnx --fp32 cp_lisennet/g_best_fp32.onnx --mode static --config cp_lisennet/config.json
 python -m lisennet.eval_deploy --checkpoint_file cp_lisennet/g_best --n_utts 824
 ```
 
-The reproduction reaches **PESQ 3.006** (full VBD test split, within ~0.06 of the paper's ~3.07). The ONNX export is loss-free, dynamic weight-only int8 costs ~0.012 PESQ, and the full real-time config (int8 mask + noisy phase) lands at **2.982** at **RTF ≈ 0.15** on a single CPU thread. See [RESULTS_LISENNET.md](RESULTS_LISENNET.md) for the full backend × phase breakdown.
+The reproduction reaches **PESQ 3.006** (full VBD test split, within ~0.06 of the paper's ~3.07). The ONNX export is loss-free, static int8 (the embedded-deployable quantization) costs ~0.086 PESQ, and the full real-time config (static int8 mask + noisy phase) lands at **2.930** at **RTF ≈ 0.13** on a single CPU thread. See [RESULTS_LISENNET.md](RESULTS_LISENNET.md) for the full backend × phase breakdown.
 
 ## Trained checkpoints
 
@@ -173,7 +173,7 @@ Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
 
 * [`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints)
 * [`claroche1/convfsenet`](https://huggingface.co/claroche1/convfsenet)
-* [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — PyTorch `g_best`, FP32 ONNX, and dynamic/static int8 ONNX
+* [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — PyTorch `g_best`, FP32 ONNX, and static int8 ONNX
 
 See the result files for loading examples and evaluation commands.
 
