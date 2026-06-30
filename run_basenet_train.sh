@@ -23,6 +23,7 @@ set -euo pipefail
 CKPT_DIR="${1:-cp_basenet_causal}"
 CONFIG="${2:-configs/basenet_causal.json}"
 EPOCHS="${3:-100}"
+ACCUM="${4:-1}"          # gradient-accumulation micro-batches (effective batch = batch_size*ACCUM)
 SESSION="bn_$(basename "$CKPT_DIR")"
 
 cd "$(dirname "$0")"
@@ -46,6 +47,7 @@ tmux new-session -d -s "$SESSION" \
      --config '$CONFIG' \
      --checkpoint_path '$CKPT_DIR' \
      --training_epochs '$EPOCHS' \
+     --accum_steps '$ACCUM' \
      --stdout_interval 20 \
      --validation_interval 1000 \
      --checkpoint_interval 2000 \

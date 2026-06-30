@@ -121,6 +121,31 @@ def test_generator_step_runs_and_trends_down(cfg):
     )
 
 
+def test_grad_accumulation_equals_full_batch(cfg):
+    """Accumulating 2 micro-batches of size 2 (scaled 1/2) gives the same
+    generator gradients as one batch of size 4. This is exact, not approximate,
+    because every module is per-sample (no batch statistics) — which is what
+    makes '--accum_steps 2' a faithful stand-in for the paper's larger batch."""
+    torch.manual_seed(0)
+    model = build_basenet(cfg)
+    clean = torch.randn(4, 1, 8000)
+    noisy = torch.randn(4, 1, 8000)
+
+    model.zero_grad(set_to_none=True)
+    loss, _ = generator_loss(model, noisy, clean, cfg)
+    loss.backward()
+    g_full = [p.grad.clone() for p in model.parameters() if p.grad is not None]
+
+    model.zero_grad(set_to_none=True)
+    for sl in (slice(0, 2), slice(2, 4)):
+        l, _ = generator_loss(model, noisy[sl], clean[sl], cfg)
+        (l / 2).backward()
+    g_accum = [p.grad.clone() for p in model.parameters() if p.grad is not None]
+
+    max_diff = max((a - b).abs().max().item() for a, b in zip(g_full, g_accum))
+    assert max_diff < 1e-5, f"accumulation != full batch: max grad diff {max_diff:.2e}"
+
+
 def test_gan_step_runs_end_to_end(cfg):
     """A full MetricGAN step (generator + discriminator) must run without error
     and produce finite losses (PESQ on synthetic audio may be unavailable, which

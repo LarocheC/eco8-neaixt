@@ -112,8 +112,9 @@ def generator_loss(model, noisy_audio, clean_audio, h, weights=None):
 
 
 def gan_step(model, discriminator, optim, optim_d, noisy_audio, clean_audio,
-             h, metric_lambda, device, weights=None):
-    """One MetricGAN training step (generator + discriminator).
+             h, metric_lambda, device, weights=None,
+             accum=1, is_first=True, do_step=True):
+    """One MetricGAN micro-step (generator + discriminator), accumulation-aware.
 
     The discriminator learns to map (clean_mag, x_mag) -> normalised PESQ: 1 for
     clean-vs-clean, ``batch_pesq`` for pred-vs-clean. The generator adds a metric
@@ -121,6 +122,13 @@ def gan_step(model, discriminator, optim, optim_d, noisy_audio, clean_audio,
     built once in ``generator_loss``; the discriminator branch uses a detached
     magnitude so its backward doesn't free the generator graph (same pattern as
     convfsenet/train.py).
+
+    Gradient accumulation: losses are scaled by ``1/accum`` and grads accumulate
+    over ``accum`` micro-batches; ``zero_grad`` fires on ``is_first`` and the
+    optimizers step on ``do_step``. Because every module + the discriminator is
+    per-sample (no batch statistics), accum micro-batches of size B/accum are
+    numerically equal to one batch of size B. ``accum=1`` reproduces the original
+    per-batch step exactly.
     """
     weights = weights or _loss_weights(h)
     base_loss, parts = generator_loss(model, noisy_audio, clean_audio, h, weights)
@@ -134,7 +142,8 @@ def gan_step(model, discriminator, optim, optim_d, noisy_audio, clean_audio,
         list(clean[..., :n].detach().cpu().numpy()),
         list(audio_g[..., :n].detach().cpu().numpy()),
     )
-    optim_d.zero_grad()
+    if is_first:
+        optim_d.zero_grad()
     metric_r = discriminator(clean_mag, clean_mag)
     metric_g = discriminator(clean_mag, pred_mag.detach())
     loss_disc_r = F.mse_loss(one_labels, metric_r.flatten())
@@ -145,17 +154,20 @@ def gan_step(model, discriminator, optim, optim_d, noisy_audio, clean_audio,
         # too-short, NaN) — skip the fake branch for this batch.
         loss_disc_g = torch.zeros((), device=device)
     loss_disc = loss_disc_r + loss_disc_g
-    loss_disc.backward()
-    optim_d.step()
+    (loss_disc / accum).backward()
+    if do_step:
+        optim_d.step()
 
     # ----- generator step ---------------------------------------------------
-    optim.zero_grad()
+    if is_first:
+        optim.zero_grad()
     metric_g = discriminator(clean_mag, pred_mag)              # keeps generator grad
     loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
     loss_gen = base_loss + metric_lambda * loss_metric
-    loss_gen.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-    optim.step()
+    (loss_gen / accum).backward()
+    if do_step:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        optim.step()
 
     return {
         "loss": float(loss_gen.item()),
@@ -280,9 +292,15 @@ def train(a, h):
     sw = SummaryWriter(os.path.join(a.checkpoint_path, "logs"))
     best_pesq = float(state["best_pesq"]) if state is not None and "best_pesq" in state else 0.0
 
+    accum = max(1, int(getattr(a, "accum_steps", 1)))
+    if accum > 1:
+        print(f"gradient accumulation: {accum} micro-batches "
+              f"(effective batch = {h.batch_size * accum})")
+
     # ----- training loop -----------------------------------------------------
     for epoch in range(max(0, last_epoch), a.training_epochs):
         model.train()
+        micro = 0
         start = time.time()
         print(f"Epoch: {epoch + 1}")
 
@@ -292,20 +310,33 @@ def train(a, h):
             clean_audio = _to_dev(clean_audio, device).unsqueeze(1)   # (B, 1, samples)
             noisy_audio = _to_dev(noisy_audio, device).unsqueeze(1)
 
+            is_first = micro == 0
+            micro += 1
+            do_step = micro >= accum
+
             if use_gan:
                 metrics = gan_step(
                     model, discriminator, optim, optim_d,
                     noisy_audio, clean_audio, h, metric_lambda, device, weights,
+                    accum=accum, is_first=is_first, do_step=do_step,
                 )
             else:
-                optim.zero_grad()
+                if is_first:
+                    optim.zero_grad()
                 loss, parts = generator_loss(model, noisy_audio, clean_audio, h, weights)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                optim.step()
+                (loss / accum).backward()
+                if do_step:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                    optim.step()
                 metrics = {"loss": float(loss.item()), **{
                     k: parts[k] for k in ("magnitude", "phase", "complex", "time")
                 }}
+
+            # Accumulate until the effective batch is complete; only then
+            # log / checkpoint / validate / advance the optimizer-step counter.
+            if not do_step:
+                continue
+            micro = 0
 
             if steps % a.stdout_interval == 0:
                 extra = ""
@@ -393,6 +424,12 @@ def main():
     parser.add_argument("--summary_interval", default=50, type=int)
     parser.add_argument("--validation_interval", default=2000, type=int)
     parser.add_argument("--best_checkpoint_start_epoch", default=5, type=int)
+    parser.add_argument("--accum_steps", default=1, type=int,
+                        help="Gradient-accumulation micro-batches. Effective batch "
+                             "= batch_size * accum_steps. Numerically exact here "
+                             "(all norms are per-sample), so it recovers a larger "
+                             "effective batch on a memory-limited GPU. Validation / "
+                             "checkpoint intervals count optimizer steps.")
     parser.add_argument("--init_from", default=None,
                         help="Optional path to a g_best-style checkpoint "
                              "({'generator': state_dict}). Loads weights, starts "
