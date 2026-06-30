@@ -152,17 +152,40 @@ class TFConv(nn.Module):
     def __init__(self, in_ch, out_ch, kf=3, kt=3, freq_dilation=1, groups=1,
                  bias=True, causal=True):
         super().__init__()
+        self.causal = causal
         self.pad_freq = (kf - 1) * freq_dilation // 2
         self.pad_time = (kt - 1, 0) if causal else ((kt - 1) // 2, (kt - 1) - (kt - 1) // 2)
         self.conv = nn.Conv2d(
             in_ch, out_ch, kernel_size=(kf, kt), padding=0,
             dilation=(freq_dilation, 1), groups=groups, bias=bias,
         )
+        # Frame-by-frame streaming state (see basenet/streaming.py). When
+        # `streaming` is on, forward expects a single time frame (N=1) and keeps
+        # the last (kt-1) input frames in `_buf` to reconstruct the causal
+        # receptive field — numerically identical to the offline conv. Default
+        # off, so training and ONNX export are unaffected.
+        self.streaming = False
+        self._buf = None
+
+    def stream_reset(self):
+        self._buf = None
 
     def forward(self, x):
+        if self.streaming:
+            return self._forward_stream(x)
         # F.pad order for (B, C, F, N): (time_left, time_right, freq_left, freq_right)
         x = F.pad(x, (self.pad_time[0], self.pad_time[1], self.pad_freq, self.pad_freq))
         return self.conv(x)
+
+    def _forward_stream(self, x):                       # x: (B, C, F, 1)
+        assert self.causal, "streaming requires causal convolutions"
+        k = self.pad_time[0]                            # kt-1 past frames
+        if self._buf is None:
+            self._buf = x.new_zeros(x.shape[0], x.shape[1], x.shape[2], k)
+        win = torch.cat([self._buf, x], dim=-1)         # (B, C, F, kt)
+        self._buf = win[..., 1:]                        # keep the last kt-1 input frames
+        win = F.pad(win, (0, 0, self.pad_freq, self.pad_freq))
+        return self.conv(win)                           # (B, C, F, 1)
 
 
 class CausalFreqNorm(nn.Module):
@@ -471,11 +494,21 @@ class CRN(nn.Module):
         self.conv2 = TFConv(channels, channels, kf=3, kt=3, causal=causal)
         self.norm2 = make_norm(channels, causal)
         self.act = nn.PReLU()
+        # Streaming state: the GRU hidden state carried across frames. The conv
+        # layers stream via their own TFConv buffers. Default off.
+        self.streaming = False
+        self._h = None
+
+    def stream_reset(self):
+        self._h = None
 
     def forward(self, x):  # (B, C, F, N)
         b, c, fr, n = x.shape
         g = x.permute(0, 3, 1, 2).reshape(b, n, c * fr)   # (B, N, C*F)
-        g, _ = self.gru(g)
+        if self.streaming:
+            g, self._h = self.gru(g, self._h)             # carry hidden state across frames
+        else:
+            g, _ = self.gru(g)
         g = self.ln(self.linear(g))                       # (B, N, C*F)
         g = g.reshape(b, n, c, fr).permute(0, 2, 3, 1)    # (B, C, F, N)
         y = self.norm1(self.conv1(g))                     # (B, 2C, F, N)
