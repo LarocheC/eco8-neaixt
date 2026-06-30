@@ -14,14 +14,15 @@ The code here focuses on open benchmarking and model exploration: streamable arc
 
 ## Model families
 
-The repo contains two model families. They share the dataset wrapper, training utilities, metrics, and quantization scaffolding, but each model family has its own architecture, configs, training entry point, ONNX export path, and quantization pipeline.
+The repo contains three model families. They share the dataset wrapper, training utilities, metrics, and quantization scaffolding, but each model family has its own architecture, configs, training entry point, ONNX export path, and quantization pipeline.
 
 | family         | architecture                                                                                                                                                           | causal | streaming                               | role                                                         |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------- | ------------------------------------------------------------ |
 | **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, and Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
 | **ConvFSENet** | Fully-convolutional ConvTasNet-derived magnitude-mask predictor using stacked Temporal Conv Module blocks. The architecture is based on Miccini *et al.*, ICASSP 2025. | yes    | yes, frame-by-frame with zero lookahead | Fast causal CNN enhancer and int8 quantization study.        |
+| **LiSenNet**   | Lightweight (~37 K-param) sub-band U-Net with a dual-path-recurrent bottleneck and a magnitude-only mask (Griffin-Lim phase). A port of Yan *et al.*, arXiv:2409.13285.   | yes    | yes, frame-by-frame with bounded state  | Ultra-compact real-time enhancer and int8 quantization study. |
 
-Both families export to streaming-shape ONNX and support int8 quantization, allowing comparison under the same evaluation conditions: PESQ, real-time factor, and model size under ONNX Runtime.
+All three families export to streaming-shape ONNX and support int8 quantization, allowing comparison under the same evaluation conditions: PESQ, real-time factor, and model size under ONNX Runtime.
 
 ## Results
 
@@ -29,6 +30,7 @@ Detailed results are kept in separate files:
 
 * [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
 * [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
+* [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/dynamic-int8 ONNX, and the real-time (noisy-phase) deployment eval.
 
 
 ## Setup
@@ -82,10 +84,19 @@ convfsenet/              Fully-convolutional causal enhancer
   eval_ptq.py            Low-bit PTQ study
   qat_train.py           QAT reference scaffold
 
-configs/                 Per-run configs for both model families
+lisennet/                Ultra-compact sub-band + dual-path enhancer
+  model.py               LiSenNet model (sub-band U-Net + DPR bottleneck)
+  streaming.py           Frame-by-frame streamer (bounded state)
+  train.py               CMGAN training loop
+  export_onnx.py         FP32 ONNX export of the mask sub-network
+  quant_onnx.py          Dynamic + static int8 quantization
+  eval_deploy.py         PESQ (backend × phase) + streaming RTF eval
+
+configs/                 Per-run configs for all model families
 tests/                   Pytest suite
 RESULTS_NSNET2.md        NSNet2 results
 RESULTS_CONVFSENET.md    ConvFSENet results
+RESULTS_LISENNET.md      LiSenNet results
 ```
 
 Scripts are run as modules from the repository root, for example:
@@ -93,6 +104,7 @@ Scripts are run as modules from the repository root, for example:
 ```bash
 python -m nsnet2.train --config configs/baseline.json --checkpoint_path cp_baseline
 python -m convfsenet.train --config configs/convfsenet.json --checkpoint_path cp_convfsenet
+python -m lisennet.train --config configs/lisennet.json --checkpoint_path cp_lisennet
 ```
 
 ## NSNet2 experiments
@@ -138,6 +150,23 @@ python -m convfsenet.inference_onnx --checkpoint_file cp_convfsenet/g_best.onnx
 
 ConvFSENet uses magnitude compression before the frontend convolution. The quantization script keeps this compression prologue in FP32 before applying int8 quantization, which is important for preserving low-energy spectral detail.
 
+## LiSenNet experiments
+
+LiSenNet is an ultra-compact (~37 K-param) sub-band U-Net with a dual-path-recurrent bottleneck, a magnitude-only mask, and Griffin-Lim phase. It is a faithful port of [Yan *et al.*, arXiv:2409.13285](https://arxiv.org/abs/2409.13285) (the authors' MIT reference at [hyyan2k/LiSenNet](https://github.com/hyyan2k/LiSenNet)).
+
+The model is causal in time by construction, so the mask sub-network streams frame-by-frame with bounded state (per-conv ring buffers + the dual-path inter-time GRU hidden state). The only non-causal piece, the 2-iteration Griffin-Lim phase, is kept offline; the real-time path reuses the noisy phase (Griffin-Lim's own seed) for a causal iSTFT.
+
+Typical workflow:
+
+```bash
+python -m lisennet.train --config configs/lisennet.json --checkpoint_path cp_lisennet --training_epochs 100
+python -m lisennet.export_onnx --checkpoint_file cp_lisennet/g_best
+python -m lisennet.quant_onnx --fp32 cp_lisennet/g_best_fp32.onnx --mode dynamic
+python -m lisennet.eval_deploy --checkpoint_file cp_lisennet/g_best --n_utts 824
+```
+
+The reproduction reaches **PESQ 3.006** (full VBD test split, within ~0.06 of the paper's ~3.07). The ONNX export is loss-free, dynamic weight-only int8 costs ~0.012 PESQ, and the full real-time config (int8 mask + noisy phase) lands at **2.982** at **RTF ≈ 0.15** on a single CPU thread. See [RESULTS_LISENNET.md](RESULTS_LISENNET.md) for the full backend × phase breakdown.
+
 ## Trained checkpoints
 
 Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
@@ -159,6 +188,7 @@ This repository also builds on:
 * NSNet2, for the recurrent speech-enhancement architecture.
 * Miccini, Laroche, Piechowiak & Pezzarossa, *Scalable Speech Enhancement with Dynamic Channel Pruning*, ICASSP 2025, for the ConvFSENet base architecture.
 * ConvTasNet, for the convolutional design principles used by ConvFSENet.
+* Yan, Zhou, Chen & Lu, *LiSenNet: Lightweight Sub-band and Dual-Path Modeling for Real-Time Speech Enhancement*, [arXiv:2409.13285](https://arxiv.org/abs/2409.13285) ([hyyan2k/LiSenNet](https://github.com/hyyan2k/LiSenNet), MIT), for the LiSenNet architecture.
 * Butterfly and Monarch structured matrix factorizations, as packaged in `torch-structured`.
 * JacobLinCool’s resampled VoiceBank-DEMAND-16k dataset.
 
