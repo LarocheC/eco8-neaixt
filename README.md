@@ -173,6 +173,7 @@ Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
 
 * [`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints)
 * [`claroche1/convfsenet`](https://huggingface.co/claroche1/convfsenet)
+* [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — PyTorch `g_best`, FP32 ONNX, and dynamic/static int8 ONNX
 
 See the result files for loading examples and evaluation commands.
 

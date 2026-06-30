@@ -144,3 +144,50 @@ PESQ + Griffin-Lim cost rather than GPU compute (~0.8 GB at batch 16,
 `lisennet/streaming.py` (`LiSenNetStreamer`); streaming reuses the trained
 `g_best` with no retraining (the `state_dict` keys are unchanged when the
 streaming flag is off, and the offline forward stays bit-identical).
+
+## Trained checkpoint
+
+The best-PESQ generator (`g_best`), the FP32 ONNX (`g_best_fp32.onnx`), the
+dynamic and static int8 ONNX (`g_best_int8_dyn.onnx`, `g_best_int8_static.onnx`),
+and the training config are mirrored on HuggingFace at
+[`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet).
+
+PyTorch:
+
+```python
+import json, torch
+from huggingface_hub import hf_hub_download
+from common.env import AttrDict
+from lisennet.model import build_lisennet
+
+REPO = "claroche1/LiSenNet"
+cfg  = json.load(open(hf_hub_download(REPO, "config.json")))
+ckpt = torch.load(hf_hub_download(REPO, "g_best"),
+                  map_location="cpu", weights_only=True)
+model = build_lisennet(AttrDict(cfg)).eval()
+model.load_state_dict(ckpt["generator"])
+# end-to-end waveform -> waveform: model(noisy_wav)["est"]
+```
+
+ONNX (the mask sub-network — `feat (B,3,T,F)` -> `est_mag (B,T,F)`):
+
+```python
+import numpy as np, onnxruntime as ort
+from huggingface_hub import hf_hub_download
+
+REPO = "claroche1/LiSenNet"
+sess = ort.InferenceSession(
+    hf_hub_download(REPO, "g_best_int8_dyn.onnx"),   # or _fp32 / _int8_static
+    providers=["CPUExecutionProvider"],
+)
+est_mag = sess.run(["est_mag"], {"feat": np.zeros((1, 3, 100, 257), np.float32)})[0]
+```
+
+To (re-)publish from a fresh run:
+
+```bash
+python push_lisennet_hf.py            # cp_lisennet/ + deploy/lisennet/ -> claroche1/LiSenNet
+```
+
+(needs `huggingface-cli login` or `HF_TOKEN`; idempotent — re-running just makes
+another HF commit.)
