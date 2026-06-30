@@ -1,0 +1,36 @@
+{
+    "_comment": "LiSenNet (arXiv:2409.13285, hyyan2k/LiSenNet, MIT) ported into this framework. Hyperparameters follow the upstream config.yaml: VoiceBank-DEMAND, n_fft=512/hop=256, 2 s segments, AdamW lr 5e-4 betas [0.8,0.99], StepLR gamma 0.98/epoch, CMGAN losses (complex 0.1, mag 0.9, adv 0.05). num_channels=16, n_blocks=2 -> ~37k-param generator. Phase via Griffin-Lim (no phase loss).",
+
+    "num_gpus": 0,
+    "batch_size": 4,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 1234,
+
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+
+    "num_channels": 16,
+    "n_blocks": 2,
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+
+    "loss": {
+        "complex": 0.1,
+        "mag": 0.9,
+        "adv": 0.05
+    },
+
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
