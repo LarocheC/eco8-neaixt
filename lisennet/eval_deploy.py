@@ -146,7 +146,9 @@ def main():
     p.add_argument("--checkpoint_file", default="cp_lisennet/g_best")
     p.add_argument("--n_utts", type=int, default=824)
     p.add_argument("--calib_utts", type=int, default=24)
-    p.add_argument("--workdir", default="deploy/lisennet")
+    p.add_argument("--workdir", default=None,
+                   help="Where to write the exported ONNX graphs "
+                        "(default: the checkpoint's run directory, next to g_best).")
     p.add_argument("--skip_static", action="store_true")
     a = p.parse_args()
 
@@ -155,7 +157,7 @@ def main():
         h = AttrDict(json.load(f))
     model = _load_from_checkpoint(ckpt)
 
-    work = Path(a.workdir)
+    work = Path(a.workdir) if a.workdir else ckpt.parent      # artifacts live in the run dir
     work.mkdir(parents=True, exist_ok=True)
     fp32 = export_fp32(model, work / "g_best_fp32.onnx")
     sessions = {"fp32": _session(fp32)}
