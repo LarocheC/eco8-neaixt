@@ -1,0 +1,52 @@
+{
+    "_comment": "Wave 2 (gap-closing capacity test): widen to match the paper's ~7.1 GMACs (C44/crn_freq32/crn_hidden96/dec_depth3 -> ~1.6M params, 7.0 GMACs/s). Tests whether compute/capacity is the limiter; note this is ~2x the paper's 0.81M params (my arch is ~2x less MAC/param-efficient, mostly a param-heavy GRU). batch_size 2 + --accum_steps 4 = effective batch 8 (~2x activation memory vs baseline, so micro-batch halved). Cosine LR.",
+    "num_gpus": 0,
+    "batch_size": 2,
+    "learning_rate": 0.001,
+    "lr_min": 1e-05,
+    "scheduler": "cosine",
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "lr_decay": 0.98,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 400,
+    "hop_size": 100,
+    "win_size": 400,
+    "compress_factor": 0.3,
+    "base_channels": 44,
+    "expand_ratio": 4,
+    "attn_reduction": 4,
+    "band_edges_hz": [
+        0,
+        1000,
+        4000,
+        8000
+    ],
+    "band_depths": [
+        4,
+        3,
+        2
+    ],
+    "crn_freq": 32,
+    "crn_hidden": 96,
+    "dec_depth": 3,
+    "causal": true,
+    "loss": {
+        "magnitude": 0.9,
+        "phase": 0.3,
+        "complex": 0.1,
+        "time": 0.2
+    },
+    "gan": {
+        "enabled": true,
+        "metric_loss_lambda": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
