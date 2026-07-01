@@ -99,6 +99,34 @@ class CustomLayerNorm(nn.Module):
         return ((x - mu_) / std_) * self.gamma + self.beta
 
 
+def _make_norm(kind, bn_channels, ln_input_dims):
+    """Normalization factory for the deploy-hardened path.
+
+    ``"layernorm"`` (default) keeps the original 2-axis :class:`CustomLayerNorm`
+    (per-frame stats over channel+freq) — faithful but NOT NPU-mappable: it lowers
+    to ReduceMean/Sqrt/Div and crashes the ST Neural-ART compiler. ``"batchnorm"``
+    returns a per-channel :class:`nn.BatchNorm2d` — fixed stats at inference, folds
+    into the adjacent conv, and maps to the NPU (mirrors ConvFSENet's quant-friendly
+    recipe). Swapping the norm changes behaviour, so ``"batchnorm"`` needs a retrain.
+    """
+    if kind == "batchnorm":
+        return nn.BatchNorm2d(bn_channels)
+    if kind == "layernorm":
+        return CustomLayerNorm(ln_input_dims, stat_dims=(1, 3))
+    raise ValueError(f"unknown norm {kind!r} (expected 'layernorm' or 'batchnorm')")
+
+
+def _make_act(kind, channels):
+    """Activation factory. ``"prelu"`` (default) = per-channel :class:`nn.PReLU`
+    (a per-channel float slope that blocks int8 / the NPU); ``"relu"`` = parameter-free
+    :class:`nn.ReLU` (NPU-native). ``channels`` is ignored for ReLU."""
+    if kind == "relu":
+        return nn.ReLU()
+    if kind == "prelu":
+        return nn.PReLU(channels)
+    raise ValueError(f"unknown act {kind!r} (expected 'prelu' or 'relu')")
+
+
 class RNN(nn.Module):
     def __init__(self, emb_dim, hidden_dim, dropout_p=0.1, bidirectional=False):
         super().__init__()
@@ -160,13 +188,13 @@ class _CausalTimeConv(nn.Module):
     length, so dilation is handled).
     """
 
-    def __init__(self, emb_dim, kernel=3, dilation=1):
+    def __init__(self, emb_dim, kernel=3, dilation=1, act="prelu"):
         super().__init__()
         pad = (kernel - 1) * dilation
         self.pad = nn.ConstantPad2d((0, 0, pad, 0), value=0.0)   # causal time pad (freq untouched)
         self.dw = nn.Conv2d(emb_dim, emb_dim, (kernel, 1), dilation=(dilation, 1), groups=emb_dim)
         self.pw = nn.Conv2d(emb_dim, emb_dim, 1)
-        self.act = nn.PReLU(emb_dim)
+        self.act = _make_act(act, emb_dim)
         self.streaming = False
         self._buf = None
 
@@ -202,17 +230,17 @@ class DualPathConv(nn.Module):
     """
 
     def __init__(self, emb_dim, n_freqs=32, intra_kernel=7, inter_kernel=3,
-                 inter_dilations=(1, 2, 4)):
+                 inter_dilations=(1, 2, 4), norm="layernorm", act="prelu"):
         super().__init__()
-        self.intra_norm = CustomLayerNorm((emb_dim, n_freqs), stat_dims=(1, 3))
+        self.intra_norm = _make_norm(norm, emb_dim, (emb_dim, n_freqs))
         self.intra_dw = nn.Conv2d(emb_dim, emb_dim, (1, intra_kernel),
                                   padding=(0, intra_kernel // 2), groups=emb_dim)   # symmetric over freq
         self.intra_pw = nn.Conv2d(emb_dim, emb_dim, 1)
-        self.intra_act = nn.PReLU(emb_dim)
+        self.intra_act = _make_act(act, emb_dim)
 
-        self.inter_norm = CustomLayerNorm((emb_dim, n_freqs), stat_dims=(1, 3))
+        self.inter_norm = _make_norm(norm, emb_dim, (emb_dim, n_freqs))
         self.inter = nn.ModuleList(
-            _CausalTimeConv(emb_dim, inter_kernel, d) for d in inter_dilations)
+            _CausalTimeConv(emb_dim, inter_kernel, d, act=act) for d in inter_dilations)
 
     def forward(self, x):                                    # (b, d, t, f)
         y = self.intra_act(self.intra_pw(self.intra_dw(self.intra_norm(x))))
@@ -224,16 +252,17 @@ class DualPathConv(nn.Module):
 
 
 class ConvolutionalGLU(nn.Module):
-    def __init__(self, emb_dim, n_freqs=32, expansion_factor=2, dropout_p=0.1):
+    def __init__(self, emb_dim, n_freqs=32, expansion_factor=2, dropout_p=0.1,
+                 norm="layernorm", act="prelu"):
         super().__init__()
         hidden_dim = int(emb_dim * expansion_factor)
-        self.norm = CustomLayerNorm((emb_dim, n_freqs), stat_dims=(1, 3))
+        self.norm = _make_norm(norm, emb_dim, (emb_dim, n_freqs))
         self.fc1 = nn.Conv2d(emb_dim, hidden_dim * 2, 1)
         self.dwconv = nn.Sequential(
             nn.ConstantPad2d((1, 1, 2, 0), value=0.0),       # causal-in-time pad (2,0), freq (1,1)
             nn.Conv2d(hidden_dim, hidden_dim, 3, 1, groups=hidden_dim),
         )
-        self.act = nn.Mish()
+        self.act = nn.ReLU() if act == "relu" else nn.Mish()
         self.fc2 = nn.Conv2d(hidden_dim, emb_dim, 1)
         self.dropout = nn.Dropout(dropout_p)
         # Streaming: the causal depthwise conv keeps a (kt-1)-frame ring buffer.
@@ -266,15 +295,18 @@ class DPR(nn.Module):
     """
 
     def __init__(self, emb_dim=16, hidden_dim=24, n_freqs=32, dropout_p=0.1,
-                 bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4)):
+                 bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4),
+                 norm="layernorm", act="prelu"):
         super().__init__()
         if bottleneck == "conv":
-            self.dp_rnn_attn = DualPathConv(emb_dim, n_freqs, intra_kernel, inter_kernel, inter_dilations)
+            self.dp_rnn_attn = DualPathConv(emb_dim, n_freqs, intra_kernel, inter_kernel,
+                                            inter_dilations, norm=norm, act=act)
         elif bottleneck == "rnn":
             self.dp_rnn_attn = DualPathRNN(emb_dim, hidden_dim, n_freqs, dropout_p)
         else:
             raise ValueError(f"unknown bottleneck {bottleneck!r} (expected 'rnn' or 'conv')")
-        self.conv_glu = ConvolutionalGLU(emb_dim, n_freqs=n_freqs, expansion_factor=2, dropout_p=dropout_p)
+        self.conv_glu = ConvolutionalGLU(emb_dim, n_freqs=n_freqs, expansion_factor=2,
+                                         dropout_p=dropout_p, norm=norm, act=act)
 
     def forward(self, x):
         return self.conv_glu(self.dp_rnn_attn(x))
@@ -317,7 +349,7 @@ class SPConvTranspose2d(nn.Module):
 class DSConv(nn.Module):
     """Down-sampling sub-band conv: low band kept dense, high band strided (÷3)."""
 
-    def __init__(self, in_channels, out_channels, n_freqs):
+    def __init__(self, in_channels, out_channels, n_freqs, norm="layernorm", act="prelu"):
         super().__init__()
         self.low_freqs = n_freqs // 4
         self.low_conv = nn.Sequential(
@@ -328,8 +360,8 @@ class DSConv(nn.Module):
             nn.ConstantPad2d((1, 1, 1, 0), value=0.0),
             nn.Conv2d(in_channels, out_channels, kernel_size=(2, 5), stride=(1, 3)),
         )
-        self.norm = CustomLayerNorm((1, n_freqs // 2), stat_dims=(1, 3))
-        self.act = nn.PReLU(out_channels)
+        self.norm = _make_norm(norm, out_channels, (1, n_freqs // 2))
+        self.act = _make_act(act, out_channels)
         # Streaming: low and high sub-band convs each keep their own ring buffer.
         self.streaming = False
         self._buf_low = None
@@ -354,14 +386,24 @@ class DSConv(nn.Module):
 class USConv(nn.Module):
     """Up-sampling sub-band conv (mirror of DSConv)."""
 
-    def __init__(self, in_channels, out_channels, n_freqs):
+    def __init__(self, in_channels, out_channels, n_freqs, upsample="subpixel"):
         super().__init__()
         self.low_freqs = n_freqs // 2
         self.low_conv = nn.Sequential(
             nn.ConstantPad2d((1, 1, 0, 0), value=0.0),
             nn.Conv2d(in_channels, out_channels, kernel_size=(1, 3)),
         )
-        self.high_conv = SPConvTranspose2d(in_channels, out_channels, kernel_size=(1, 3), r=3)
+        # High-band frequency upsampling (x3). "subpixel" = the original
+        # SPConvTranspose2d (a view->permute->view that emits 5-D tensors the
+        # Neural-ART NPU cannot map — it segfaults atonn). "convtranspose" = the
+        # NPU-native equivalent: a plain transposed conv, stride 3 over freq gives
+        # the same x3 upsample (out_freq = 3*in_freq) with 4-D tensors only, and
+        # ~3x fewer MACC than the sub-pixel conv-to-out*r.
+        if upsample == "convtranspose":
+            self.high_conv = nn.ConvTranspose2d(in_channels, out_channels,
+                                                kernel_size=(1, 3), stride=(1, 3))
+        else:
+            self.high_conv = SPConvTranspose2d(in_channels, out_channels, kernel_size=(1, 3), r=3)
 
     def forward(self, x):                                    # (b, d, t, f)
         x_low = self.low_conv(x[..., :self.low_freqs])
@@ -370,16 +412,16 @@ class USConv(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, num_channels=16):
+    def __init__(self, in_channels, num_channels=16, norm="layernorm", act="prelu"):
         super().__init__()
         self.conv_1 = nn.Sequential(
             nn.Conv2d(in_channels, num_channels // 4, (1, 1), (1, 1)),
-            CustomLayerNorm((1, 257), stat_dims=(1, 3)),
-            nn.PReLU(num_channels // 4),
+            _make_norm(norm, num_channels // 4, (1, 257)),
+            _make_act(act, num_channels // 4),
         )
-        self.conv_2 = DSConv(num_channels // 4, num_channels // 2, n_freqs=257)
-        self.conv_3 = DSConv(num_channels // 2, num_channels // 4 * 3, n_freqs=128)
-        self.conv_4 = DSConv(num_channels // 4 * 3, num_channels, n_freqs=64)
+        self.conv_2 = DSConv(num_channels // 4, num_channels // 2, n_freqs=257, norm=norm, act=act)
+        self.conv_3 = DSConv(num_channels // 2, num_channels // 4 * 3, n_freqs=128, norm=norm, act=act)
+        self.conv_4 = DSConv(num_channels // 4 * 3, num_channels, n_freqs=64, norm=norm, act=act)
 
     def forward(self, x):
         out_list = []
@@ -391,19 +433,20 @@ class Encoder(nn.Module):
 
 
 class MaskDecoder(nn.Module):
-    def __init__(self, num_features, num_channels=64, out_channel=2, beta=1):
+    def __init__(self, num_features, num_channels=64, out_channel=2, beta=1,
+                 norm="layernorm", act="prelu", upsample="subpixel"):
         super().__init__()
-        self.up1 = USConv(num_channels * 2, num_channels // 4 * 3, n_freqs=32)
-        self.up2 = USConv(num_channels // 4 * 3 * 2, num_channels // 2, n_freqs=64)
-        self.up3 = USConv(num_channels // 2 * 2, num_channels // 4, n_freqs=128)
+        self.up1 = USConv(num_channels * 2, num_channels // 4 * 3, n_freqs=32, upsample=upsample)
+        self.up2 = USConv(num_channels // 4 * 3 * 2, num_channels // 2, n_freqs=64, upsample=upsample)
+        self.up3 = USConv(num_channels // 2 * 2, num_channels // 4, n_freqs=128, upsample=upsample)
         self.mask_conv = nn.Sequential(
             nn.ConstantPad2d((1, 1, 1, 0), value=0.0),
             nn.Conv2d(num_channels // 4, out_channel, (2, 2)),
-            CustomLayerNorm((1, 257), stat_dims=(1, 3)),
-            nn.PReLU(out_channel),
+            _make_norm(norm, out_channel, (1, 257)),
+            _make_act(act, out_channel),
             nn.Conv2d(out_channel, out_channel, (1, 1)),
         )
-        self.lsigmoid = LearnableSigmoid2d(num_features, beta=beta)
+        self.lsigmoid = nn.Sigmoid() if act == "relu" else LearnableSigmoid2d(num_features, beta=beta)
         # Streaming: the first mask conv (kernel (2,2)) is causal in time and keeps
         # a 1-frame ring buffer; the rest of mask_conv is per-frame.
         self.streaming = False
@@ -429,7 +472,8 @@ class MaskDecoder(nn.Module):
 
 class LiSenNet(nn.Module):
     def __init__(self, num_channels=16, n_blocks=2, n_fft=512, hop_length=256, compress_factor=0.3,
-                 bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4)):
+                 bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4),
+                 norm="layernorm", act="prelu", upsample="subpixel"):
         super().__init__()
         self.n_fft = n_fft
         self.n_freqs = n_fft // 2 + 1
@@ -437,15 +481,17 @@ class LiSenNet(nn.Module):
         self.compress_factor = compress_factor
         self.bottleneck = bottleneck
 
-        self.encoder = Encoder(in_channels=3, num_channels=num_channels)
+        self.encoder = Encoder(in_channels=3, num_channels=num_channels, norm=norm, act=act)
         self.blocks = nn.Sequential(*[
             DPR(emb_dim=num_channels, hidden_dim=num_channels // 2 * 3,
                 n_freqs=self.n_freqs // (2 ** 3), dropout_p=0.1,
                 bottleneck=bottleneck, intra_kernel=intra_kernel,
-                inter_kernel=inter_kernel, inter_dilations=inter_dilations)
+                inter_kernel=inter_kernel, inter_dilations=inter_dilations,
+                norm=norm, act=act)
             for _ in range(n_blocks)
         ])
-        self.decoder = MaskDecoder(self.n_freqs, num_channels=num_channels, out_channel=2, beta=1)
+        self.decoder = MaskDecoder(self.n_freqs, num_channels=num_channels, out_channel=2, beta=1,
+                                   norm=norm, act=act, upsample=upsample)
 
     # ----- spectral helpers -------------------------------------------------
     def apply_stft(self, x, return_complex=True):
@@ -568,6 +614,9 @@ def build_lisennet(h=None):
         intra_kernel=int(g("intra_kernel", 7)),
         inter_kernel=int(g("inter_kernel", 3)),
         inter_dilations=tuple(g("inter_dilations", (1, 2, 4))),
+        norm=str(g("norm", "layernorm")),
+        act=str(g("act", "prelu")),
+        upsample=str(g("upsample", "subpixel")),
     )
 
 

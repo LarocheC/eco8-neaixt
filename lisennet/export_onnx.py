@@ -117,7 +117,15 @@ def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
 
     model_proto = onnx.load(str(output_path))
     ops = Counter(n.op_type for n in model_proto.graph.node)
-    blockers = {op: ops[op] for op in ("GRU", "LSTM", "RNN", "LayerNormalization") if op in ops}
+    # Always-forbidden: recurrent ops + the 2-axis LayerNorm primitive (crash / not-mappable).
+    forbidden = ["GRU", "LSTM", "RNN", "LayerNormalization"]
+    # A deploy-hardened model (no PReLU/Mish modules) must also export none of their ops —
+    # PRelu's per-channel float slope and Mish's Softplus block full int8 / the NPU. The
+    # default (PReLU/Mish) conv model keeps the lenient check so its export is unaffected.
+    hardened = not any(isinstance(mm, (nn.PReLU, nn.Mish)) for mm in model.modules())
+    if hardened:
+        forbidden += ["PRelu", "Softplus"]
+    blockers = {op: ops[op] for op in forbidden if op in ops}
     assert not blockers, f"Neural-ART blocker op(s) survived export: {blockers}"
     sorted_ops = dict(sorted(ops.items(), key=lambda kv: -kv[1]))
     size_mib = output_path.stat().st_size / (1024 * 1024)
