@@ -180,6 +180,16 @@ def _quantizable_weight_attrs(m: nn.Module):
         # (a per-output-channel rescale; per-channel symmetric quant is
         # invariant to it). Covers depthwise convs (groups>1) too.
         yield "weight", 0
+    elif isinstance(m, nn.Conv2d):
+        # weight (out_channels, in_channels/groups, kh, kw): axis=0 is
+        # per-output-channel, same rationale as Conv1d. Covers LiSenNet's
+        # depthwise/pointwise convs and the BatchNorm-into-Conv fold.
+        yield "weight", 0
+    elif isinstance(m, nn.ConvTranspose2d):
+        # transposed-conv weight is (in_channels, out_channels/groups, kh, kw):
+        # the OUTPUT-channel axis is 1, not 0 — per-output-channel quant (matching
+        # onnxruntime's per-channel ConvTranspose weight quant) uses axis=1.
+        yield "weight", 1
     elif isinstance(m, nn.GRU):
         for k in range(m.num_layers):
             yield f"weight_ih_l{k}", 0
@@ -314,7 +324,7 @@ def install_activation_fake_quant(model: nn.Module, act_spec: QSpec) -> int:
     targets = []
     for m in model.modules():
         if (
-            isinstance(m, (nn.Linear, nn.GRU, nn.Conv1d))
+            isinstance(m, (nn.Linear, nn.GRU, nn.Conv1d, nn.Conv2d, nn.ConvTranspose2d))
             or _is_blockdiag_linear(m)
             or _is_butterfly(m)
         ):
@@ -447,7 +457,7 @@ def install_static_activation_fake_quant(model: nn.Module, bits: int) -> int:
         return 0
     targets = [
         m for m in model.modules()
-        if isinstance(m, (nn.Linear, nn.GRU, nn.Conv1d))
+        if isinstance(m, (nn.Linear, nn.GRU, nn.Conv1d, nn.Conv2d, nn.ConvTranspose2d))
         or _is_blockdiag_linear(m) or _is_butterfly(m)
     ]
     existing = getattr(model, "_act_fake_quant", None)

@@ -47,6 +47,53 @@ class LiSenNetONNX(nn.Module):
         return self.model.apply_mask(mask, src_mag)         # (B, T, F)
 
 
+def _receptive_field(model) -> int:
+    """Total causal time lookback (past frames the current output depends on) of the
+    conv LiSenNet — the warmup length ``L`` a stateless windowed graph must prepend so
+    its emitted frames are bit-exact to the offline model. Summed along the time-causal
+    path: the encoder DSConvs, then each DPR block's dilated inter-time convs and the
+    ConvolutionalGLU depthwise conv, then the decoder mask conv. (conv_1 is 1x1 and the
+    USConv upsamplers have time-kernel 1 -> no time lookback.)"""
+    L = 0
+    enc = model.encoder
+    for ds in (enc.conv_2, enc.conv_3, enc.conv_4):                  # DSConv: time kernel 2
+        L += ds.low_conv[1].kernel_size[0] - 1
+    for blk in model.blocks:
+        dpc = blk.dp_rnn_attn
+        if not hasattr(dpc, "inter"):
+            raise ValueError("windowed export requires bottleneck='conv' (DualPathConv)")
+        for ct in dpc.inter:                                        # _CausalTimeConv: (kt-1)*dilation
+            L += (ct.dw.kernel_size[0] - 1) * ct.dw.dilation[0]
+        L += blk.conv_glu.dwconv[1].kernel_size[0] - 1              # ConvolutionalGLU depthwise (kt=3)
+    L += model.decoder.mask_conv[1].kernel_size[0] - 1              # mask conv (kt=2)
+    return L
+
+
+class LiSenNetWindowedONNX(nn.Module):
+    """Stateless windowed view: ``feat_window (B,3,L+T,F)`` -> ``est_mag (B,T,F)``.
+
+    Carries NO FIFO state tensors — the Slice/Pad/Concat state I/O of the per-frame
+    streaming export is what segfaults the Neural-ART compiler. Instead the app keeps a
+    rolling ``L+T``-frame input window; the graph runs the offline causal mask over it
+    and emits the last ``T`` frames, which have full in-window context and are bit-exact
+    to the offline model (``L`` = receptive field). Same idea as ConvFSENet's
+    ``ConvFSENetWindowedONNX``. Window and freq axes are static (Neural-ART wants fixed
+    conv extents); only batch is dynamic.
+    """
+
+    def __init__(self, model, emit_T: int = 1):
+        super().__init__()
+        self.inner = LiSenNetONNX(model)
+        self.L = _receptive_field(model)
+        self.T = emit_T
+        self.window_length = self.L + emit_T
+        self.n_freqs = model.n_freqs
+
+    def forward(self, feat_window):                         # (B, 3, L+T, F)
+        est_mag = self.inner(feat_window)                   # (B, L+T, F)
+        return est_mag[:, -self.T:, :]                      # (B, T, F)
+
+
 def export_fp32(model: LiSenNet, output_path, batch_size: int = 1,
                 n_frames: int = 32, opset: int = 17) -> Path:
     """Export `model`'s mask sub-network to FP32 ONNX with dynamic B and T axes.
@@ -137,6 +184,57 @@ def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
     return output_path
 
 
+def export_windowed_fp32(model: LiSenNet, output_path, emit_T: int = 1,
+                         batch_size: int = 1, opset: int = 17) -> Path:
+    """Export the stateless-windowed mask sub-network to FP32 ONNX (the NPU deploy graph).
+
+    Graph IO: ``feat_window (B,3,L+T,F)`` -> ``est_mag (B,T,F)``, where ``L`` is the
+    receptive field (:func:`_receptive_field`) and ``T`` = ``emit_T``. No FIFO state I/O
+    (that Slice/Pad/Concat class crashes atonn), so this is what maps to the Neural-ART
+    NPU. Window/freq axes are static; only batch is dynamic. Requires the conv bottleneck.
+    """
+    model.eval()
+    view = LiSenNetWindowedONNX(model, emit_T=emit_T).eval()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    W = view.window_length
+    feat = torch.zeros(batch_size, 3, W, model.n_freqs, dtype=torch.float32)
+    dynamic_axes = {"feat_window": {0: "B"}, "est_mag": {0: "B"}}
+
+    torch.onnx.export(
+        view, (feat,), str(output_path),
+        input_names=["feat_window"], output_names=["est_mag"],
+        dynamic_axes=dynamic_axes, opset_version=opset,
+        dynamo=False,                                       # legacy tracer — stable for this graph
+    )
+
+    model_proto = onnx.load(str(output_path))
+    # Stamp window geometry (L, T) so downstream tooling reads the contract exactly.
+    for k, v in (("windowed_L", str(view.L)), ("windowed_T", str(view.T))):
+        e = model_proto.metadata_props.add()
+        e.key = k
+        e.value = v
+    onnx.save(model_proto, str(output_path))
+
+    ops = Counter(n.op_type for n in model_proto.graph.node)
+    # Same blocker guard as the streaming export: reject recurrent / 2-axis-norm ops,
+    # and (for a hardened model) PReLU/Mish too. The windowed graph is also stateless.
+    hardened = not any(isinstance(mm, (nn.PReLU, nn.Mish)) for mm in model.modules())
+    forbidden = ["GRU", "LSTM", "RNN", "LayerNormalization"] + (["PRelu", "Softplus"] if hardened else [])
+    blockers = {op: ops[op] for op in forbidden if op in ops}
+    assert not blockers, f"Neural-ART blocker op(s) survived export: {blockers}"
+    sorted_ops = dict(sorted(ops.items(), key=lambda kv: -kv[1]))
+    size_mib = output_path.stat().st_size / (1024 * 1024)
+    print(f"Exported windowed FP32 ONNX to {output_path}")
+    print(f"  window : L={view.L} + T={view.T} = {W} frames; n_freqs={model.n_freqs}")
+    print(f"  size   : {size_mib:.3f} MiB")
+    print(f"  nodes  : {len(model_proto.graph.node)}")
+    print(f"  ops    : {sorted_ops}")
+    return output_path
+
+
 def _load_from_checkpoint(checkpoint_file) -> LiSenNet:
     """Load a trained LiSenNet from a g_best-style checkpoint + sibling config.json."""
     checkpoint_file = Path(checkpoint_file)
@@ -160,13 +258,22 @@ def main():
     parser.add_argument("--streaming", action="store_true",
                         help="Export the frame-by-frame graph with explicit state I/O "
                              "(requires bottleneck='conv') instead of the whole-utterance graph.")
+    parser.add_argument("--windowed", action="store_true",
+                        help="Export the stateless windowed graph feat_window (B,3,L+T,F) -> "
+                             "est_mag (B,T,F) — the NPU deploy target (no FIFO state, so it "
+                             "maps to Neural-ART; requires bottleneck='conv').")
+    parser.add_argument("--emit_T", type=int, default=1,
+                        help="Windowed only: mask frames emitted per call (window = L + emit_T).")
     a = parser.parse_args()
     model = _load_from_checkpoint(a.checkpoint_file)
-    default_name = "g_best_streaming_fp32.onnx" if a.streaming else "g_best_fp32.onnx"
-    out = Path(a.output) if a.output else Path(a.checkpoint_file).parent / default_name
-    if a.streaming:
+    if a.windowed:
+        out = Path(a.output) if a.output else Path(a.checkpoint_file).parent / "g_best_windowed_fp32.onnx"
+        export_windowed_fp32(model, out, emit_T=a.emit_T)
+    elif a.streaming:
+        out = Path(a.output) if a.output else Path(a.checkpoint_file).parent / "g_best_streaming_fp32.onnx"
         export_streaming_fp32(model, out)
     else:
+        out = Path(a.output) if a.output else Path(a.checkpoint_file).parent / "g_best_fp32.onnx"
         export_fp32(model, out)
 
 
