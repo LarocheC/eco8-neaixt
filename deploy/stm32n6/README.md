@@ -65,7 +65,7 @@ the `stedgeai` that generated it (**4.0.0**). We installed **4.0.1** (a patch of
 generator and app agree on the 4.0 major/minor. If `make build` still warns *"Possible
 mismatch in ll_aton library used"*, refresh the app's `ll_aton` per ST's "update project
 with a new version of ST Edge AI Core" procedure (or `git checkout` an app tag built with
-4.0.1). The old 3.0 install remains at `install/3.0` if you ever need to compare.
+4.0.1).
 
 ### WSL flashing (usbipd path — chosen)
 WSL2 can't see USB devices natively, so the ST-LINK on the STM32N6570-DK is passed in
