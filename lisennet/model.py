@@ -54,19 +54,20 @@ def _causal_conv_stream(pad_mod, conv, buf, x):
     """One streaming step of a causal-in-time ``(ConstantPad2d, Conv2d)`` pair.
 
     Tensors are ``(B, C, T, Fr)`` (time = dim 2, freq = dim 3). ``x`` is a single
-    time frame ``(B, C, 1, Fr)``; ``buf`` holds the previous ``kt-1`` input frames
-    (or ``None`` at stream start). The frequency padding is read from ``pad_mod``
-    (the offline ``ConstantPad2d``) so freq handling is bit-identical to offline;
-    the time padding is supplied by the ring buffer instead of zeros, making the
-    step numerically identical to the offline conv on a steady stream.
+    time frame ``(B, C, 1, Fr)``; ``buf`` holds the previous ``(kt-1)*dilation``
+    input frames (or ``None`` at stream start). The number of past frames is read
+    straight from the offline ``ConstantPad2d``'s top padding, so this works for
+    dilated causal time-convs too (top = ``(kt-1)*dilation``). The frequency
+    padding is read from the same ``pad_mod`` so freq handling is bit-identical to
+    offline; the time padding is supplied by the ring buffer instead of zeros,
+    making the step numerically identical to the offline conv on a steady stream.
     """
-    f_left, f_right, _t_top, _t_bot = pad_mod.padding
-    kt = conv.kernel_size[0]
-    k = kt - 1
+    f_left, f_right, t_top, _t_bot = pad_mod.padding
+    k = t_top                                            # past frames = (kt-1)*dilation
     if buf is None:
         buf = x.new_zeros(x.shape[0], x.shape[1], k, x.shape[3])
-    win = torch.cat([buf, x], dim=2)                     # (B, C, kt, Fr)
-    new_buf = win[:, :, 1:, :] if k > 0 else buf         # keep last kt-1 input frames
+    win = torch.cat([buf, x], dim=2)                     # (B, C, k+1, Fr)
+    new_buf = win[:, :, 1:, :] if k > 0 else buf         # keep the last k input frames
     win = F.pad(win, (f_left, f_right, 0, 0))            # freq pad only (time supplied by buf)
     return conv(win), new_buf
 
@@ -147,6 +148,81 @@ class DualPathRNN(nn.Module):
         return x.permute(0, 3, 1, 2)                         # (b, d, t, f)
 
 
+class _CausalTimeConv(nn.Module):
+    """Causal dilated depthwise time-conv + pointwise mix, streamable.
+
+    Operates on ``(b, d, t, f)``; mixes only along time (kernel ``(kernel, 1)``,
+    dilation ``(dilation, 1)``), left-padded ``(kernel-1)*dilation`` so frame n
+    never reads a future frame. A depthwise conv over time followed by a 1x1
+    pointwise conv — both map to the NPU — replaces one step of the inter-time
+    GRU's recurrence with a finite (dilated) receptive field. Streams via the
+    shared ``_causal_conv_stream`` ring buffer (the pad's top value = the FIFO
+    length, so dilation is handled).
+    """
+
+    def __init__(self, emb_dim, kernel=3, dilation=1):
+        super().__init__()
+        pad = (kernel - 1) * dilation
+        self.pad = nn.ConstantPad2d((0, 0, pad, 0), value=0.0)   # causal time pad (freq untouched)
+        self.dw = nn.Conv2d(emb_dim, emb_dim, (kernel, 1), dilation=(dilation, 1), groups=emb_dim)
+        self.pw = nn.Conv2d(emb_dim, emb_dim, 1)
+        self.act = nn.PReLU(emb_dim)
+        self.streaming = False
+        self._buf = None
+
+    def stream_reset(self):
+        self._buf = None
+
+    def forward(self, x):                                    # (b, d, t, f)
+        if self.streaming:
+            y, self._buf = _causal_conv_stream(self.pad, self.dw, self._buf, x)
+        else:
+            y = self.dw(self.pad(x))
+        return self.act(self.pw(y))
+
+
+class DualPathConv(nn.Module):
+    """NPU-mappable drop-in for :class:`DualPathRNN` (no GRU, no ``nn.LayerNorm``).
+
+    Keeps LiSenNet's two-path structure but replaces both GRUs with convolutions
+    that map to the Neural-ART NPU and stream with bounded FIFO state:
+
+      * **intra-frequency** mixer (was the bidirectional-over-freq GRU): a
+        depthwise conv over the frequency axis with *symmetric* padding — the
+        whole freq axis is available per frame, so bidirectional context needs no
+        state — followed by a 1x1 pointwise mix.
+      * **inter-time** mixer (was the unidirectional-over-time GRU): a stack of
+        causal dilated :class:`_CausalTimeConv` layers whose dilations grow the
+        temporal receptive field the recurrence used to provide.
+
+    Norms are :class:`CustomLayerNorm` (already lowered to primitive ops), so the
+    exported graph carries no 2-axis ``LayerNormalization`` primitive — clearing
+    the Neural-ART LayerNorm blocker at the source. ``(b, d, t, f)`` in and out,
+    same interface as :class:`DualPathRNN`.
+    """
+
+    def __init__(self, emb_dim, n_freqs=32, intra_kernel=7, inter_kernel=3,
+                 inter_dilations=(1, 2, 4)):
+        super().__init__()
+        self.intra_norm = CustomLayerNorm((emb_dim, n_freqs), stat_dims=(1, 3))
+        self.intra_dw = nn.Conv2d(emb_dim, emb_dim, (1, intra_kernel),
+                                  padding=(0, intra_kernel // 2), groups=emb_dim)   # symmetric over freq
+        self.intra_pw = nn.Conv2d(emb_dim, emb_dim, 1)
+        self.intra_act = nn.PReLU(emb_dim)
+
+        self.inter_norm = CustomLayerNorm((emb_dim, n_freqs), stat_dims=(1, 3))
+        self.inter = nn.ModuleList(
+            _CausalTimeConv(emb_dim, inter_kernel, d) for d in inter_dilations)
+
+    def forward(self, x):                                    # (b, d, t, f)
+        y = self.intra_act(self.intra_pw(self.intra_dw(self.intra_norm(x))))
+        x = x + y                                            # intra-frequency residual
+        y = self.inter_norm(x)
+        for layer in self.inter:
+            y = layer(y)
+        return x + y                                         # inter-time residual
+
+
 class ConvolutionalGLU(nn.Module):
     def __init__(self, emb_dim, n_freqs=32, expansion_factor=2, dropout_p=0.1):
         super().__init__()
@@ -181,9 +257,23 @@ class ConvolutionalGLU(nn.Module):
 
 
 class DPR(nn.Module):
-    def __init__(self, emb_dim=16, hidden_dim=24, n_freqs=32, dropout_p=0.1):
+    """Dual-path block: a two-path mixer (``bottleneck``) then a ConvolutionalGLU.
+
+    ``bottleneck="rnn"`` (default) is the faithful LiSenNet :class:`DualPathRNN`;
+    ``bottleneck="conv"`` swaps in the NPU-mappable :class:`DualPathConv`. Both
+    keep the attribute name ``dp_rnn_attn`` so the surrounding code and the RNN
+    checkpoints are unaffected.
+    """
+
+    def __init__(self, emb_dim=16, hidden_dim=24, n_freqs=32, dropout_p=0.1,
+                 bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4)):
         super().__init__()
-        self.dp_rnn_attn = DualPathRNN(emb_dim, hidden_dim, n_freqs, dropout_p)
+        if bottleneck == "conv":
+            self.dp_rnn_attn = DualPathConv(emb_dim, n_freqs, intra_kernel, inter_kernel, inter_dilations)
+        elif bottleneck == "rnn":
+            self.dp_rnn_attn = DualPathRNN(emb_dim, hidden_dim, n_freqs, dropout_p)
+        else:
+            raise ValueError(f"unknown bottleneck {bottleneck!r} (expected 'rnn' or 'conv')")
         self.conv_glu = ConvolutionalGLU(emb_dim, n_freqs=n_freqs, expansion_factor=2, dropout_p=dropout_p)
 
     def forward(self, x):
@@ -338,17 +428,21 @@ class MaskDecoder(nn.Module):
 
 
 class LiSenNet(nn.Module):
-    def __init__(self, num_channels=16, n_blocks=2, n_fft=512, hop_length=256, compress_factor=0.3):
+    def __init__(self, num_channels=16, n_blocks=2, n_fft=512, hop_length=256, compress_factor=0.3,
+                 bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4)):
         super().__init__()
         self.n_fft = n_fft
         self.n_freqs = n_fft // 2 + 1
         self.hop_length = hop_length
         self.compress_factor = compress_factor
+        self.bottleneck = bottleneck
 
         self.encoder = Encoder(in_channels=3, num_channels=num_channels)
         self.blocks = nn.Sequential(*[
             DPR(emb_dim=num_channels, hidden_dim=num_channels // 2 * 3,
-                n_freqs=self.n_freqs // (2 ** 3), dropout_p=0.1)
+                n_freqs=self.n_freqs // (2 ** 3), dropout_p=0.1,
+                bottleneck=bottleneck, intra_kernel=intra_kernel,
+                inter_kernel=inter_kernel, inter_dilations=inter_dilations)
             for _ in range(n_blocks)
         ])
         self.decoder = MaskDecoder(self.n_freqs, num_channels=num_channels, out_channel=2, beta=1)
@@ -470,6 +564,10 @@ def build_lisennet(h=None):
         n_fft=int(g("n_fft", 512)),
         hop_length=int(g("hop_length", 256)),
         compress_factor=float(g("compress_factor", 0.3)),
+        bottleneck=str(g("bottleneck", "rnn")),
+        intra_kernel=int(g("intra_kernel", 7)),
+        inter_kernel=int(g("inter_kernel", 3)),
+        inter_dilations=tuple(g("inter_dilations", (1, 2, 4))),
     )
 
 
