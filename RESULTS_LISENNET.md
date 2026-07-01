@@ -129,6 +129,61 @@ compute on edge hardware, not graph footprint. (Static int8 also needs
 `per_channel=False` to dodge an onnxruntime int32-bias-scale-adjustment bug on
 this graph.)
 
+## NPU-deployable variant (dual-path conv)
+
+The GRU model above is the **quality reference**, but it does **not** compile to
+the STM32N6 Neural-ART NPU: the dual-path-RNN bottleneck hits two hard stedgeai
+blockers — the 2-axis `nn.LayerNorm` (Neural-ART's LayerNorm primitive takes only
+a 1-D per-channel affine) and the `(b,t,f,d)→(b·t,f,d)` GRU reshape ("Order of
+dimensions of input cannot be interpreted"). GRU recurrence would not map to the
+NPU hardware even if it compiled (it runs as Cortex-M55 software).
+
+So there is a second, **NPU-mappable** variant (`bottleneck: "conv"`,
+`configs/lisennet_conv_wide.json`) that keeps the sub-band U-Net and the
+magnitude-only mask but replaces the GRU bottleneck with a **dual-path conv**
+one (`DualPathConv`):
+
+* **intra-frequency** mixing → a symmetric depthwise freq conv + 1×1 (frequency
+  is fully available per frame, so the bidirectional-over-freq context needs no
+  state), replacing the bidirectional GRU;
+* **inter-time** mixing → a stack of causal dilated depthwise time convs
+  (`_CausalTimeConv`, dilations 1/2/4/8 ≈ 496 ms receptive field) with FIFO
+  state, replacing the unidirectional GRU;
+* norms are the already-primitive `CustomLayerNorm` → **no `nn.LayerNorm`** at all.
+
+The exported graph has **0 GRU and 0 `LayerNormalization`** nodes — both blockers
+gone. A capacity bump (num_channels 16→20, intra_kernel 7→11, dilations
+[1,2,4]→[1,2,4,8]; 41 K params, above the GRU's 36.8 K) recovers most of the
+quality:
+
+| model                        | params | NPU | FP32 PESQ | real-time int8 PESQ |
+| ---------------------------- | -----: | :-: | --------: | ------------------: |
+| GRU (dual-path-RNN)          | 36,783 |  ✗  | **3.006** |               2.930 |
+| conv nc16                    | 27,759 |  ✓  |     2.925 |                   — |
+| **conv wide (nc20)**         | 41,063 |  ✓  | **2.970** |           **2.855** |
+
+The ~0.04 FP32 gap (and ~0.075 at real-time int8) is the cost of dropping
+recurrence to fit the NPU. FP32 ONNX export is loss-free; static int8 costs
+~0.12 PESQ (a bit more than the GRU's ~0.09; QAT could recover part — stedgeai
+does the real on-board quantization).
+
+### Streaming state-I/O export (the deploy target)
+
+For frame-by-frame inference on the board, the conv variant exports to a graph
+with **explicit FIFO state I/O** (mirroring ConvFSENet's contract), so the board
+carries state across frames instead of resetting it:
+
+```
+feat (B,3,1,F)  +  N × state_i_in   ->   est_mag (B,1,F)  +  N × state_i_out
+```
+
+Every causal time-conv's ring buffer (encoder `DSConv`s, the `ConvolutionalGLU`
+depthwise conv, the `_CausalTimeConv` layers, the mask conv) is a positional
+state tensor — 17 of them for the wide model, static shapes (only batch dynamic,
+which Neural-ART wants). `lisennet.export_onnx --streaming` produces
+`g_best_streaming_fp32.onnx`; an ONNX Runtime frame loop reproduces the offline
+mask to ~1e-6. This is the artifact handed to stedgeai on the deploy box.
+
 ## Reproducing
 
 ```bash
@@ -145,6 +200,17 @@ python -m lisennet.quant_onnx --fp32 cp_lisennet/g_best_fp32.onnx --mode static 
 python -m lisennet.eval_deploy --checkpoint_file cp_lisennet/g_best --n_utts 824
 ```
 
+The **NPU-mappable conv variant** trains and exports the same way, plus a
+streaming graph with explicit state I/O for the board:
+
+```bash
+python -m lisennet.train --config configs/lisennet_conv_wide.json \
+    --checkpoint_path cp_lisennet_conv_wide --training_epochs 100
+python -m lisennet.export_onnx --checkpoint_file cp_lisennet_conv_wide/g_best              # whole-utterance
+python -m lisennet.export_onnx --checkpoint_file cp_lisennet_conv_wide/g_best --streaming  # deploy target
+python -m lisennet.eval_deploy --checkpoint_file cp_lisennet_conv_wide/g_best --n_utts 824
+```
+
 Training is fast — the model is tiny, so each step is dominated by the CPU
 PESQ + Griffin-Lim cost rather than GPU compute (~0.8 GB at batch 16,
 ~94 s/epoch, ~2.7 h for 100 epochs on an RTX 4090). The streaming reference is
@@ -157,7 +223,20 @@ streaming flag is off, and the offline forward stays bit-identical).
 The best-PESQ generator (`g_best`), the FP32 ONNX (`g_best_fp32.onnx`), the
 static int8 ONNX (`g_best_int8_static.onnx`), and the training config are
 mirrored on HuggingFace at
-[`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet).
+[`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) (the GRU
+quality reference).
+
+The **NPU-deployable conv variant** is a separate repo,
+[`claroche1/LiSenNet-npu`](https://huggingface.co/claroche1/LiSenNet-npu) — it
+adds the frame-by-frame **streaming** graphs (`g_best_streaming_fp32.onnx`, the
+stedgeai target) alongside the PyTorch checkpoint and whole-utterance graphs.
+Publish either variant with `push_lisennet_hf.py` (it auto-selects the repo +
+model card from the run's `config.json` `bottleneck`):
+
+```bash
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet            # GRU  -> claroche1/LiSenNet
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet_conv_wide  # conv -> claroche1/LiSenNet-npu
+```
 
 PyTorch:
 

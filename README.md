@@ -167,13 +167,16 @@ python -m lisennet.eval_deploy --checkpoint_file cp_lisennet/g_best --n_utts 824
 
 The reproduction reaches **PESQ 3.006** (full VBD test split, within ~0.06 of the paper's ~3.07). The ONNX export is loss-free, static int8 (the embedded-deployable quantization) costs ~0.086 PESQ, and the full real-time config (static int8 mask + noisy phase) lands at **2.930** at **RTF ≈ 0.13** on a single CPU thread. See [RESULTS_LISENNET.md](RESULTS_LISENNET.md) for the full backend × phase breakdown.
 
+The GRU model above is the quality reference but does not compile to the STM32N6 Neural-ART NPU (GRU + 2-axis LayerNorm are compiler blockers). An **NPU-deployable variant** (`configs/lisennet_conv_wide.json`, `bottleneck: "conv"`) replaces the dual-path GRU with a dual-path conv bottleneck — exported graph has 0 GRU / 0 LayerNormalization nodes — and adds a frame-by-frame streaming graph with explicit FIFO state I/O (the stedgeai target). It reaches **PESQ 2.970** FP32 / **2.855** real-time int8.
+
 ## Trained checkpoints
 
 Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
 
 * [`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints)
 * [`claroche1/convfsenet`](https://huggingface.co/claroche1/convfsenet)
-* [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — PyTorch `g_best`, FP32 ONNX, and static int8 ONNX
+* [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — GRU quality reference: PyTorch `g_best`, FP32 ONNX, and static int8 ONNX
+* [`claroche1/LiSenNet-npu`](https://huggingface.co/claroche1/LiSenNet-npu) — NPU-deployable conv variant: adds the frame-by-frame streaming ONNX (`g_best_streaming_fp32.onnx`, the stedgeai target)
 
 See the result files for loading examples and evaluation commands.
 
