@@ -38,11 +38,14 @@ from __future__ import annotations
 import torch
 
 from lisennet.model import (
-    ConvolutionalGLU, DSConv, DualPathRNN, LiSenNet, MaskDecoder,
+    ConvolutionalGLU, DSConv, DualPathRNN, LiSenNet, MaskDecoder, _CausalTimeConv,
 )
 
-# The modules that carry temporal state in streaming mode.
-_STREAM_MODULES = (DSConv, ConvolutionalGLU, DualPathRNN, MaskDecoder)
+# The modules that carry temporal state in streaming mode. ``DualPathRNN`` (the
+# RNN bottleneck) carries a GRU hidden state; ``_CausalTimeConv`` (the conv
+# bottleneck's inter-time layer) carries a FIFO ring buffer — only one of the two
+# is present depending on the model's ``bottleneck``.
+_STREAM_MODULES = (DSConv, ConvolutionalGLU, DualPathRNN, MaskDecoder, _CausalTimeConv)
 
 
 def enable_streaming(model: LiSenNet) -> None:
