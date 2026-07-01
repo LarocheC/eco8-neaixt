@@ -88,6 +88,55 @@ class VBDCalibrationReader(CalibrationDataReader):
         self._it = iter(self.items)
 
 
+class VBDStreamingCalibrationReader(CalibrationDataReader):
+    """Calibration for the *streaming* graph — feeds ``feat`` + all ``state_i_in``.
+
+    The streaming graph (``export_streaming_fp32``) takes one frame plus the N
+    FIFO state tensors, so the calibrator must provide realistic values for the
+    states too. This runs the conv model frame-by-frame over a few VoiceBank
+    crops via ``LiSenNetStreamingONNX`` and records, at each frame, the full input
+    feed ``{feat, state_0_in, ...}`` with the *actual* propagated state — the
+    activation ranges the quantizer sees then match real streaming inference.
+    """
+
+    def __init__(self, h, n_utts=4, max_frames=300, split="train"):
+        import torch
+        from common.dataset import Dataset, load_voicebank_demand
+        from lisennet.model import build_lisennet
+        from lisennet.streaming import LiSenNetStreamingONNX
+
+        model = build_lisennet(h).eval()
+        view = LiSenNetStreamingONNX(model)
+        names = view.state_input_names
+        hf = load_voicebank_demand()
+        ds = Dataset(hf[split], h.segment_size, h.sampling_rate,
+                     split=True, shuffle=True, seed=0)
+        self.items = []
+        with torch.no_grad():
+            for i in range(n_utts):
+                if len(self.items) >= max_frames:
+                    break
+                _, noisy = ds[i]
+                spec = model.power_compress(model.apply_stft(noisy.unsqueeze(0)))
+                feat_full = model.build_features(spec.abs(), spec.angle())   # (1, 3, T, F)
+                states = view.init_states(1)
+                for t in range(feat_full.shape[2]):
+                    feat_t = feat_full[:, :, t:t + 1, :]
+                    sample = {"feat": feat_t.numpy()}
+                    sample.update({nm: s.numpy() for nm, s in zip(names, states)})
+                    self.items.append(sample)
+                    states = list(view(feat_t, *states)[1:])                # propagate real state
+                    if len(self.items) >= max_frames:
+                        break
+        self._it = iter(self.items)
+
+    def get_next(self):
+        return next(self._it, None)
+
+    def rewind(self):
+        self._it = iter(self.items)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Int8-quantize an exported LiSenNet ONNX.")
     parser.add_argument("--fp32", required=True, help="fp32 .onnx from export_onnx.py")
