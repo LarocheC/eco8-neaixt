@@ -4,7 +4,7 @@
 
 # ---------------------------------------------------------------------------
 # ST Edge AI Core — the ONNX -> Neural-ART model compiler.
-# v4.0.1 installed (alongside the old 3.0) to match STM32N6-GettingStarted-Audio's
+# v4.0.1 installed to match STM32N6-GettingStarted-Audio's
 # ll_aton middleware. The app was generated with 4.0.0 and we have 4.0.1 (a patch off):
 # if `make build` still warns "Possible mismatch in ll_aton library used", refresh the
 # app's bundled ll_aton per ST's "update project with a new ST Edge AI Core" procedure.

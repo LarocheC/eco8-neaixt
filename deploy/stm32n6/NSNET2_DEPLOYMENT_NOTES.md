@@ -2,8 +2,7 @@
 
 What it took to get the NSNet2 family onto the N6 NPU, why the dense baseline
 *can* be deployed (and how), and why the structured/sparse variants still
-can't. All findings are on **ST Edge AI Core 4.0.1** (the v3.0.0 verdicts in
-older notes are superseded). Companion to
+can't. All findings are on **ST Edge AI Core 4.0.1**. Companion to
 [ONBOARD_MEASUREMENT.md](ONBOARD_MEASUREMENT.md) (the ConvFSENet measurement
 path) — the toolchain, board, and profiler setup are identical.
 
