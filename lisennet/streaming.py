@@ -36,6 +36,7 @@ same ``predict_mask`` sub-network to ONNX for edge runtimes.
 from __future__ import annotations
 
 import torch
+from torch import nn
 
 from lisennet.model import (
     ConvolutionalGLU, DSConv, DualPathRNN, LiSenNet, MaskDecoder, _CausalTimeConv,
@@ -139,3 +140,96 @@ def stream_est_mag(model: LiSenNet, src_mag, src_pha):
     mags = [streamer.step(src_mag[:, t], src_pha[:, t]) for t in range(src_mag.shape[1])]
     streamer.close()
     return torch.stack(mags, dim=1)                         # (B, T, F)
+
+
+# =============================================================================
+# ONNX-exportable streaming view — explicit flat state I/O (à la ConvFSENet).
+# =============================================================================
+
+
+class LiSenNetStreamingONNX(nn.Module):
+    """ONNX-friendly single-frame view of the mask sub-network's causal state.
+
+    Every causal time-conv in the model keeps a FIFO ring buffer (the encoder
+    ``DSConv``\\s, the ``ConvolutionalGLU`` depthwise conv, the conv-bottleneck's
+    ``_CausalTimeConv`` layers and the ``MaskDecoder`` mask conv). The offline
+    streamer carries those as internal ``_buf`` attributes; for ONNX they must be
+    graph inputs/outputs, so this wrapper exposes them as flat positional
+    ``state_i_in`` args and returns ``state_i_out`` — exactly ConvFSENet's
+    ``ConvFSENetStreamingONNX`` contract (``export_onnx.export_streaming_fp32``).
+
+    forward(feat, *states_in) -> (est_mag, *states_out) where
+      * ``feat``      : ``(B, 3, 1, F)`` one frame of the 3-channel network input
+        (compressed mag + group-delay/pi + IFD/pi); STFT / feature extraction and
+        the phase recovery stay host-side, same as the whole-utterance export.
+      * ``est_mag``   : ``(B, 1, F)`` enhanced compressed magnitude for the frame.
+      * each state    : the FIFO buffer of one causal conv, a *static* shape (only
+        the batch axis is dynamic) — Neural-ART wants fixed state shapes.
+
+    This works with the conv bottleneck (``bottleneck="conv"``); the RNN
+    bottleneck carries a GRU hidden state instead of conv FIFOs and is not the
+    NPU target, so it is rejected here.
+    """
+
+    # Modules and the buffer attribute(s) each one carries, in a fixed order.
+    _SLOT_ATTRS = {
+        DSConv: ("_buf_low", "_buf_high"),
+        ConvolutionalGLU: ("_buf",),
+        _CausalTimeConv: ("_buf",),
+        MaskDecoder: ("_buf",),
+    }
+
+    def __init__(self, model: LiSenNet):
+        super().__init__()
+        if getattr(model, "bottleneck", "rnn") != "conv":
+            raise ValueError(
+                "LiSenNetStreamingONNX requires bottleneck='conv' (the NPU variant); "
+                f"got {getattr(model, 'bottleneck', 'rnn')!r}. The RNN bottleneck's GRU "
+                "hidden state is not a conv FIFO and does not map to the NPU."
+            )
+        if any(isinstance(m, DualPathRNN) for m in model.modules()):
+            raise ValueError("model still contains a DualPathRNN — not an NPU streaming target")
+        self.model = model.eval()
+        enable_streaming(self.model)
+        # Ordered (module, attr) state slots, in module-registration order.
+        self._slots = []
+        for m in self.model.modules():
+            for cls, attrs in self._SLOT_ATTRS.items():
+                if isinstance(m, cls):
+                    self._slots += [(m, a) for a in attrs]
+                    break
+        self.n_states = len(self._slots)
+        self.n_freqs = int(self.model.n_freqs)
+
+    @property
+    def state_input_names(self):
+        return [f"state_{i}_in" for i in range(self.n_states)]
+
+    @property
+    def state_output_names(self):
+        return [f"state_{i}_out" for i in range(self.n_states)]
+
+    @torch.no_grad()
+    def init_states(self, batch_size: int, device="cpu", dtype=torch.float32):
+        """Zero FIFO buffers of the correct static shape for each slot.
+
+        Shapes are discovered by running one zero frame through the streaming
+        model (each ``_causal_conv_stream`` allocates its buffer on first use),
+        then zeroing what it allocated. Buffers depend on channel width and the
+        sub-band frequency size at each stage, so they are not all the same shape.
+        """
+        reset_streaming(self.model)
+        dummy = torch.zeros(batch_size, 3, 1, self.n_freqs, device=device, dtype=dtype)
+        _ = self.model.predict_mask(dummy)
+        states = [torch.zeros_like(getattr(mod, attr)) for mod, attr in self._slots]
+        reset_streaming(self.model)
+        return states
+
+    def forward(self, feat, *states_in):
+        """feat: (B, 3, 1, F); states_in: n_states positional FIFO buffers."""
+        for (mod, attr), s in zip(self._slots, states_in):
+            setattr(mod, attr, s)                          # seed FIFOs from graph inputs
+        mask = self.model.predict_mask(feat)               # (B, 2, 1, F); mutates the FIFOs
+        est_mag = self.model.apply_mask(mask, feat[:, 0])  # (B, 1, F)
+        states_out = [getattr(mod, attr) for mod, attr in self._slots]
+        return (est_mag, *states_out)

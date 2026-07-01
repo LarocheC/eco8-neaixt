@@ -82,6 +82,53 @@ def export_fp32(model: LiSenNet, output_path, batch_size: int = 1,
     return output_path
 
 
+def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
+                          opset: int = 17) -> Path:
+    """Export the frame-by-frame streaming mask sub-network to FP32 ONNX.
+
+    Graph IO (à la ConvFSENet's ``export_streaming_fp32``):
+    ``feat (B,3,1,F)`` + N ``state_i_in`` -> ``est_mag (B,1,F)`` + N ``state_i_out``.
+    Only the batch axis is dynamic; the FIFO buffer widths are static (Neural-ART
+    wants fixed state shapes). Requires the conv bottleneck (``bottleneck="conv"``)
+    — the exported graph has no GRU and no 2-axis ``LayerNormalization``, which is
+    asserted here so a regression can't slip a Neural-ART blocker back in.
+    """
+    from lisennet.streaming import LiSenNetStreamingONNX      # local: avoids a cycle
+
+    model.eval()
+    view = LiSenNetStreamingONNX(model).eval()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    feat = torch.zeros(batch_size, 3, 1, model.n_freqs, dtype=torch.float32)
+    states = view.init_states(batch_size)
+    args = (feat, *states)
+    input_names = ["feat"] + view.state_input_names
+    output_names = ["est_mag"] + view.state_output_names
+    dynamic_axes = {name: {0: "B"} for name in input_names + output_names}
+
+    torch.onnx.export(
+        view, args, str(output_path),
+        input_names=input_names, output_names=output_names,
+        dynamic_axes=dynamic_axes, opset_version=opset,
+        dynamo=False,                                       # legacy tracer — stable for this graph
+    )
+
+    model_proto = onnx.load(str(output_path))
+    ops = Counter(n.op_type for n in model_proto.graph.node)
+    blockers = {op: ops[op] for op in ("GRU", "LSTM", "RNN", "LayerNormalization") if op in ops}
+    assert not blockers, f"Neural-ART blocker op(s) survived export: {blockers}"
+    sorted_ops = dict(sorted(ops.items(), key=lambda kv: -kv[1]))
+    size_mib = output_path.stat().st_size / (1024 * 1024)
+    print(f"Exported streaming FP32 ONNX to {output_path}")
+    print(f"  size   : {size_mib:.3f} MiB")
+    print(f"  states : {view.n_states}  (feat + {view.n_states} state tensors -> est_mag + {view.n_states} states)")
+    print(f"  nodes  : {len(model_proto.graph.node)}  (no GRU / LayerNormalization)")
+    print(f"  ops    : {sorted_ops}")
+    return output_path
+
+
 def _load_from_checkpoint(checkpoint_file) -> LiSenNet:
     """Load a trained LiSenNet from a g_best-style checkpoint + sibling config.json."""
     checkpoint_file = Path(checkpoint_file)
@@ -100,11 +147,19 @@ def main():
                         help="Path to a checkpoint (e.g. cp_lisennet/g_best). "
                              "Sibling config.json is auto-loaded.")
     parser.add_argument("--output", default=None,
-                        help="Output .onnx path (default: <ckpt_dir>/g_best_fp32.onnx).")
+                        help="Output .onnx path (default: <ckpt_dir>/g_best_fp32.onnx, "
+                             "or g_best_streaming_fp32.onnx with --streaming).")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Export the frame-by-frame graph with explicit state I/O "
+                             "(requires bottleneck='conv') instead of the whole-utterance graph.")
     a = parser.parse_args()
     model = _load_from_checkpoint(a.checkpoint_file)
-    out = Path(a.output) if a.output else Path(a.checkpoint_file).parent / "g_best_fp32.onnx"
-    export_fp32(model, out)
+    default_name = "g_best_streaming_fp32.onnx" if a.streaming else "g_best_fp32.onnx"
+    out = Path(a.output) if a.output else Path(a.checkpoint_file).parent / default_name
+    if a.streaming:
+        export_streaming_fp32(model, out)
+    else:
+        export_fp32(model, out)
 
 
 if __name__ == "__main__":
