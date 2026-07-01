@@ -220,22 +220,22 @@ streaming flag is off, and the offline forward stays bit-identical).
 
 ## Trained checkpoint
 
-The best-PESQ generator (`g_best`), the FP32 ONNX (`g_best_fp32.onnx`), the
-static int8 ONNX (`g_best_int8_static.onnx`), and the training config are
-mirrored on HuggingFace at
-[`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) (the GRU
-quality reference).
+Both variants live in one HuggingFace repo,
+[`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet), each under its
+own subfolder:
 
-The **NPU-deployable conv variant** is a separate repo,
-[`claroche1/LiSenNet-npu`](https://huggingface.co/claroche1/LiSenNet-npu) — it
-adds the frame-by-frame **streaming** graphs (`g_best_streaming_fp32.onnx`, the
-stedgeai target) alongside the PyTorch checkpoint and whole-utterance graphs.
-Publish either variant with `push_lisennet_hf.py` (it auto-selects the repo +
-model card from the run's `config.json` `bottleneck`):
+* **`gru/`** — the GRU quality reference: `g_best`, `g_best_fp32.onnx`,
+  `g_best_int8_static.onnx`, `config.json`.
+* **`conv/`** — the NPU-deployable conv variant: the same, plus the frame-by-frame
+  **streaming** graphs (`g_best_streaming_fp32.onnx`, the stedgeai target, and
+  `g_best_streaming_int8_static.onnx`).
+
+Publish either variant with `push_lisennet_hf.py` — it auto-selects the subfolder
+and writes the combined root model card from the run's `config.json` `bottleneck`:
 
 ```bash
-python push_lisennet_hf.py --checkpoint_dir cp_lisennet            # GRU  -> claroche1/LiSenNet
-python push_lisennet_hf.py --checkpoint_dir cp_lisennet_conv_wide  # conv -> claroche1/LiSenNet-npu
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet            # GRU  -> claroche1/LiSenNet (gru/)
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet_conv_wide  # conv -> claroche1/LiSenNet (conv/)
 ```
 
 PyTorch:
