@@ -175,8 +175,7 @@ Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
 
 * [`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints)
 * [`claroche1/convfsenet`](https://huggingface.co/claroche1/convfsenet)
-* [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — GRU quality reference: PyTorch `g_best`, FP32 ONNX, and static int8 ONNX
-* [`claroche1/LiSenNet-npu`](https://huggingface.co/claroche1/LiSenNet-npu) — NPU-deployable conv variant: adds the frame-by-frame streaming ONNX (`g_best_streaming_fp32.onnx`, the stedgeai target)
+* [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — both variants in one repo: `gru/` (quality reference: PyTorch `g_best`, FP32 + static int8 ONNX) and `conv/` (NPU-deployable variant: adds the frame-by-frame streaming ONNX `g_best_streaming_fp32.onnx`, the stedgeai target)
 
 See the result files for loading examples and evaluation commands.
 
