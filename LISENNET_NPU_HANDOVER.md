@@ -10,11 +10,17 @@ first, then `RESULTS_LISENNET.md` (model + host results) and `deploy/stm32n6/REA
 Cortex-M55 CPU) — the NPU is far more efficient, and LiSenNet is the best-quality
 real-time model in the repo (host int8 PESQ **2.855**, clears the 2.85 deploy gate).
 
-**Status: NPU deployability is PROVEN and the full deploy pipeline is built.** All four
+**Status: TRAINED AND QUALITY-CLOSED — the deploy artifact is ready.** All four
 `atonn` (Neural-ART compiler) blockers are diagnosed and fixed in code; the stateless
-windowed deploy graph **compiles to the NPU** (verified with random weights). What
-remains is to **train the hardened FP32 model** (on the separate training box) and run
-it through the pipeline to get final PESQ + on-board latency.
+windowed deploy graph **compiles to the NPU** (verified with random weights). The
+hardened model is now **trained and swept over capacity** (nc20/24/28, 100-epoch CMGAN
+each): the winner is **nc24** (36,288 params) at FP32 PESQ **3.013** / real-time int8
+PESQ **2.998** on the full 824-utt split — above the GRU quality reference (3.006 /
+2.930) and far clear of the 2.85/2.90 gates. The windowed **signed-int8** deploy
+artifact is produced and verified
+(`cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`). What remains
+is deploy-box-only: `make generate` for the real NPU MACC/epoch report + on-board
+ms/frame.
 
 ## The four NPU blockers and their fixes (the core finding)
 
@@ -80,34 +86,40 @@ cd deploy/stm32n6 && make generate \
 # read network_generate_report.txt: macc, epochs (HW/SW), ram; grep the log for signo=11/E103 (must be absent)
 ```
 
-## TODOs (the remaining plan)
+## TODOs (updated after the training study — see outcomes)
 
-- [ ] **Stage 2 — train (training box):** `python -m lisennet.train --config
-  configs/lisennet_conv_hardened.json --checkpoint_path cp_lisennet_conv_hardened
-  --training_epochs 100` (~2.7 h/4090). **Gate:** FP32 PESQ within ~0.05 of the conv
-  reference **2.970**. Watch the norm-semantics risk (below).
-- [ ] **Stage 2 — deploy (this box):** windowed export → signed int8 → `make generate`;
-  record real NPU MACC/epochs and int8 PESQ (`lisennet/eval_deploy.py`, gate ≥ 2.85).
-- [ ] **Stage 3 — QAT:** `lisennet/qat_train.py` from the hardened `g_best`; target int8
-  PESQ ≥ **2.90**. (Sibling QAT recovers ~0.5–0.8.)
-- [ ] **Stage 4 — Pareto shrink** (QAT holding quality): decoder upsampling is **36 %** of
-  MACC (SPConvTranspose→ConvTranspose already cut it ~3×; trim further), dilations
-  `[1,2,4,8]→[1,2,4]` (RF 68→~40, config-only), `nc 20→18/16`. Pick the cheapest config ≥ gate.
-- [ ] **On-board ms/frame:** needs Arm GNU **13.3** + STM32CubeProgrammer (see `config.mk`;
-  this box has GCC 10.3.1 and no CubeProgrammer) to flash + measure. Until then, latency is
-  the stedgeai report estimate only.
+- [x] **Stage 2 — train:** done for nc20/nc24/nc28 (100 epochs each,
+  `configs/lisennet_conv_hardened{,_nc24,_nc28}.json` → `cp_lisennet_conv_hardened{,_nc24,_nc28}/`).
+  The norm-semantics risk did **not** materialize — BN+ReLU trains cleanly. The
+  hardened decoder came out much smaller than budgeted (ConvTranspose swap: nc20 =
+  25.7 K, not ~41 K), so the sweep *grew* capacity back: **nc24 (36.3 K) wins** with
+  FP32 **3.013**; nc28 (48.7 K) trains worse (2.927) — capacity is non-monotonic here.
+- [x] **Stage 2 — eval + artifact:** windowed export (`emit_T=64`) → signed int8
+  (verified QInt8-only) → full-split PESQ: **nc24 real-time int8 2.998** (gate ≥ 2.85 ✓,
+  stretch 2.90 ✓). Artifact: `cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`.
+- [x] **Stage 3 — QAT: NEGATIVE result, dropped.** 30-epoch w8/a8 QAT on nc20 *lost*
+  0.085 PESQ (2.862 → 2.777 best): `qat_train`'s recon-only loss pulls weights off the
+  MetricGAN(PESQ) optimum, and the hardened PTQ gap (−0.016…−0.042) leaves nothing to
+  recover. **PTQ is the deploy path**; a future QAT would need the GAN loss in the loop.
+- [x] **Stage 4 — capacity study:** done as a *grow* sweep instead of a shrink (the
+  hardened model was under-budget, and nc20's margin over the 2.85 gate was inside the
+  ±0.02 calibration noise). If NPU latency/MACC ever needs a cheaper model, nc20
+  (2.853) is the fallback; dilations `[1,2,4,8]→[1,2,4]` (RF 68→~40) is the next knob.
+- [ ] **Deploy box — `make generate`** on the nc24 windowed int8 artifact: record real
+  NPU MACC, HW/SW epochs, activation RAM (grep the log: no signo=11/E103).
+- [ ] **On-board ms/frame:** needs Arm GNU **13.3** + STM32CubeProgrammer (see `config.mk`)
+  to flash + measure. Until then, latency is the stedgeai report estimate only.
 
 ## Key decisions / knobs
 
 - **`emit_T` (latency vs recompute):** window = L(68) + emit_T. `emit_T=1` → ~69× recompute,
   ~16 ms latency; `emit_T=16` → ~5×, ~256 ms; `emit_T=64` → ~2.06×, ~1 s. Pick per latency
   budget. All compile to the NPU; per-frame MACC is trivially real-time on the NPU regardless.
-- **Norm-semantics risk:** `CustomLayerNorm` normalizes **per-frame** over (channel,freq);
-  `BatchNorm2d` uses **fixed per-channel** stats. This is a real behavioural change validated
-  only by the Stage-2 FP32 PESQ gate. If BN loses quality: fall back to a learned per-channel
-  affine (still foldable), a small capacity bump, or lean on Stage-3 QAT. LiSenNet's input is
-  already power-compressed (`compress_factor 0.3`), which reduces the need for per-frame norm,
-  and ConvFSENet uses BN on the same NPU successfully.
+- **Norm-semantics risk — RESOLVED:** `CustomLayerNorm` normalizes **per-frame** over
+  (channel,freq); `BatchNorm2d` uses **fixed per-channel** stats. Training showed the swap
+  costs nothing at the right capacity (nc24 FP32 3.013 vs the un-hardened conv_wide 2.970) —
+  the power-compressed input (`compress_factor 0.3`) evidently makes per-frame norm
+  unnecessary, as hoped.
 - **Receptive field = 68 frames** (architectural; dilations 1/2/4/8 × 2 blocks). Sets the
   window warmup length. Stage-4 dilation reduction shrinks it.
 

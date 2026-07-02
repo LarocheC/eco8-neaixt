@@ -167,7 +167,7 @@ recurrence to fit the NPU. FP32 ONNX export is loss-free; static int8 costs
 ~0.12 PESQ (a bit more than the GRU's ~0.09; QAT could recover part — stedgeai
 does the real on-board quantization).
 
-### Streaming state-I/O export (the deploy target)
+### Streaming state-I/O export (superseded for the NPU — see the hardened variant)
 
 For frame-by-frame inference on the board, the conv variant exports to a graph
 with **explicit FIFO state I/O** (mirroring ConvFSENet's contract), so the board
@@ -182,7 +182,57 @@ depthwise conv, the `_CausalTimeConv` layers, the mask conv) is a positional
 state tensor — 17 of them for the wide model, static shapes (only batch dynamic,
 which Neural-ART wants). `lisennet.export_onnx --streaming` produces
 `g_best_streaming_fp32.onnx`; an ONNX Runtime frame loop reproduces the offline
-mask to ~1e-6. This is the artifact handed to stedgeai on the deploy box.
+mask to ~1e-6. **The FIFO-state graph turned out to segfault the Neural-ART
+codegen** (blocker #4 in `LISENNET_NPU_HANDOVER.md`), so the NPU deploy target is
+now the stateless *windowed* graph of the hardened variant below; the streaming
+graph remains the CPU/onnxruntime real-time reference.
+
+## NPU-hardened variant (the deploy model)
+
+The conv variant above still crashes the Neural-ART compiler (`atonn`) at
+codegen. Peeling the blockers (see `LISENNET_NPU_HANDOVER.md`) gave a *hardened*
+recipe — `norm="batchnorm"` (per-channel, folds into the conv), `act="relu"`,
+`upsample="convtranspose"` (4-D tensors only), and a stateless **windowed**
+deploy graph instead of the 17-tensor FIFO state I/O. The windowed hardened int8
+graph **compiles to the NPU** (verified end-to-end with random weights: bit-exact
+parity vs offline, ~2.1 M MACC per emitted frame at `emit_T=64`).
+
+Retraining the hardened recipe from scratch (`configs/lisennet_conv_hardened*.json`,
+same CMGAN training) and sweeping `num_channels` over 20/24/28:
+
+| model (hardened)   | params | FP32 PESQ | int8 + GL | **int8 + noisy phase (real-time)** |
+| ------------------ | -----: | --------: | --------: | ---------------------------------: |
+| nc20               | 25,682 |     2.895 |     2.864 |                              2.853 |
+| **nc24 (deploy)**  | 36,288 | **3.013** |     3.001 |                          **2.998** |
+| nc28               | 48,718 |     2.927 |     2.881 |                              2.867 |
+
+(All full 824-utterance VBD test split; FP32 ONNX export loss-free for all
+three. nc24 RTF: 3.24 ms/frame single-thread CPU → 0.20.)
+
+Takeaways:
+
+* **The hardened nc24 matches the GRU quality reference in FP32 (3.013 vs
+  3.006) and beats every other real-time int8 number in this file (2.998 vs the
+  GRU's 2.930)** — with 0 GRU / 0 LayerNorm / 0 PReLU and an NPU-compilable
+  graph. The hardening cost nothing at the right capacity.
+* **The hardened primitives quantize far more gracefully.** Int8 drop is
+  −0.016 (nc24) / −0.042 (nc20) vs −0.115 for the un-hardened conv_wide — the
+  BN-fold + ReLU + signed-QInt8 recipe, not capacity, is what fixed the
+  quantization loss.
+* **Capacity is non-monotonic:** nc28 (49 K) trains to a *worse* optimum than
+  nc24 (36 K) under the same 100-epoch recipe. nc24 ≈ the GRU budget is the
+  sweet spot; the earlier ~41 K "wide" sizing overshoots.
+* **QAT is counterproductive here.** A 30-epoch w8/a8 QAT fine-tune
+  (recon-loss-only, `lisennet/qat_train.py`) *lost* 0.085 PESQ on the nc20
+  model: the trainer's reconstruction objective pulls the weights away from the
+  MetricGAN(PESQ)-shaped optimum, and with only a −0.02…−0.04 PTQ gap there is
+  nothing for QAT to recover. PTQ is the deploy path.
+
+The deploy artifact is the windowed signed-int8 graph
+(`cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`,
+`feat_window (B,3,132,257) → est_mag (B,64,257)`, window = RF 68 + `emit_T` 64,
+verified QInt8-only) — handed to stedgeai on the deploy box for the final NPU
+compile + on-board latency.
 
 ## Reproducing
 
