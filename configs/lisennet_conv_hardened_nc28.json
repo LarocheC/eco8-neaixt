@@ -1,0 +1,42 @@
+{
+    "_comment": "GROW-for-margin variant of lisennet_conv_hardened: num_channels 28 (hardened baseline nc20=25.7k FP32 2.895/int8 2.853, thin margin over 2.85 gate). Wider identical arch (conv/bn/relu/convtranspose, dilations [1,2,4,8] unchanged so RF/window=68). nc24~36k / nc28~49k params; target int8 real-time PESQ >=2.90. Retrain into cp_lisennet_conv_hardened_nc28.",
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "num_channels": 28,
+    "n_blocks": 2,
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+    "bottleneck": "conv",
+    "norm": "batchnorm",
+    "act": "relu",
+    "upsample": "convtranspose",
+    "intra_kernel": 11,
+    "inter_kernel": 3,
+    "inter_dilations": [
+        1,
+        2,
+        4,
+        8
+    ],
+    "loss": {
+        "complex": 0.1,
+        "mag": 0.9,
+        "adv": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
