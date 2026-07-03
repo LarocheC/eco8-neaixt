@@ -182,10 +182,12 @@ depthwise conv, the `_CausalTimeConv` layers, the mask conv) is a positional
 state tensor — 17 of them for the wide model, static shapes (only batch dynamic,
 which Neural-ART wants). `lisennet.export_onnx --streaming` produces
 `g_best_streaming_fp32.onnx`; an ONNX Runtime frame loop reproduces the offline
-mask to ~1e-6. **The FIFO-state graph turned out to segfault the Neural-ART
-codegen** (blocker #4 in `LISENNET_NPU_HANDOVER.md`), so the NPU deploy target is
-now the stateless *windowed* graph of the hardened variant below; the streaming
-graph remains the CPU/onnxruntime real-time reference.
+mask to ~1e-6. The FIFO-state graph initially segfaulted the Neural-ART codegen
+(blocker #4 in `LISENNET_NPU_HANDOVER.md`); this was later root-caused **not** to
+the state I/O but to the `Pad(data, pads, "")` node form `F.pad` exports (an
+empty optional `constant_value` input), and is now fixed bit-exactly inside the
+export. The hardened variant's streaming graph **compiles and deploys** — see
+the frame-level on-board section below.
 
 ## NPU-hardened variant (the deploy model)
 
@@ -298,6 +300,47 @@ Notes:
   at 23.2 ms, plus the input/output `Gather` layout ops at 14.9 ms; the rest is
   hybrid/runtime overhead. If the NPU share ever matters, the stride-3 encoder
   is the knob — at RTF 0.072 there is no pressure.
+
+### Frame-level streaming deployment — 16 ms hop on the NPU (2026-07-03)
+
+Blocker #4 root-caused and fixed (the `F.pad` export form, not the state I/O —
+see `LISENNET_NPU_HANDOVER.md`), so the **17-state FIFO streaming graph** now
+compiles and runs on the board too. This is LiSenNet operating **frame by
+frame** — one 16 ms hop in, one enhanced frame out, bounded state carried
+on-device — the same latency class as ConvFSENet/monarch:
+
+| metric (streaming int8, per frame)  | value |
+| ----------------------------------- | ----: |
+| epochs (HW / hybrid / SW)           | 131 (74 / 51 / 6) |
+| MACC per frame                      | 1,299,086 |
+| memory                              | 47 KiB weights + 147 KiB activations, all on-chip (`n6-noextmem`) |
+| **latency per frame**               | **2.791 ms** (std 0.006) |
+| **RTF (16 ms hop)**                 | **0.174** (~5.7× headroom) |
+| algorithmic latency                 | **one 16 ms hop** (vs 1.02 s windowed) |
+| **PESQ, full 824-utt split (int8 streaming + noisy phase)** | **2.963** |
+| host parity (int8 stream vs fp32 offline) | cos 0.9992 |
+| on-device vs host int8 (threaded state, real speech) | cos 0.998 |
+
+Notes:
+
+* **This makes LiSenNet the best-quality streaming model on the N6** —
+  PESQ 2.963 at 2.79 ms/frame, vs ConvFSENet 2.91 at 4.40 ms and monarch_full
+  2.85 at 2.13 ms. The windowed graph keeps the throughput crown (1.15 ms/frame,
+  int8 PESQ 2.998) for latency-tolerant (1 s block) use.
+* The streaming int8 quant costs −0.037 vs the fp32 real-time reference
+  (2.963 vs 3.000 on the same protocol) — slightly more than the windowed
+  artifact's −0.016; the calibration regime differs (300 propagated-state
+  frames vs windowed crops). Recalibration with more utterances is the obvious
+  knob if that gap ever matters.
+* Where the 2.78 ms goes (npu_profiler): NPU core 0.72 ms (26%); no hot epoch
+  (top one 0.033 ms) — the floor is the distributed launch + state-plumbing
+  overhead of 131 epochs, the same regime as ConvFSENet's streaming graph. At
+  1.3 M MACC/frame the NPU is idle ~74% of the time; epoch count, not compute,
+  sets the frame cost.
+* Quantization: `quant_onnx --streaming --signed` (new) — signed QInt8,
+  per-channel, percentile calibration that **threads the real FIFO state**
+  through the trained model over VBD crops, so state tensors calibrate on
+  realistic ranges.
 
 ## Reproducing
 

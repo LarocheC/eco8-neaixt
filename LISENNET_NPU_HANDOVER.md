@@ -10,16 +10,27 @@ first, then `RESULTS_LISENNET.md` (model + host results) and `deploy/stm32n6/REA
 Cortex-M55 CPU) — the NPU is far more efficient, and LiSenNet is the best-quality
 real-time model in the repo (host int8 PESQ **2.855**, clears the 2.85 deploy gate).
 
-**Status: DEPLOYED AND MEASURED ON SILICON (2026-07-03).** All four `atonn`
-(Neural-ART compiler) blockers are diagnosed and fixed in code; the trained **nc24**
+**Status: BOTH DEPLOY GRAPHS MEASURED ON SILICON (2026-07-03).** All four `atonn`
+(Neural-ART compiler) blockers are root-caused and fixed in code; the trained **nc24**
 winner (36,288 params, FP32 PESQ **3.013** / real-time int8 PESQ **2.998**, from the
-HF `conv-hardened/` subfolder) compiles to the NPU and runs on the STM32N6570-DK:
-**73.63 ms per 64-frame window = 1.15 ms per emitted frame → RTF 0.072** (~14×
-real-time headroom), on-target cosine **0.9983** vs the host int8 reference. Compile:
-102 epochs (60 HW / 36 hybrid / 6 SW), 177.7 M MACC/window, weights 492 KiB
-(octoFlash), activations 2.72 MiB all on-chip (`n6-allmems-O3`; a full-on-chip
-`noextmem` build is impossible — weights+activations 3.35 MB > 2.8 MB of pools).
-On-board numbers + the SW-epoch breakdown: `RESULTS_LISENNET.md` and
+HF `conv-hardened/` subfolder) runs on the STM32N6570-DK two ways:
+
+- **Windowed** (stateless, emit_T=64 → 1.02 s blocks): **73.63 ms/window = 1.15 ms
+  per emitted frame → RTF 0.072** (~14× headroom), on-target cos **0.9983**. Compile:
+  102 epochs (60 HW / 36 hybrid / 6 SW), 177.7 M MACC/window, weights 492 KiB
+  (octoFlash), activations 2.72 MiB all on-chip (`n6-allmems-O3`; a full-on-chip
+  `noextmem` build is impossible — weights+activations 3.35 MB > 2.8 MB of pools).
+- **Streaming** (17-state FIFO, frame-by-frame, **16 ms hop latency** — blocker #4
+  fixed): **2.791 ms/frame → RTF 0.174** (~5.7× headroom), fully on-chip
+  (`n6-noextmem`, weights 47 KiB in npuRAM), **int8 PESQ 2.963** on the full 824-utt
+  split (noisy phase) — the best streaming quality on the N6. Compile: 131 epochs
+  (74 HW / 51 hybrid / 6 SW), **1,299,086 MACC/frame**, activations 147 KiB. Host
+  parity: int8 streaming loop vs fp32 offline cos **0.9992**; on-device threaded-state
+  vs host int8 cos **0.998**. Profiler: NPU core 0.72 ms (26%); the rest is the
+  distributed per-epoch launch + state-plumbing floor (no hot epoch — same regime
+  as ConvFSENet).
+
+On-board numbers + breakdowns: `RESULTS_LISENNET.md` and
 `deploy/stm32n6/ONBOARD_MEASUREMENT.md`.
 
 ## The four NPU blockers and their fixes (the core finding)
@@ -32,7 +43,20 @@ The original conv variant (`configs/lisennet_conv_wide.json`) maps its operators
 | 1 | 2-axis `CustomLayerNorm` (33 ReduceMean) | not NPU-mappable; lowers to ReduceMean/Sqrt/Div | `norm="batchnorm"` (per-channel, folds into conv) | `3f38db3` |
 | 2 | `PReLU`/`Mish` (per-channel float slope) | blocks full int8 / forces M55 hybrid | `act="relu"` (parameter-free) | `3f38db3` |
 | 3 | `SPConvTranspose2d` **5-D tensors** | the `view→permute→view` emits rank-5 tensors → **segfault** | `upsample="convtranspose"` (4-D, ~3× fewer decoder MACC) | `3f38db3` |
-| 4 | 17-tensor **FIFO streaming state** I/O | the Slice/Pad/Concat state class → **segfault** | stateless **windowed** deploy graph (no state) | this branch |
+| 4 | ~~17-tensor FIFO streaming state I/O~~ **`Pad` with an *empty* optional `constant_value` input** | `F.pad` (the streaming ring-buffer path) exports as `Pad(data, pads, "")`; atonn 4.0.1 **segfaults (signo=11)** on that form inside the encoder's dual-branch sub-band stage. The offline/windowed graph dodges it only because `nn.ConstantPad2d` exports an *explicit* value tensor. | `_strip_empty_pad_value_inputs` in `lisennet/export_onnx.py` — drops the empty slot (bit-exact; default constant_value is 0). **The 17-state streaming graph now compiles AND deploys.** | this branch |
+
+**Blocker #4 root cause (found 2026-07-03, five bisection rounds).** The original diagnosis
+("the FIFO state I/O class segfaults") was the right *symptom* but the wrong *mechanism* —
+state I/O is innocent. Bisection path: encoder section → single DSConv stage (59 nodes) →
+feature permutations (state-I/O removal, pad-constant folding, INT64_MAX slice clamping all
+still crash; single-band paths pass) → 19-node repro → single-delta flips. The only flip
+that passes is removing the **empty third input of `Pad`**. Trigger needs the dual-branch
+context (single-path graphs with the same Pad form compile), so the windowed/whole-graph
+proofs never caught it. The fix is applied automatically inside
+`export_streaming_fp32` and verified bit-exact in ORT (threaded-state diff 0.0); the
+minimal 19-node crash repro is easily rebuilt by extracting `/encoder/conv_2/*` from an
+unfixed streaming export (`onnx.utils.extract_model`), folding its pads constant and
+dropping the state outputs.
 
 Diagnosis evidence (all reproducible via `cp_lisennet_conv_hardened/` scratch + logs):
 - Bisection: the **whole-utterance** (stateless) hardened graph compiles to the NPU, the

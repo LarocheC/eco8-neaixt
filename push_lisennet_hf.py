@@ -53,12 +53,16 @@ FILE_MAP_CONV = {
     "g_best_streaming_fp32.onnx": ("onnx", "g_best_streaming_fp32.onnx"),
     "g_best_streaming_int8_static.onnx": ("onnx", "g_best_streaming_int8_static.onnx"),
 }
-# hardened: the deploy graph is the stateless WINDOWED one (the FIFO streaming
-# graph segfaults the Neural-ART codegen — see LISENNET_NPU_HANDOVER.md).
+# hardened: two NPU deploy graphs — the stateless WINDOWED one (bulk/throughput:
+# 1.15 ms/frame at 1 s blocks) and the frame-by-frame STREAMING one (16 ms hop:
+# 2.79 ms/frame; its export strips the empty Pad constant_value inputs that
+# segfaulted the Neural-ART codegen — LISENNET_NPU_HANDOVER.md blocker #4).
 FILE_MAP_CONV_HARDENED = {
     **FILE_MAP_RNN,
     "g_best_windowed_fp32.onnx": ("onnx", "g_best_windowed_fp32.onnx"),
     "g_best_windowed_int8_static.onnx": ("onnx", "g_best_windowed_fp32.int8_static.onnx"),
+    "g_best_streaming_fp32.onnx": ("onnx", "g_best_streaming_fp32.onnx"),
+    "g_best_streaming_int8_static.onnx": ("onnx", "g_best_streaming_int8_static.onnx"),
 }
 FILE_MAP = {"rnn": FILE_MAP_RNN, "conv": FILE_MAP_CONV,
             "conv_hardened": FILE_MAP_CONV_HARDENED}
