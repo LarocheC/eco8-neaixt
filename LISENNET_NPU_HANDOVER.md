@@ -145,6 +145,20 @@ cd deploy/stm32n6 && make generate \
   `Gather` layout ops (14.9 ms); the rest is hybrid/runtime overhead. Plenty of
   optimization headroom if ever needed (stride-3 encoder redesign), but at RTF 0.072
   there is no deployment pressure.
+- [x] **Round 3 (training box — see RESULTS_LISENNET.md):** the PTQ loss was localized
+  to the **decoder** (seeded sensitivity scan) and mostly recovered. New best model =
+  **relu6-deep** (`cp_lisennet_conv_hardened_nc24_deep_relu6/`, 46,248 params,
+  `act=relu6`, b3, dil [1,2,4,8,16], RF 196, window 196+64=260), two windowed recipes:
+  pure int8 **3.014** (`g_best_windowed_fp32.int8_static.onnx`) and hybrid
+  decoder-FP32 **3.052** (`g_best_windowed_int8_decoder_fp32.onnx`); on HF under
+  `conv-hardened-deep/`. nc24 b2 (on-board-verified, int8 2.998) is the fallback.
+- [ ] **Deploy box — relu6-deep:** (1) windowed pure-int8 should compile like nc24's
+  (same op set + Clip; window 260); (2) hybrid decoder-FP32 is the open codegen
+  question — 118 unquantized QDQ decoder nodes must fall to float epochs without a
+  crash (decoder ≈ 36 % of MACC, check the latency split); (3) with blocker #4
+  root-caused (empty `Pad` value — fix is model-agnostic in `export_streaming_fp32`),
+  the **streaming 16 ms-hop export of relu6-deep** is now also on the table — export,
+  quantize signed, compile, and compare vs its windowed numbers like nc24's 2.963.
 
 ## Key decisions / knobs
 

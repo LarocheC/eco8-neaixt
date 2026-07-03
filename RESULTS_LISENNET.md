@@ -257,8 +257,55 @@ nc24 seed to calibrate run variance
   (±0.004), so the nc28 width regression in the table above was real, not noise.
 * Unlocking the FP32 headroom at int8 would need quantization-aware work — a
   QAT with the MetricGAN loss in the loop (the recon-only QAT above regresses),
-  or per-channel activation handling on the deploy quantizer side. Left open;
-  **nc24 b2 remains the deploy model.**
+  or per-channel activation handling on the deploy quantizer side. → Done in
+  round 3 below, which localizes the loss and recovers most of it.
+
+### Round 3 — the int8 loss lives in the decoder; ReLU6 + distillation
+
+Three parallel attacks on the locked FP32 headroom:
+
+**1. Quant-sensitivity scan** (selective quantization: keep one node group FP32
+at a time, *identical seeded calibration crops* across scenarios — without the
+seeding, calibration-draw noise alone spans ±0.04 and swamps the signal; 200
+utts, deep model): keeping the **decoder** FP32 recovers **+0.052 of the +0.078**
+all-int8 gap; every other group (the dilated time stack included!) is ≤ +0.010.
+The round-2 "long-RF activations" hypothesis was mislocalized: **the PTQ pain is
+the decoder** (USConv upsampling + mask head — a *linear* path: no ReLU between
+the skip-concats and convs), whose input features just get richer with RF.
+
+**2. `act="relu6"`** (NPU-native Clip; bounds every ReLU's dynamic range) on the
+deep arch: FP32 **3.084** — the best FP32 in the study, clipping *helped*
+training — and all-int8 real-time 3.014 (PTQ −0.069 vs deep's −0.084; partial,
+as predicted, because the decoder has no ReLU to clip).
+
+**3. Mask-level knowledge distillation** (`train.py --distill_from`, deep
+teacher → nc24-b2 student, weight 0.45): student FP32 3.015 → int8 real-time
+3.004. The nc24 arch's quant robustness carries the (small) gain through intact.
+
+Full-split (824) results, int8-static + noisy phase:
+
+| model | recipe | FP32 | **int8 real-time** |
+| ----- | ------ | ---: | -----------------: |
+| **relu6-deep** | **int8, decoder kept FP32 (hybrid)** | **3.084** | **3.052** |
+| deep           | int8, decoder kept FP32 (hybrid)     | 3.069 | 3.022 |
+| **relu6-deep** | **all-int8**                          | 3.084 | **3.014** |
+| KD student (nc24 arch) | all-int8                     | 3.015 | 3.004 |
+| nc24 b2 (round-1 pick) | all-int8                     | 3.013 | 2.998 |
+
+**relu6-deep is the new deploy model** — best on every axis, one checkpoint, two
+recipes:
+
+* **pure int8** (`g_best_windowed_fp32.int8_static.onnx`, signed, window
+  196+64=260): **3.014**, same all-int8 deploy story as before;
+* **hybrid** (`g_best_windowed_int8_decoder_fp32.onnx`, decoder's 118 nodes
+  left unquantized in the QDQ graph): **3.052**, at the cost of the decoder
+  (~36 % of MACC) running as float epochs on the board (M55 or NPU FP16) —
+  compile + latency to be verified on the deploy box; the pure-int8 artifact is
+  the fallback.
+
+Net effect of the whole study: real-time deployable PESQ **2.855 → 3.052**
+(+0.197 over the un-hardened conv_wide; +0.122 over the GRU reference's
+real-time 2.930), all NPU-safe ops.
 
 The deploy artifact is the windowed signed-int8 graph
 (`cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`,
