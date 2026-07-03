@@ -39,7 +39,8 @@ from huggingface_hub import HfApi, create_repo
 
 SRC_REPO = "https://github.com/LarocheC/eco8-neaixt"
 DEFAULT_REPO = "claroche1/LiSenNet"
-SUBDIR = {"rnn": "gru", "conv": "conv", "conv_hardened": "conv-hardened"}
+SUBDIR = {"rnn": "gru", "conv": "conv", "conv_hardened": "conv-hardened",
+          "conv_hardened_deep": "conv-hardened-deep"}
 
 # repo filename -> (source dir kind, local filename); "ckpt"=--checkpoint_dir, "onnx"=--onnx_dir
 FILE_MAP_RNN = {
@@ -64,8 +65,16 @@ FILE_MAP_CONV_HARDENED = {
     "g_best_streaming_fp32.onnx": ("onnx", "g_best_streaming_fp32.onnx"),
     "g_best_streaming_int8_static.onnx": ("onnx", "g_best_streaming_int8_static.onnx"),
 }
+# deep: adds the hybrid decoder-FP32 windowed artifact (int8 everywhere except the
+# decoder's QDQ nodes — recovers the decoder-localized PTQ loss; +0.038 PESQ over
+# the pure-int8 recipe at the cost of the decoder running as float epochs).
+FILE_MAP_CONV_HARDENED_DEEP = {
+    **FILE_MAP_CONV_HARDENED,
+    "g_best_windowed_int8_decoder_fp32.onnx": ("onnx", "g_best_windowed_int8_decoder_fp32.onnx"),
+}
 FILE_MAP = {"rnn": FILE_MAP_RNN, "conv": FILE_MAP_CONV,
-            "conv_hardened": FILE_MAP_CONV_HARDENED}
+            "conv_hardened": FILE_MAP_CONV_HARDENED,
+            "conv_hardened_deep": FILE_MAP_CONV_HARDENED_DEEP}
 
 # Shared root model card (describes both variants). Static — every push writes it.
 CARD_INDEX = """\
@@ -95,15 +104,19 @@ VoiceBank-DEMAND-16k — a sub-band U-Net with a magnitude-only mask (phase from
 [arXiv:2409.13285](https://arxiv.org/abs/2409.13285)**
 ([hyyan2k/LiSenNet](https://github.com/hyyan2k/LiSenNet), MIT).
 
-This repo holds **three variants**, each in its own subfolder:
+This repo holds **four variants**, each in its own subfolder:
 
 | subfolder | recipe | params | NPU-compiles | FP32 PESQ | real-time int8 PESQ |
 | --------- | ------ | -----: | :----------: | --------: | ------------------: |
 | [`gru/`](./gru)   | dual-path **GRU** (faithful)  | 36,783 |  ✗  |     3.006 |               2.930 |
 | [`conv/`](./conv) | dual-path **conv**            | 41,063 |  ✗  |     2.970 |               2.855 |
-| [`conv-hardened/`](./conv-hardened) | conv + **NPU-hardened** | 36,288 |  ✓  | **3.013** |           **2.998** |
+| [`conv-hardened/`](./conv-hardened) | conv + **NPU-hardened** | 36,288 |  ✓  |     3.013 |               2.998 |
+| [`conv-hardened-deep/`](./conv-hardened-deep) | hardened + **deep RF + ReLU6** | 46,248 | ✓* | **3.084** | **3.014** (int8) / **3.052** (hybrid) |
 
 PESQ is wideband, on the full 824-utterance VoiceBank-DEMAND test split.
+(*) `conv-hardened-deep/` uses the same op set as `conv-hardened/` plus Clip
+(ReLU6); its graph has not yet been through a stedgeai compile, `conv-hardened/`
+has (topology verified on Neural-ART).
 
 * **`gru/`** is the faithful reproduction and the original quality reference. Its
   GRU + 2-axis `LayerNorm` do **not** compile to the STM32N6 Neural-ART NPU.
@@ -112,14 +125,22 @@ PESQ is wideband, on the full 824-utterance VoiceBank-DEMAND test split.
   graph (`conv/g_best_streaming_fp32.onnx`, `feat + N state_i_in -> est_mag +
   N state_i_out`) crashes the Neural-ART codegen — kept as the CPU/onnxruntime
   frame-by-frame reference.
-* **`conv-hardened/`** is the **NPU-deployable** variant and the current best
-  model overall: per-channel BatchNorm (folds into the convs), ReLU, plain
-  ConvTranspose upsampling, and a stateless **windowed** deploy graph
+* **`conv-hardened/`** is the compile-verified **NPU-deployable** variant:
+  per-channel BatchNorm (folds into the convs), ReLU, plain ConvTranspose
+  upsampling, and a stateless **windowed** deploy graph
   (`conv-hardened/g_best_windowed_int8_static.onnx`, signed QInt8,
   `feat_window (B,3,132,257) -> est_mag (B,64,257)`, window = receptive field
   68 + 64 emitted frames) that **compiles to Neural-ART** — the artifact handed
   to stedgeai. The hardened primitives also quantize far better (int8 drop
   −0.016 vs −0.115 for `conv/`).
+* **`conv-hardened-deep/`** is the **best model overall**: the hardened recipe,
+  deeper (3 blocks) with an extra dilation stage (receptive field 196 frames ≈
+  3.1 s) and **ReLU6** activations (bounded ranges quantize better; exports as
+  Clip). Window is 196+64=260 frames (`feat_window (B,3,260,257)`). It ships
+  **two** signed windowed int8 artifacts: `g_best_windowed_int8_static.onnx`
+  (everything int8, PESQ 3.014) and `g_best_windowed_int8_decoder_fp32.onnx`
+  (int8 except the decoder's QDQ nodes, PESQ **3.052** — the int8 loss is
+  decoder-localized; the decoder then runs as float epochs on the board).
 
 Code + full write-up: [{src}]({src}) — see
 [RESULTS_LISENNET.md]({src}/blob/main/RESULTS_LISENNET.md).
@@ -215,7 +236,10 @@ def main():
     with open(ckpt_dir / "config.json") as f:
         cfg = json.load(f)
     if cfg.get("bottleneck") == "conv":
-        variant = "conv_hardened" if cfg.get("norm") == "batchnorm" else "conv"
+        if cfg.get("norm") == "batchnorm":
+            variant = "conv_hardened_deep" if cfg.get("act") == "relu6" else "conv_hardened"
+        else:
+            variant = "conv"
     else:
         variant = "rnn"
     sub = SUBDIR[variant]
