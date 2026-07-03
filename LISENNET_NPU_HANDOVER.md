@@ -10,17 +10,17 @@ first, then `RESULTS_LISENNET.md` (model + host results) and `deploy/stm32n6/REA
 Cortex-M55 CPU) — the NPU is far more efficient, and LiSenNet is the best-quality
 real-time model in the repo (host int8 PESQ **2.855**, clears the 2.85 deploy gate).
 
-**Status: TRAINED AND QUALITY-CLOSED — the deploy artifact is ready.** All four
-`atonn` (Neural-ART compiler) blockers are diagnosed and fixed in code; the stateless
-windowed deploy graph **compiles to the NPU** (verified with random weights). The
-hardened model is now **trained and swept over capacity** (nc20/24/28, 100-epoch CMGAN
-each): the winner is **nc24** (36,288 params) at FP32 PESQ **3.013** / real-time int8
-PESQ **2.998** on the full 824-utt split — above the GRU quality reference (3.006 /
-2.930) and far clear of the 2.85/2.90 gates. The windowed **signed-int8** deploy
-artifact is produced and verified
-(`cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`). What remains
-is deploy-box-only: `make generate` for the real NPU MACC/epoch report + on-board
-ms/frame.
+**Status: DEPLOYED AND MEASURED ON SILICON (2026-07-03).** All four `atonn`
+(Neural-ART compiler) blockers are diagnosed and fixed in code; the trained **nc24**
+winner (36,288 params, FP32 PESQ **3.013** / real-time int8 PESQ **2.998**, from the
+HF `conv-hardened/` subfolder) compiles to the NPU and runs on the STM32N6570-DK:
+**73.63 ms per 64-frame window = 1.15 ms per emitted frame → RTF 0.072** (~14×
+real-time headroom), on-target cosine **0.9983** vs the host int8 reference. Compile:
+102 epochs (60 HW / 36 hybrid / 6 SW), 177.7 M MACC/window, weights 492 KiB
+(octoFlash), activations 2.72 MiB all on-chip (`n6-allmems-O3`; a full-on-chip
+`noextmem` build is impossible — weights+activations 3.35 MB > 2.8 MB of pools).
+On-board numbers + the SW-epoch breakdown: `RESULTS_LISENNET.md` and
+`deploy/stm32n6/ONBOARD_MEASUREMENT.md`.
 
 ## The four NPU blockers and their fixes (the core finding)
 
@@ -105,10 +105,22 @@ cd deploy/stm32n6 && make generate \
   hardened model was under-budget, and nc20's margin over the 2.85 gate was inside the
   ±0.02 calibration noise). If NPU latency/MACC ever needs a cheaper model, nc20
   (2.853) is the fallback; dilations `[1,2,4,8]→[1,2,4]` (RF 68→~40) is the next knob.
-- [ ] **Deploy box — `make generate`** on the nc24 windowed int8 artifact: record real
-  NPU MACC, HW/SW epochs, activation RAM (grep the log: no signo=11/E103).
-- [ ] **On-board ms/frame:** needs Arm GNU **13.3** + STM32CubeProgrammer (see `config.mk`)
-  to flash + measure. Until then, latency is the stedgeai report estimate only.
+- [x] **Deploy box — NPU compile** (2026-07-03, stedgeai 4.0.1, `n6-allmems-O3`,
+  `--fix-parametric-shapes "{'B':1}"`): no signo=11/E103. **102 epochs (60 HW / 36
+  hybrid / 6 SW)**, MACC **177,695,034**/window (= 2.78 M per emitted frame at
+  emit_T=64), weights **491.6 KiB** → octoFlash, activations **2.72 MiB** → all
+  on-chip (cpuRAM2 100% + npuRAM3–6 96–99%). `n6-noextmem` cannot fit this graph
+  (weights+activations 3.35 MB > 2.8 MB of usable pools) — with 492 KiB of weights
+  streamed from octoFlash (~13 MB/s avg) that costs nothing here, unlike ConvFSENet.
+- [x] **On-board ms/frame** (STM32N657 @ MCU 800 MHz / NPU 1 GHz, n6_loader +
+  `validate --mode target`): **73.63 ms/window** (min 73.04 / max 74.07 / std 0.32)
+  = **1.15 ms per emitted frame → RTF 0.072**; on-target **cos 0.99829** (rmse 0.151)
+  vs the host int8 ONNX → carries the host-verified real-time PESQ 2.998. Profiler
+  split: NPU core 20.3 ms (27.7%); the 6 SW epochs cost **38.1 ms (52%)** — the 3
+  encoder down-sampling convs (k=(2,5), stride (1,3): 23.2 ms) plus the input/output
+  `Gather` layout ops (14.9 ms); the rest is hybrid/runtime overhead. Plenty of
+  optimization headroom if ever needed (stride-3 encoder redesign), but at RTF 0.072
+  there is no deployment pressure.
 
 ## Key decisions / knobs
 

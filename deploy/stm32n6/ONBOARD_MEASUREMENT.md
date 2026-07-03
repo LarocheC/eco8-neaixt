@@ -90,20 +90,32 @@ per-region memory bandwidth that exposed the external-flash bottleneck.
 | weights in octoFlash (`n6-allmems-O3`) | 7.14 ms | 0.45 | 3.73 ms | 27% (memory-bound) | 0.990 |
 | weights in npuRAM (`n6-noextmem`)      | **4.40 ms** | **0.275** | 1.26 ms | **81% (compute-bound)** | 0.990 |
 
-## Results — all four models (same generate → load → validate/profile flow)
+## Results — all five models (same generate → load → validate/profile flow)
 On-board, int8, STM32N657 @ MCU 800 MHz / NPU 1 GHz; frame period = hop 256 @ 16 kHz = 16 ms.
 The NSNet2 family needed graph surgery first (see
 [NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md)).
 
 | model (int8) | profile | latency/frame | RTF | weights | on-target mask cos | method |
 |---|---|---:|---:|---:|---:|---|
-| **NSNet2 `monarch_full`** (sparse, re-exported) | `n6-noextmem` | **2.13 ms** | **0.13** | 0.72 MB on-chip | 0.99979 | `validate` |
+| **LiSenNet conv-hardened nc24** (windowed, emit_T=64) | `n6-allmems-O3` | **1.15 ms**¹ | **0.072** | 0.49 MB octoFlash | 0.99829 | `validate` |
+| NSNet2 `monarch_full` (sparse, re-exported)     | `n6-noextmem` | 2.13 ms | 0.13 | 0.72 MB on-chip | 0.99979 | `validate` |
 | NSNet2 `monarch_8` (sparse, re-exported)        | `n6-noextmem` | 2.89 ms | 0.18 | 0.37 MB on-chip | 0.99994 | `validate` |
 | ConvFSENet (conv)                                | `n6-noextmem` | 4.40 ms | 0.275 | 1.40 MB on-chip | 0.990 | `npu_profiler` |
 | NSNet2 dense (`baseline`)                        | `n6-allmems-O3` | 22.94 ms | 1.43 | 2.70 MB octoFlash | 0.9946 | `npu_profiler` |
 
-Fastest real-time model: **`monarch_full` (2.13 ms / RTF 0.13)**; ConvFSENet wins int8 PESQ
-(2.91 vs 2.85). Dense overflows on-chip RAM → memory-bound → not real-time.
+¹ LiSenNet is **windowed, not streaming**: 73.63 ms per 64-frame window = 1.15 ms per
+emitted frame, but each inference buffers 1.02 s of audio (the `emit_T` export knob
+trades block latency vs recompute). The streaming rows above emit every 16 ms hop.
+LiSenNet compile: 102 epochs (60 HW / 36 hybrid / 6 SW), MACC 177.7 M/window,
+activations 2.72 MB all on-chip; `n6-noextmem` cannot fit it (weights+activations
+3.35 MB > 2.8 MB pools) and isn't needed — 0.49 MB of octoFlash weights stream at
+~13 MB/s avg, negligible. Needs `--fix-parametric-shapes "{'B':1}"`. SW share = the
+3 encoder stride-(1,3) k=(2,5) convs (23.2 ms) + I/O `Gather` layout ops (14.9 ms).
+
+Fastest per emitted frame: **LiSenNet windowed (1.15 ms / RTF 0.072)**, which also
+carries the best real-time int8 PESQ (2.998). Fastest *streaming* (16 ms hop) model:
+**`monarch_full` (2.13 ms / RTF 0.13)**; ConvFSENet wins streaming int8 PESQ (2.91 vs
+2.85). Dense overflows on-chip RAM → memory-bound → not real-time.
 
 ## Caveats
 - **All four models above now deploy** on the Neural-ART. NSNet2 dense needs a
