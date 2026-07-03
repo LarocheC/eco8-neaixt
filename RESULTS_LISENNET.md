@@ -228,6 +228,36 @@ Takeaways:
   MetricGAN(PESQ)-shaped optimum, and with only a −0.02…−0.04 PTQ gap there is
   nothing for QAT to recover. PTQ is the deploy path.
 
+### Round 2 — temporal-context study (FP32 wins, int8 gives them back)
+
+The residual gap vs the GRU is bounded temporal memory (RF 68 frames ≈ 1.1 s vs
+unbounded recurrence), so round 2 extended the receptive field — deeper
+(`n_blocks 3`) and/or an extra dilation stage (`[1,2,4,8,16]`) — plus a second
+nc24 seed to calibrate run variance
+(`configs/lisennet_conv_hardened_nc24_{deep,dil16,s2}.json`, 140-epoch runs):
+
+| variant (hardened nc24)    | params |  RF | FP32 PESQ | int8 real-time | PTQ drop |
+| -------------------------- | -----: | --: | --------: | -------------: | -------: |
+| **b2, dil [1,2,4,8]** (deploy) | 36,288 |  68 |     3.013 |      **2.998** | **−0.016** |
+| b2, dil [1,2,4,8,16]       | 37,680 | 132 |     3.034 |          2.954 |   −0.080 |
+| b3, dil [1,2,4,8,16]       | 46,248 | 196 | **3.069** |          2.985 |   −0.084 |
+
+* **Temporal context buys FP32 exactly as predicted** (+0.02 per RF doubling,
+  +0.056 total at RF 196 — above the GRU reference 3.006) …
+* **… and static int8 takes it all back.** Both long-RF variants lose ~0.08 to
+  PTQ vs the short model's −0.016 — and it is *not* depth: dil16 has the same
+  2-block quantized path as the deploy model and still loses −0.080. Features
+  that integrate seconds of context appear to carry a wider activation dynamic
+  range, which per-tensor int8 resolves poorly. Re-calibration (2× data, three
+  draws: 2.979–2.990 on the deep model) does not close it — structural, not
+  calibration noise.
+* **The recipe is seed-stable**: a second nc24 seed lands at 3.009 vs 3.013
+  (±0.004), so the nc28 width regression in the table above was real, not noise.
+* Unlocking the FP32 headroom at int8 would need quantization-aware work — a
+  QAT with the MetricGAN loss in the loop (the recon-only QAT above regresses),
+  or per-channel activation handling on the deploy quantizer side. Left open;
+  **nc24 b2 remains the deploy model.**
+
 The deploy artifact is the windowed signed-int8 graph
 (`cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`,
 `feat_window (B,3,132,257) → est_mag (B,64,257)`, window = RF 68 + `emit_T` 64,

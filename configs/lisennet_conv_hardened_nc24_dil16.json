@@ -1,0 +1,43 @@
+{
+    "_comment": "MIDDLE variant between lisennet_conv_hardened_nc24 (FP32 3.013 / int8 rt 2.998) and _nc24_deep (b3+dil16: FP32 3.069 but int8 rt 2.985 \u2014 the deeper quantized path loses -0.084 to PTQ vs nc24's -0.016, eating the FP32 gain). This keeps n_blocks 2 (short quantized path) and takes only the dilation extension [1,2,4,8]->[1,2,4,8,16]: 37,680 params, RF 132 frames (2.11s). Hypothesis: most of the temporal-context FP32 gain at nc24-like quantization robustness. Retrain into cp_lisennet_conv_hardened_nc24_dil16.",
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "num_channels": 24,
+    "n_blocks": 2,
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+    "bottleneck": "conv",
+    "norm": "batchnorm",
+    "act": "relu",
+    "upsample": "convtranspose",
+    "intra_kernel": 11,
+    "inter_kernel": 3,
+    "inter_dilations": [
+        1,
+        2,
+        4,
+        8,
+        16
+    ],
+    "loss": {
+        "complex": 0.1,
+        "mag": 0.9,
+        "adv": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
