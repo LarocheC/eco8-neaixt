@@ -167,7 +167,7 @@ recurrence to fit the NPU. FP32 ONNX export is loss-free; static int8 costs
 ~0.12 PESQ (a bit more than the GRU's ~0.09; QAT could recover part — stedgeai
 does the real on-board quantization).
 
-### Streaming state-I/O export (superseded for the NPU — see the hardened variant)
+### Streaming state-I/O export (16 ms hop — deploys to the NPU since the Pad fix)
 
 For frame-by-frame inference on the board, the conv variant exports to a graph
 with **explicit FIFO state I/O** (mirroring ConvFSENet's contract), so the board
