@@ -261,8 +261,43 @@ nc24 seed to calibrate run variance
 The deploy artifact is the windowed signed-int8 graph
 (`cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`,
 `feat_window (B,3,132,257) → est_mag (B,64,257)`, window = RF 68 + `emit_T` 64,
-verified QInt8-only) — handed to stedgeai on the deploy box for the final NPU
-compile + on-board latency.
+verified QInt8-only) — published as `conv-hardened/g_best_windowed_int8_static.onnx`
+on the HF repo and deployed below.
+
+### On-board deployment — STM32N6570-DK (measured 2026-07-03)
+
+The published nc24 artifact compiles to the Neural-ART NPU (stedgeai 4.0.1,
+`n6-allmems-O3` profile, `--fix-parametric-shapes "{'B':1}"`) and runs on the
+board (STM32N657 @ MCU 800 MHz / NPU 1 GHz, `n6_loader` + `validate --mode
+target` — the flow in `deploy/stm32n6/ONBOARD_MEASUREMENT.md`):
+
+| metric (windowed int8, emit_T=64)   | value |
+| ----------------------------------- | ----: |
+| epochs (HW / hybrid / SW)           | 102 (60 / 36 / 6) |
+| MACC per window (64 frames)         | 177,695,034 |
+| weights                             | 491.6 KiB (octoFlash) |
+| activations                         | 2.72 MiB (all on-chip: cpuRAM2 + npuRAM3–6) |
+| **latency per window**              | **73.63 ms** (std 0.32, 10 runs) |
+| **per emitted frame / RTF**         | **1.15 ms → RTF 0.072** (~14× headroom) |
+| on-target cosine vs host int8       | 0.99829 (rmse 0.151) |
+
+Notes:
+
+* **Per emitted frame this is the fastest model measured on the N6 in this repo**
+  (monarch_full 2.13 ms, ConvFSENet 4.40 ms) — and it carries the best real-time
+  int8 PESQ (2.998). The trade is **block latency**: emit_T=64 buffers 1.02 s of
+  audio per inference. The `emit_T` export knob trades that down (e.g. emit_T=16
+  → 256 ms blocks at ~2.6× the per-frame recompute); every emit_T compiles.
+* A fully on-chip (`n6-noextmem`) build is **impossible** for this graph —
+  weights + activations = 3.35 MB > 2.8 MB of usable pools. It doesn't matter:
+  the 492 KiB of weights stream from octoFlash at ~13 MB/s average, negligible
+  at this size (the penalty that made dense NSNet2 non-real-time was 2.7 MB).
+* Where the 73.6 ms goes (npu_profiler): NPU core 20.3 ms (27.7%); the **6 SW
+  epochs cost 38.1 ms (52%)** — the three encoder down-sampling convs
+  (k=(2,5), stride (1,3) over frequency — a geometry the conv engine won't map)
+  at 23.2 ms, plus the input/output `Gather` layout ops at 14.9 ms; the rest is
+  hybrid/runtime overhead. If the NPU share ever matters, the stride-3 encoder
+  is the knob — at RTF 0.072 there is no pressure.
 
 ## Reproducing
 
