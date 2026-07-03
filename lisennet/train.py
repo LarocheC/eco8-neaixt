@@ -85,8 +85,14 @@ def discriminator_loss(results, discriminator, device):
     return loss_real + loss_fake
 
 
-def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, clip):
-    """One CMGAN step: discriminator then generator (one shared forward)."""
+def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, clip,
+             teacher=None, distill_weight=0.0):
+    """One CMGAN step: discriminator then generator (one shared forward).
+
+    With ``teacher`` set, adds ``distill_weight * MSE(est_mag, teacher_est_mag)``
+    to the generator loss — mask-level knowledge distillation from a stronger
+    (e.g. longer-receptive-field) model into this deployment architecture.
+    """
     results = model(noisy, clean)
     device = clean.device
 
@@ -100,6 +106,12 @@ def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, c
     # ----- generator -----
     optim_g.zero_grad()
     g_loss, parts = generator_loss(results, discriminator, weights)
+    if teacher is not None:
+        with torch.no_grad():
+            teacher_mag = teacher(noisy, clean)["est_mag"]
+        loss_distill = F.mse_loss(results["est_mag"], teacher_mag)
+        g_loss = g_loss + distill_weight * loss_distill
+        parts["distill"] = float(loss_distill.item())
     g_loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     optim_g.step()
@@ -126,6 +138,19 @@ def train(a, h):
 
     weights = _loss_weights(h)
     clip = float(h.get("gradient_clip", 5.0))
+
+    # ----- distillation teacher (optional, frozen) ---------------------------
+    teacher = None
+    if a.distill_from:
+        with open(os.path.join(os.path.dirname(a.distill_from), "config.json")) as f:
+            teacher_h = AttrDict(json.load(f))
+        teacher = build_lisennet(teacher_h).to(device)
+        teacher.load_state_dict(load_checkpoint(a.distill_from, device)["generator"])
+        teacher.eval()
+        teacher.requires_grad_(False)
+        n_teacher = sum(p.numel() for p in teacher.parameters())
+        print(f"Distilling from {a.distill_from} ({n_teacher / 1e6:.4f}M params, "
+              f"weight={a.distill_weight}).")
 
     # ----- resume ------------------------------------------------------------
     cp_g = scan_checkpoint(a.checkpoint_path, "g_")
@@ -176,7 +201,8 @@ def train(a, h):
             clean_audio = _to_dev(clean_audio, device)        # (B, samples)
             noisy_audio = _to_dev(noisy_audio, device)
             metrics = gan_step(model, discriminator, optim_g, optim_d,
-                               noisy_audio, clean_audio, h, weights, clip)
+                               noisy_audio, clean_audio, h, weights, clip,
+                               teacher=teacher, distill_weight=a.distill_weight)
 
             if steps % a.stdout_interval == 0:
                 print(f"Steps : {steps:d}, G: {metrics['loss']:.4f}, D: {metrics['d_loss']:.4f}, "
@@ -240,6 +266,11 @@ def main():
     parser.add_argument("--validation_interval", default=1000, type=int)
     parser.add_argument("--best_checkpoint_start_epoch", default=1, type=int)
     parser.add_argument("--init_from", default=None)
+    parser.add_argument("--distill_from", default=None,
+                        help="Teacher g_best for mask-level knowledge distillation "
+                             "(its config.json is read from the sibling directory).")
+    parser.add_argument("--distill_weight", default=0.45, type=float,
+                        help="Weight of the MSE(est_mag, teacher_est_mag) distillation term.")
     a = parser.parse_args()
 
     with open(a.config) as f:

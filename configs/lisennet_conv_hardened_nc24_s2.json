@@ -1,0 +1,42 @@
+{
+    "_comment": "SEED-2 replica of lisennet_conv_hardened_nc24 (seed 1234 -> 4321, all else identical): calibrates run-to-run variance of the hardened recipe. Motivated by nc28 (48.7k) training to a WORSE optimum (2.927) than nc24 (3.013) \u2014 if seed variance is ~0.03+, single-run sweep conclusions need multiple seeds. Also a candidate for best-of / weight averaging with the seed-1 g_best. Retrain into cp_lisennet_conv_hardened_nc24_s2.",
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 4321,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "num_channels": 24,
+    "n_blocks": 2,
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+    "bottleneck": "conv",
+    "norm": "batchnorm",
+    "act": "relu",
+    "upsample": "convtranspose",
+    "intra_kernel": 11,
+    "inter_kernel": 3,
+    "inter_dilations": [
+        1,
+        2,
+        4,
+        8
+    ],
+    "loss": {
+        "complex": 0.1,
+        "mag": 0.9,
+        "adv": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
