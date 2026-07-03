@@ -119,12 +119,18 @@ def _make_norm(kind, bn_channels, ln_input_dims):
 def _make_act(kind, channels):
     """Activation factory. ``"prelu"`` (default) = per-channel :class:`nn.PReLU`
     (a per-channel float slope that blocks int8 / the NPU); ``"relu"`` = parameter-free
-    :class:`nn.ReLU` (NPU-native). ``channels`` is ignored for ReLU."""
+    :class:`nn.ReLU` (NPU-native); ``"relu6"`` = :class:`nn.ReLU6` (NPU-native Clip),
+    which bounds the activation dynamic range so per-tensor int8 can resolve
+    long-receptive-field variants (the unbounded-ReLU deep/dil16 models lose ~0.08
+    PESQ to PTQ — see RESULTS_LISENNET.md round 2). ``channels`` is ignored for the
+    parameter-free kinds."""
     if kind == "relu":
         return nn.ReLU()
+    if kind == "relu6":
+        return nn.ReLU6()
     if kind == "prelu":
         return nn.PReLU(channels)
-    raise ValueError(f"unknown act {kind!r} (expected 'prelu' or 'relu')")
+    raise ValueError(f"unknown act {kind!r} (expected 'prelu', 'relu' or 'relu6')")
 
 
 class RNN(nn.Module):
@@ -262,7 +268,7 @@ class ConvolutionalGLU(nn.Module):
             nn.ConstantPad2d((1, 1, 2, 0), value=0.0),       # causal-in-time pad (2,0), freq (1,1)
             nn.Conv2d(hidden_dim, hidden_dim, 3, 1, groups=hidden_dim),
         )
-        self.act = nn.ReLU() if act == "relu" else nn.Mish()
+        self.act = _make_act(act, hidden_dim) if act in ("relu", "relu6") else nn.Mish()
         self.fc2 = nn.Conv2d(hidden_dim, emb_dim, 1)
         self.dropout = nn.Dropout(dropout_p)
         # Streaming: the causal depthwise conv keeps a (kt-1)-frame ring buffer.
@@ -446,7 +452,7 @@ class MaskDecoder(nn.Module):
             _make_act(act, out_channel),
             nn.Conv2d(out_channel, out_channel, (1, 1)),
         )
-        self.lsigmoid = nn.Sigmoid() if act == "relu" else LearnableSigmoid2d(num_features, beta=beta)
+        self.lsigmoid = nn.Sigmoid() if act in ("relu", "relu6") else LearnableSigmoid2d(num_features, beta=beta)
         # Streaming: the first mask conv (kernel (2,2)) is causal in time and keeps
         # a 1-frame ring buffer; the rest of mask_conv is per-frame.
         self.streaming = False

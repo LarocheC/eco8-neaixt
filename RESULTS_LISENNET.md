@@ -167,7 +167,7 @@ recurrence to fit the NPU. FP32 ONNX export is loss-free; static int8 costs
 ~0.12 PESQ (a bit more than the GRU's ~0.09; QAT could recover part — stedgeai
 does the real on-board quantization).
 
-### Streaming state-I/O export (the deploy target)
+### Streaming state-I/O export (16 ms hop — deploys to the NPU since the Pad fix)
 
 For frame-by-frame inference on the board, the conv variant exports to a graph
 with **explicit FIFO state I/O** (mirroring ConvFSENet's contract), so the board
@@ -182,7 +182,212 @@ depthwise conv, the `_CausalTimeConv` layers, the mask conv) is a positional
 state tensor — 17 of them for the wide model, static shapes (only batch dynamic,
 which Neural-ART wants). `lisennet.export_onnx --streaming` produces
 `g_best_streaming_fp32.onnx`; an ONNX Runtime frame loop reproduces the offline
-mask to ~1e-6. This is the artifact handed to stedgeai on the deploy box.
+mask to ~1e-6. The FIFO-state graph initially segfaulted the Neural-ART codegen
+(blocker #4 in `LISENNET_NPU_HANDOVER.md`); this was later root-caused **not** to
+the state I/O but to the `Pad(data, pads, "")` node form `F.pad` exports (an
+empty optional `constant_value` input), and is now fixed bit-exactly inside the
+export. The hardened variant's streaming graph **compiles and deploys** — see
+the frame-level on-board section below.
+
+## NPU-hardened variant (the deploy model)
+
+The conv variant above still crashes the Neural-ART compiler (`atonn`) at
+codegen. Peeling the blockers (see `LISENNET_NPU_HANDOVER.md`) gave a *hardened*
+recipe — `norm="batchnorm"` (per-channel, folds into the conv), `act="relu"`,
+`upsample="convtranspose"` (4-D tensors only), and a stateless **windowed**
+deploy graph instead of the 17-tensor FIFO state I/O. The windowed hardened int8
+graph **compiles to the NPU** (verified end-to-end with random weights: bit-exact
+parity vs offline, ~2.1 M MACC per emitted frame at `emit_T=64`).
+
+Retraining the hardened recipe from scratch (`configs/lisennet_conv_hardened*.json`,
+same CMGAN training) and sweeping `num_channels` over 20/24/28:
+
+| model (hardened)   | params | FP32 PESQ | int8 + GL | **int8 + noisy phase (real-time)** |
+| ------------------ | -----: | --------: | --------: | ---------------------------------: |
+| nc20               | 25,682 |     2.895 |     2.864 |                              2.853 |
+| **nc24 (deploy)**  | 36,288 | **3.013** |     3.001 |                          **2.998** |
+| nc28               | 48,718 |     2.927 |     2.881 |                              2.867 |
+
+(All full 824-utterance VBD test split; FP32 ONNX export loss-free for all
+three. nc24 RTF: 3.24 ms/frame single-thread CPU → 0.20.)
+
+Takeaways:
+
+* **The hardened nc24 matches the GRU quality reference in FP32 (3.013 vs
+  3.006) and beats every other real-time int8 number in this file (2.998 vs the
+  GRU's 2.930)** — with 0 GRU / 0 LayerNorm / 0 PReLU and an NPU-compilable
+  graph. The hardening cost nothing at the right capacity.
+* **The hardened primitives quantize far more gracefully.** Int8 drop is
+  −0.016 (nc24) / −0.042 (nc20) vs −0.115 for the un-hardened conv_wide — the
+  BN-fold + ReLU + signed-QInt8 recipe, not capacity, is what fixed the
+  quantization loss.
+* **Capacity is non-monotonic:** nc28 (49 K) trains to a *worse* optimum than
+  nc24 (36 K) under the same 100-epoch recipe. nc24 ≈ the GRU budget is the
+  sweet spot; the earlier ~41 K "wide" sizing overshoots.
+* **QAT is counterproductive here.** A 30-epoch w8/a8 QAT fine-tune
+  (recon-loss-only, `lisennet/qat_train.py`) *lost* 0.085 PESQ on the nc20
+  model: the trainer's reconstruction objective pulls the weights away from the
+  MetricGAN(PESQ)-shaped optimum, and with only a −0.02…−0.04 PTQ gap there is
+  nothing for QAT to recover. PTQ is the deploy path.
+
+### Round 2 — temporal-context study (FP32 wins, int8 gives them back)
+
+The residual gap vs the GRU is bounded temporal memory (RF 68 frames ≈ 1.1 s vs
+unbounded recurrence), so round 2 extended the receptive field — deeper
+(`n_blocks 3`) and/or an extra dilation stage (`[1,2,4,8,16]`) — plus a second
+nc24 seed to calibrate run variance
+(`configs/lisennet_conv_hardened_nc24_{deep,dil16,s2}.json`, 140-epoch runs):
+
+| variant (hardened nc24)    | params |  RF | FP32 PESQ | int8 real-time | PTQ drop |
+| -------------------------- | -----: | --: | --------: | -------------: | -------: |
+| **b2, dil [1,2,4,8]** (deploy) | 36,288 |  68 |     3.013 |      **2.998** | **−0.016** |
+| b2, dil [1,2,4,8,16]       | 37,680 | 132 |     3.034 |          2.954 |   −0.080 |
+| b3, dil [1,2,4,8,16]       | 46,248 | 196 | **3.069** |          2.985 |   −0.084 |
+
+* **Temporal context buys FP32 exactly as predicted** (+0.02 per RF doubling,
+  +0.056 total at RF 196 — above the GRU reference 3.006) …
+* **… and static int8 takes it all back.** Both long-RF variants lose ~0.08 to
+  PTQ vs the short model's −0.016 — and it is *not* depth: dil16 has the same
+  2-block quantized path as the deploy model and still loses −0.080. Features
+  that integrate seconds of context appear to carry a wider activation dynamic
+  range, which per-tensor int8 resolves poorly. Re-calibration (2× data, three
+  draws: 2.979–2.990 on the deep model) does not close it — structural, not
+  calibration noise.
+* **The recipe is seed-stable**: a second nc24 seed lands at 3.009 vs 3.013
+  (±0.004), so the nc28 width regression in the table above was real, not noise.
+* Unlocking the FP32 headroom at int8 would need quantization-aware work — a
+  QAT with the MetricGAN loss in the loop (the recon-only QAT above regresses),
+  or per-channel activation handling on the deploy quantizer side. → Done in
+  round 3 below, which localizes the loss and recovers most of it.
+
+### Round 3 — the int8 loss lives in the decoder; ReLU6 + distillation
+
+Three parallel attacks on the locked FP32 headroom:
+
+**1. Quant-sensitivity scan** (selective quantization: keep one node group FP32
+at a time, *identical seeded calibration crops* across scenarios — without the
+seeding, calibration-draw noise alone spans ±0.04 and swamps the signal; 200
+utts, deep model): keeping the **decoder** FP32 recovers **+0.052 of the +0.078**
+all-int8 gap; every other group (the dilated time stack included!) is ≤ +0.010.
+The round-2 "long-RF activations" hypothesis was mislocalized: **the PTQ pain is
+the decoder** (USConv upsampling + mask head — a *linear* path: no ReLU between
+the skip-concats and convs), whose input features just get richer with RF.
+
+**2. `act="relu6"`** (NPU-native Clip; bounds every ReLU's dynamic range) on the
+deep arch: FP32 **3.084** — the best FP32 in the study, clipping *helped*
+training — and all-int8 real-time 3.014 (PTQ −0.069 vs deep's −0.084; partial,
+as predicted, because the decoder has no ReLU to clip).
+
+**3. Mask-level knowledge distillation** (`train.py --distill_from`, deep
+teacher → nc24-b2 student, weight 0.45): student FP32 3.015 → int8 real-time
+3.004. The nc24 arch's quant robustness carries the (small) gain through intact.
+
+Full-split (824) results, int8-static + noisy phase:
+
+| model | recipe | FP32 | **int8 real-time** |
+| ----- | ------ | ---: | -----------------: |
+| **relu6-deep** | **int8, decoder kept FP32 (hybrid)** | **3.084** | **3.052** |
+| deep           | int8, decoder kept FP32 (hybrid)     | 3.069 | 3.022 |
+| **relu6-deep** | **all-int8**                          | 3.084 | **3.014** |
+| KD student (nc24 arch) | all-int8                     | 3.015 | 3.004 |
+| nc24 b2 (round-1 pick) | all-int8                     | 3.013 | 2.998 |
+
+**relu6-deep is the new deploy model** — best on every axis, one checkpoint, two
+recipes:
+
+* **pure int8** (`g_best_windowed_fp32.int8_static.onnx`, signed, window
+  196+64=260): **3.014**, same all-int8 deploy story as before;
+* **hybrid** (`g_best_windowed_int8_decoder_fp32.onnx`, decoder's 118 nodes
+  left unquantized in the QDQ graph): **3.052**, at the cost of the decoder
+  (~36 % of MACC) running as float epochs on the board (M55 or NPU FP16) —
+  compile + latency to be verified on the deploy box; the pure-int8 artifact is
+  the fallback.
+
+Net effect of the whole study: real-time deployable PESQ **2.855 → 3.052**
+(+0.197 over the un-hardened conv_wide; +0.122 over the GRU reference's
+real-time 2.930), all NPU-safe ops.
+
+The deploy artifact is the windowed signed-int8 graph
+(`cp_lisennet_conv_hardened_nc24/g_best_windowed_fp32.int8_static.onnx`,
+`feat_window (B,3,132,257) → est_mag (B,64,257)`, window = RF 68 + `emit_T` 64,
+verified QInt8-only) — published as `conv-hardened/g_best_windowed_int8_static.onnx`
+on the HF repo and deployed below.
+
+### On-board deployment — STM32N6570-DK (measured 2026-07-03)
+
+The published nc24 artifact compiles to the Neural-ART NPU (stedgeai 4.0.1,
+`n6-allmems-O3` profile, `--fix-parametric-shapes "{'B':1}"`) and runs on the
+board (STM32N657 @ MCU 800 MHz / NPU 1 GHz, `n6_loader` + `validate --mode
+target` — the flow in `deploy/stm32n6/ONBOARD_MEASUREMENT.md`):
+
+| metric (windowed int8, emit_T=64)   | value |
+| ----------------------------------- | ----: |
+| epochs (HW / hybrid / SW)           | 102 (60 / 36 / 6) |
+| MACC per window (64 frames)         | 177,695,034 |
+| weights                             | 491.6 KiB (octoFlash) |
+| activations                         | 2.72 MiB (all on-chip: cpuRAM2 + npuRAM3–6) |
+| **latency per window**              | **73.63 ms** (std 0.32, 10 runs) |
+| **per emitted frame / RTF**         | **1.15 ms → RTF 0.072** (~14× headroom) |
+| on-target cosine vs host int8       | 0.99829 (rmse 0.151) |
+
+Notes:
+
+* **Per emitted frame this is the fastest model measured on the N6 in this repo**
+  (monarch_full 2.13 ms, ConvFSENet 4.40 ms) — and it carries the best real-time
+  int8 PESQ (2.998). The trade is **block latency**: emit_T=64 buffers 1.02 s of
+  audio per inference. The `emit_T` export knob trades that down (e.g. emit_T=16
+  → 256 ms blocks at ~2.6× the per-frame recompute); every emit_T compiles.
+* A fully on-chip (`n6-noextmem`) build is **impossible** for this graph —
+  weights + activations = 3.35 MB > 2.8 MB of usable pools. It doesn't matter:
+  the 492 KiB of weights stream from octoFlash at ~13 MB/s average, negligible
+  at this size (the penalty that made dense NSNet2 non-real-time was 2.7 MB).
+* Where the 73.6 ms goes (npu_profiler): NPU core 20.3 ms (27.7%); the **6 SW
+  epochs cost 38.1 ms (52%)** — the three encoder down-sampling convs
+  (k=(2,5), stride (1,3) over frequency — a geometry the conv engine won't map)
+  at 23.2 ms, plus the input/output `Gather` layout ops at 14.9 ms; the rest is
+  hybrid/runtime overhead. If the NPU share ever matters, the stride-3 encoder
+  is the knob — at RTF 0.072 there is no pressure.
+
+### Frame-level streaming deployment — 16 ms hop on the NPU (2026-07-03)
+
+Blocker #4 root-caused and fixed (the `F.pad` export form, not the state I/O —
+see `LISENNET_NPU_HANDOVER.md`), so the **17-state FIFO streaming graph** now
+compiles and runs on the board too. This is LiSenNet operating **frame by
+frame** — one 16 ms hop in, one enhanced frame out, bounded state carried
+on-device — the same latency class as ConvFSENet/monarch:
+
+| metric (streaming int8, per frame)  | value |
+| ----------------------------------- | ----: |
+| epochs (HW / hybrid / SW)           | 131 (74 / 51 / 6) |
+| MACC per frame                      | 1,299,086 |
+| memory                              | 47 KiB weights + 147 KiB activations, all on-chip (`n6-noextmem`) |
+| **latency per frame**               | **2.791 ms** (std 0.006) |
+| **RTF (16 ms hop)**                 | **0.174** (~5.7× headroom) |
+| algorithmic latency                 | **one 16 ms hop** (vs 1.02 s windowed) |
+| **PESQ, full 824-utt split (int8 streaming + noisy phase)** | **2.963** |
+| host parity (int8 stream vs fp32 offline) | cos 0.9992 |
+| on-device vs host int8 (threaded state, real speech) | cos 0.998 |
+
+Notes:
+
+* **This makes LiSenNet the best-quality streaming model on the N6** —
+  PESQ 2.963 at 2.79 ms/frame, vs ConvFSENet 2.91 at 4.40 ms and monarch_full
+  2.85 at 2.13 ms. The windowed graph keeps the throughput crown (1.15 ms/frame,
+  int8 PESQ 2.998) for latency-tolerant (1 s block) use.
+* The streaming int8 quant costs −0.037 vs the fp32 real-time reference
+  (2.963 vs 3.000 on the same protocol) — slightly more than the windowed
+  artifact's −0.016; the calibration regime differs (300 propagated-state
+  frames vs windowed crops). Recalibration with more utterances is the obvious
+  knob if that gap ever matters.
+* Where the 2.78 ms goes (npu_profiler): NPU core 0.72 ms (26%); no hot epoch
+  (top one 0.033 ms) — the floor is the distributed launch + state-plumbing
+  overhead of 131 epochs, the same regime as ConvFSENet's streaming graph. At
+  1.3 M MACC/frame the NPU is idle ~74% of the time; epoch count, not compute,
+  sets the frame cost.
+* Quantization: `quant_onnx --streaming --signed` (new) — signed QInt8,
+  per-channel, percentile calibration that **threads the real FIFO state**
+  through the trained model over VBD crops, so state tensors calibrate on
+  realistic ranges.
 
 ## Reproducing
 
