@@ -129,6 +129,26 @@ def export_fp32(model: LiSenNet, output_path, batch_size: int = 1,
     return output_path
 
 
+def _strip_empty_pad_value_inputs(model_proto):
+    """Drop the present-but-empty optional ``constant_value`` input from ``Pad`` nodes.
+
+    ``F.pad`` (the streaming ring-buffer path) exports as ``Pad(data, pads, "")`` —
+    a 3-input node whose third slot is the *empty* name. The Neural-ART compiler
+    (atonn 4.0.1) segfaults (signo=11) on that form when the Pad sits in a
+    multi-branch subgraph — this was the whole-graph blocker #4 of
+    ``LISENNET_NPU_HANDOVER.md``, isolated by bisection to exactly this. The
+    offline/windowed graph is immune only because ``nn.ConstantPad2d`` exports an
+    *explicit* constant_value tensor instead. Dropping the empty slot is bit-exact
+    (the ONNX default constant_value is 0, which is what "" means).
+    """
+    n_fixed = 0
+    for n in model_proto.graph.node:
+        if n.op_type == "Pad" and len(n.input) == 3 and n.input[2] == "":
+            del n.input[2]
+            n_fixed += 1
+    return n_fixed
+
+
 def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
                           opset: int = 17) -> Path:
     """Export the frame-by-frame streaming mask sub-network to FP32 ONNX.
@@ -138,7 +158,9 @@ def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
     Only the batch axis is dynamic; the FIFO buffer widths are static (Neural-ART
     wants fixed state shapes). Requires the conv bottleneck (``bottleneck="conv"``)
     — the exported graph has no GRU and no 2-axis ``LayerNormalization``, which is
-    asserted here so a regression can't slip a Neural-ART blocker back in.
+    asserted here so a regression can't slip a Neural-ART blocker back in. The
+    exported ``Pad`` nodes are normalized by :func:`_strip_empty_pad_value_inputs`
+    (the atonn signo=11 fix); with that, this graph compiles to the NPU.
     """
     from lisennet.streaming import LiSenNetStreamingONNX      # local: avoids a cycle
 
@@ -163,6 +185,9 @@ def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
     )
 
     model_proto = onnx.load(str(output_path))
+    n_pad_fixed = _strip_empty_pad_value_inputs(model_proto)
+    if n_pad_fixed:
+        onnx.save(model_proto, str(output_path))
     ops = Counter(n.op_type for n in model_proto.graph.node)
     # Always-forbidden: recurrent ops + the 2-axis LayerNorm primitive (crash / not-mappable).
     forbidden = ["GRU", "LSTM", "RNN", "LayerNormalization"]
@@ -181,6 +206,7 @@ def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
     print(f"  states : {view.n_states}  (feat + {view.n_states} state tensors -> est_mag + {view.n_states} states)")
     print(f"  nodes  : {len(model_proto.graph.node)}  (no GRU / LayerNormalization)")
     print(f"  ops    : {sorted_ops}")
+    print(f"  pads   : {n_pad_fixed} empty Pad constant_value inputs stripped (atonn signo=11 fix)")
     return output_path
 
 

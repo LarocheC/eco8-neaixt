@@ -108,13 +108,18 @@ class VBDStreamingCalibrationReader(CalibrationDataReader):
     activation ranges the quantizer sees then match real streaming inference.
     """
 
-    def __init__(self, h, n_utts=4, max_frames=300, split="train"):
+    def __init__(self, h, checkpoint=None, n_utts=4, max_frames=300, split="train"):
         import torch
         from common.dataset import Dataset, load_voicebank_demand
         from lisennet.model import build_lisennet
         from lisennet.streaming import LiSenNetStreamingONNX
 
         model = build_lisennet(h).eval()
+        if checkpoint is not None:
+            # The reader propagates FIFO state through the model, so the trained
+            # weights are required for realistic state activation ranges.
+            ckpt = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            model.load_state_dict(ckpt["generator"], strict=True)
         view = LiSenNetStreamingONNX(model)
         names = view.state_input_names
         hf = load_voicebank_demand()
@@ -199,6 +204,9 @@ def main():
     parser.add_argument("--windowed", action="store_true",
                         help="Calibrate the stateless windowed deploy graph (feat_window input); "
                              "window length is read from the fp32 onnx metadata. Implies signed int8.")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Calibrate the frame-by-frame streaming graph (feat + state_i_in inputs) "
+                             "with real propagated state. Implies signed int8 (the NPU recipe).")
     parser.add_argument("--checkpoint", default=None,
                         help="Trained g_best — windowed calibration builds features with it.")
     parser.add_argument("--signed", action="store_true",
@@ -219,6 +227,11 @@ def main():
             meta = {p.key: p.value for p in onnx.load(a.fp32).metadata_props}
             window = int(meta["windowed_L"]) + int(meta["windowed_T"])
             reader = VBDWindowedCalibrationReader(h, a.checkpoint, window, a.calib_utts)
+            quantize_static_int8(a.fp32, out, reader, per_channel=True, signed=True)
+        elif a.streaming:
+            # Frame-by-frame streaming graph -> signed int8, per-channel (same NPU recipe);
+            # calibration threads the real FIFO state so state_i ranges are realistic.
+            reader = VBDStreamingCalibrationReader(h, a.checkpoint, n_utts=a.calib_utts)
             quantize_static_int8(a.fp32, out, reader, per_channel=True, signed=True)
         else:
             # per_channel=False: ORT's per-channel int32-bias scale adjustment trips on the
