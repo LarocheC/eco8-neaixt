@@ -1,0 +1,57 @@
+{
+    "_comment": "BASENet-3 non-causal, paper-reproduction architecture (arXiv:2606.12662, PESQ 3.55 target). Widths solved against the paper's four published numbers (causal 0.81M/7.1G, non-causal 0.83M/7.3G): per-bin shared GRU (the only CRN wiring consistent with the paper's tiny bi->uni deltas), CRN at 100 freq bins (2x AvgPool, not the old 12.6x adaptive pool to 16), compute moved from the GRU into full-res convs (C=44). Fig.1-faithful: per-band stems, no fusion IR block, no decoder skip (unnecessary at 100-bin bottleneck). This config: 0.830M / 7.55G. Train with --accum_steps 2 for the paper's effective batch 8.",
+    "num_gpus": 0,
+    "batch_size": 4,
+    "learning_rate": 0.001,
+    "scheduler": "exponential",
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "lr_decay": 0.98,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 400,
+    "hop_size": 100,
+    "win_size": 400,
+    "compress_factor": 0.3,
+    "base_channels": 44,
+    "growth": 24,
+    "expand_ratio": 4,
+    "attn_reduction": 4,
+    "band_edges_hz": [
+        0,
+        1000,
+        4000,
+        8000
+    ],
+    "band_depths": [
+        4,
+        3,
+        2
+    ],
+    "crn_freq": 100,
+    "crn_hidden": 56,
+    "crn_mode": "per_bin",
+    "dec_depth": 2,
+    "dec_upsample_first": false,
+    "dec_skip": false,
+    "band_stems": true,
+    "fusion_ir": false,
+    "causal": false,
+    "loss": {
+        "magnitude": 0.9,
+        "phase": 0.3,
+        "complex": 0.1,
+        "time": 0.2
+    },
+    "gan": {
+        "enabled": true,
+        "metric_loss_lambda": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}

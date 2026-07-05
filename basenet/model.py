@@ -356,6 +356,7 @@ class DenseBlock(nn.Module):
 
     z_i = DenseLayer_i([z_0, ..., z_{i-1}]) with frequency dilation d = 2^i, then
     a 1x1 bottleneck reduces the concatenated features back to `channels`.
+    `growth` is the per-layer feature increment (defaults to `channels`).
     """
 
     def __init__(self, channels, n_layers, expand_ratio=4, causal=True, growth=None):
@@ -389,9 +390,9 @@ class EfficientDenseNet(nn.Module):
     axis via the dense block's d = 2^i dilations.
     """
 
-    def __init__(self, channels, depth, expand_ratio=4, causal=True):
+    def __init__(self, channels, depth, expand_ratio=4, causal=True, growth=None):
         super().__init__()
-        self.dense = DenseBlock(channels, depth, expand_ratio, causal)
+        self.dense = DenseBlock(channels, depth, expand_ratio, causal, growth=growth)
         self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal)
 
     def forward(self, x):
@@ -458,37 +459,55 @@ class FusionProjection(nn.Module):
     in Fig. 1). Pooling is over frequency only, so it stays causal.
     """
 
-    def __init__(self, channels, n_features, crn_freq, expand_ratio=4, causal=True):
+    def __init__(self, channels, n_features, crn_freq, expand_ratio=4, causal=True,
+                 use_ir=True):
         super().__init__()
         self.conv = TFConv(channels, channels, kf=3, kt=3, causal=causal)
         self.norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
-        self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal)
+        # Fig. 1's Fusion & Proj lists Conv2d + InstanceNorm + Hardswish +
+        # AvgPool2d only; the extra IR block predates the fidelity audit and is
+        # kept behind `use_ir` for checkpoint compatibility.
+        self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal) if use_ir else None
         self.pool = FreqResample(n_features, crn_freq, "avg")
 
     def forward(self, x):
         x = self.act(self.norm(self.conv(x)))
-        x = self.ir(x)                              # (B, C, F, N) full frequency resolution
+        if self.ir is not None:
+            x = self.ir(x)                          # (B, C, F, N) full frequency resolution
         return x, self.pool(x)                      # (skip, pooled CRN input)
 
 
 class CRN(nn.Module):
     """Convolutional Recurrent Network for temporal modelling (Sec. 2.5, ref. [20]).
 
-    A GRU over time (unidirectional when causal) on the flattened (C * crn_freq)
-    bottleneck, projected back and layer-normed, followed by a GLU conv block
-    with a residual connection. O(N) and frame-by-frame.
+    Two GRU wirings are supported (`mode`):
+
+    * ``"flat"`` — the GRU input is the flattened (C * crn_freq) bottleneck.
+      This was the original guess; its parameter count is dominated by the
+      GRU input matrix, which is inconsistent with the paper's tiny reported
+      bi->uni delta (0.83M vs 0.81M, i.e. ~0.02M).
+    * ``"per_bin"`` — one GRU over time with input size C, **shared across
+      frequency bins** (BSRNN-style sequence modelling). This matches the
+      paper's numbers: bi->uni changes params by ~0.02M while MACs change by
+      ~0.2G because the same small weights are re-applied at every bin.
+      Residual wiring follows Fig. 1: x + LN(Linear(GRU(x))), then the GLU
+      conv block with its own residual.
+
+    Unidirectional when causal. O(N) and frame-by-frame either way.
     """
 
-    def __init__(self, channels, crn_freq, hidden, causal=True):
+    def __init__(self, channels, crn_freq, hidden, causal=True, mode="flat"):
         super().__init__()
+        assert mode in ("flat", "per_bin"), mode
         self.channels = channels
         self.crn_freq = crn_freq
-        feat = channels * crn_freq
-        self.gru = nn.GRU(feat, hidden, batch_first=True, bidirectional=not causal)
+        self.mode = mode
+        in_feat = channels * crn_freq if mode == "flat" else channels
+        self.gru = nn.GRU(in_feat, hidden, batch_first=True, bidirectional=not causal)
         gru_out = hidden * (1 if causal else 2)
-        self.linear = nn.Linear(gru_out, feat)
-        self.ln = nn.LayerNorm(feat)
+        self.linear = nn.Linear(gru_out, in_feat)
+        self.ln = nn.LayerNorm(in_feat)
         self.conv1 = TFConv(channels, channels * 2, kf=3, kt=3, causal=causal)
         self.norm1 = make_norm(channels * 2, causal)
         self.conv2 = TFConv(channels, channels, kf=3, kt=3, causal=causal)
@@ -502,15 +521,24 @@ class CRN(nn.Module):
     def stream_reset(self):
         self._h = None
 
-    def forward(self, x):  # (B, C, F, N)
-        b, c, fr, n = x.shape
-        g = x.permute(0, 3, 1, 2).reshape(b, n, c * fr)   # (B, N, C*F)
+    def _gru_pass(self, g):
         if self.streaming:
             g, self._h = self.gru(g, self._h)             # carry hidden state across frames
         else:
             g, _ = self.gru(g)
-        g = self.ln(self.linear(g))                       # (B, N, C*F)
-        g = g.reshape(b, n, c, fr).permute(0, 2, 3, 1)    # (B, C, F, N)
+        return g
+
+    def forward(self, x):  # (B, C, F, N)
+        b, c, fr, n = x.shape
+        if self.mode == "flat":
+            g = x.permute(0, 3, 1, 2).reshape(b, n, c * fr)   # (B, N, C*F)
+            g = self.ln(self.linear(self._gru_pass(g)))       # (B, N, C*F)
+            g = g.reshape(b, n, c, fr).permute(0, 2, 3, 1)    # (B, C, F, N)
+        else:
+            g = x.permute(0, 2, 3, 1).reshape(b * fr, n, c)   # (B*F, N, C) shared weights
+            g = self.ln(self.linear(self._gru_pass(g)))       # (B*F, N, C)
+            g = g.reshape(b, fr, n, c).permute(0, 3, 1, 2)    # (B, C, F, N)
+            g = x + g                                         # Fig. 1: residual after LN
         y = self.norm1(self.conv1(g))                     # (B, 2C, F, N)
         y = F.glu(y, dim=1)                               # (B, C, F, N)
         y = self.act(self.norm2(self.conv2(y)))
@@ -518,18 +546,28 @@ class CRN(nn.Module):
 
 
 class EfficientDecoder(nn.Module):
-    """Decoder body (Fig. 1): EfficientDenseNet -> upscale frequency -> IR -> norm."""
+    """Decoder body (Fig. 1): EfficientDenseNet -> upscale frequency -> IR -> norm.
 
-    def __init__(self, channels, depth, in_freq, full_freq, expand_ratio=4, causal=True):
+    With ``upsample_first`` the dense body runs at full frequency resolution
+    (upscale -> dense -> IR -> norm) instead of at the CRN bottleneck
+    resolution. Parameter count is identical; MACs scale with the resolution
+    the dense body runs at.
+    """
+
+    def __init__(self, channels, depth, in_freq, full_freq, expand_ratio=4, causal=True,
+                 growth=None, upsample_first=False):
         super().__init__()
-        self.dense = EfficientDenseNet(channels, depth, expand_ratio, causal)
+        self.upsample_first = upsample_first
+        self.dense = EfficientDenseNet(channels, depth, expand_ratio, causal, growth=growth)
         self.upsample = FreqResample(in_freq, full_freq, "nearest")
         self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal)
         self.norm = make_norm(channels, causal)
 
     def forward(self, x):
-        x = self.dense(x)
-        x = self.upsample(x)
+        if self.upsample_first:
+            x = self.dense(self.upsample(x))
+        else:
+            x = self.upsample(self.dense(x))
         return self.norm(self.ir(x))
 
 
@@ -557,18 +595,24 @@ class MagMaskDecoder(nn.Module):
     per-bin spectral detail, not just the coarse recurrent bottleneck.
     """
 
-    def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True):
+    def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True,
+                 growth=None, upsample_first=False, use_skip=True):
         super().__init__()
-        self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal)
-        self.merge = nn.Conv2d(channels * 2, channels, 1)
-        self.merge_norm = make_norm(channels, causal)
+        self.use_skip = use_skip
+        self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal,
+                                     growth=growth, upsample_first=upsample_first)
+        if use_skip:
+            self.merge = nn.Conv2d(channels * 2, channels, 1)
+            self.merge_norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
         self.out = nn.Conv2d(channels, 1, 1)
         self.lsig = LearnableSigmoid2d(n_freq)
 
     def forward(self, x, skip, mag_in):            # x: (B,C,crn_freq,N), skip: (B,C,F,N)
         y = self.body(x)                           # (B, C, F, N)
-        y = self.act(self.merge_norm(self.merge(torch.cat([y, skip], dim=1))))
+        if self.use_skip:
+            y = self.merge_norm(self.merge(torch.cat([y, skip], dim=1)))
+        y = self.act(y)
         mask = self.lsig(self.out(y).squeeze(1))   # (B, F, N)
         return mag_in * mask, mask
 
@@ -581,18 +625,24 @@ class PhaseDecoder(nn.Module):
     head needs per-bin detail the coarse CRN bottleneck cannot provide.
     """
 
-    def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True):
+    def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True,
+                 growth=None, upsample_first=False, use_skip=True):
         super().__init__()
-        self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal)
-        self.merge = nn.Conv2d(channels * 2, channels, 1)
-        self.merge_norm = make_norm(channels, causal)
+        self.use_skip = use_skip
+        self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal,
+                                     growth=growth, upsample_first=upsample_first)
+        if use_skip:
+            self.merge = nn.Conv2d(channels * 2, channels, 1)
+            self.merge_norm = make_norm(channels, causal)
         self.act = nn.Hardswish()
         self.conv_r = nn.Conv2d(channels, 1, 1)
         self.conv_i = nn.Conv2d(channels, 1, 1)
 
     def forward(self, x, skip):
         y = self.body(x)
-        y = self.act(self.merge_norm(self.merge(torch.cat([y, skip], dim=1))))
+        if self.use_skip:
+            y = self.merge_norm(self.merge(torch.cat([y, skip], dim=1)))
+        y = self.act(y)
         real = self.conv_r(y).squeeze(1)           # (B, F, N)
         imag = self.conv_i(y).squeeze(1)
         return torch.atan2(imag, real)
@@ -616,7 +666,9 @@ class BASENet(nn.Module):
                  compress_factor=0.3,
                  base_channels=32, expand_ratio=4, attn_reduction=4,
                  band_edges_hz=(0, 1000, 4000, 8000), band_depths=(4, 3, 2),
-                 crn_freq=16, crn_hidden=128, dec_depth=2, causal=True):
+                 crn_freq=16, crn_hidden=128, dec_depth=2, causal=True,
+                 growth=None, crn_mode="flat", dec_upsample_first=False,
+                 dec_skip=True, band_stems=False, fusion_ir=True):
         super().__init__()
         self.n_fft = n_fft
         self.hop_size = hop_size
@@ -632,20 +684,40 @@ class BASENet(nn.Module):
         self.band_slices = list(zip(self.band_bins, self.band_bins[1:]))
 
         C = base_channels
-        self.input_proj = nn.Conv2d(2, C, 1)       # initial 1x1 projection (Eq. 5)
+        if band_stems:
+            # Fig. 1: each H^(b) block starts with its own Conv2d + norm +
+            # Hardswish stem; the 1x1 projection to C channels is per-band.
+            self.input_proj = None
+            self.band_stem = nn.ModuleList(
+                nn.Sequential(nn.Conv2d(2, C, 1), make_norm(C, causal), nn.Hardswish())
+                for _ in band_depths
+            )
+        else:
+            self.input_proj = nn.Conv2d(2, C, 1)   # single shared 1x1 projection
+            self.band_stem = None
         self.encoders = nn.ModuleList(
-            EfficientDenseNet(C, depth, expand_ratio, causal) for depth in band_depths
+            EfficientDenseNet(C, depth, expand_ratio, causal, growth=growth)
+            for depth in band_depths
         )
         self.cross_band = CrossBandAttention(C, n_bands, attn_reduction, causal)
-        self.fusion = FusionProjection(C, self.n_features, crn_freq, expand_ratio, causal)
-        self.crn = CRN(C, crn_freq, crn_hidden, causal)
-        self.mag_decoder = MagMaskDecoder(C, dec_depth, crn_freq, self.n_features, expand_ratio, causal)
-        self.phase_decoder = PhaseDecoder(C, dec_depth, crn_freq, self.n_features, expand_ratio, causal)
+        self.fusion = FusionProjection(C, self.n_features, crn_freq, expand_ratio, causal,
+                                       use_ir=fusion_ir)
+        self.crn = CRN(C, crn_freq, crn_hidden, causal, mode=crn_mode)
+        self.mag_decoder = MagMaskDecoder(
+            C, dec_depth, crn_freq, self.n_features, expand_ratio, causal,
+            growth=growth, upsample_first=dec_upsample_first, use_skip=dec_skip)
+        self.phase_decoder = PhaseDecoder(
+            C, dec_depth, crn_freq, self.n_features, expand_ratio, causal,
+            growth=growth, upsample_first=dec_upsample_first, use_skip=dec_skip)
 
     def forward(self, mag, pha):                   # (B, F, N) each
         x = torch.stack([mag, pha], dim=1)         # (B, 2, F, N)
-        x = self.input_proj(x)                     # (B, C, F, N)
-        bands = [x[:, :, lo:hi, :] for lo, hi in self.band_slices]
+        if self.band_stem is not None:
+            bands = [stem(x[:, :, lo:hi, :])
+                     for stem, (lo, hi) in zip(self.band_stem, self.band_slices)]
+        else:
+            x = self.input_proj(x)                 # (B, C, F, N)
+            bands = [x[:, :, lo:hi, :] for lo, hi in self.band_slices]
         feats = [enc(band) for enc, band in zip(self.encoders, bands)]
         feats = self.cross_band(feats)
         fused = torch.cat(feats, dim=2)            # (B, C, F, N)
@@ -690,6 +762,12 @@ def build_basenet(h=None, causal=True):
         crn_hidden=int(g("crn_hidden", 128)),
         dec_depth=int(g("dec_depth", 2)),
         causal=bool(g("causal", causal)),
+        growth=g("growth", None),
+        crn_mode=str(g("crn_mode", "flat")),
+        dec_upsample_first=bool(g("dec_upsample_first", False)),
+        dec_skip=bool(g("dec_skip", True)),
+        band_stems=bool(g("band_stems", False)),
+        fusion_ir=bool(g("fusion_ir", True)),
     )
 
 
