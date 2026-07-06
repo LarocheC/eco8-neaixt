@@ -14,15 +14,16 @@ The code here focuses on open benchmarking and model exploration: streamable arc
 
 ## Model families
 
-The repo contains three model families. They share the dataset wrapper, training utilities, metrics, and quantization scaffolding, but each model family has its own architecture, configs, training entry point, ONNX export path, and quantization pipeline.
+The repo contains four model families. They share the dataset wrapper, training utilities, metrics, and quantization scaffolding, but each model family has its own architecture, configs, training entry point, ONNX export path, and quantization pipeline.
 
 | family         | architecture                                                                                                                                                           | causal | streaming                               | role                                                         |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------- | ------------------------------------------------------------ |
 | **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, and Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
 | **ConvFSENet** | Fully-convolutional ConvTasNet-derived magnitude-mask predictor using stacked Temporal Conv Module blocks. The architecture is based on Miccini *et al.*, ICASSP 2025. | yes    | yes, frame-by-frame with zero lookahead | Fast causal CNN enhancer and int8 quantization study.        |
 | **LiSenNet**   | Lightweight (~37 K-param) sub-band U-Net with a dual-path-recurrent bottleneck and a magnitude-only mask (Griffin-Lim phase). A port of Yan *et al.*, arXiv:2409.13285.   | yes    | yes, frame-by-frame with bounded state  | Ultra-compact real-time enhancer and int8 quantization study. |
+| **FSPEN**      | Ultra-lightweight (~35 K-param) full-band + sub-band dual-path enhancer with a complex mask (learned phase, no Griffin-Lim). A re-implementation of Yang *et al.*, ICASSP 2024. | yes    | yes, frame-by-frame with bounded state  | Ultra-compact complex-mask enhancer; quality/RTF comparison point for LiSenNet. |
 
-All three families export to streaming-shape ONNX and support int8 quantization, allowing comparison under the same evaluation conditions: PESQ, real-time factor, and model size under ONNX Runtime.
+All four families export to streaming-shape ONNX and support int8 quantization, allowing comparison under the same evaluation conditions: PESQ, real-time factor, and model size under ONNX Runtime.
 
 ## Results
 
@@ -31,6 +32,7 @@ Detailed results are kept in separate files:
 * [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
 * [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
 * [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/static-int8 ONNX, and the real-time (noisy-phase) deployment eval.
+* [RESULTS_FSPEN.md](RESULTS_FSPEN.md): FSPEN integration status — implementation-level parity gates (reference, streaming, ONNX); training pending.
 
 
 ## Setup
@@ -92,11 +94,20 @@ lisennet/                Ultra-compact sub-band + dual-path enhancer
   quant_onnx.py          Static (+ dynamic) int8 quantization
   eval_deploy.py         PESQ (backend × phase) + streaming RTF eval
 
+fspen/                   Ultra-compact full-band + sub-band dual-path enhancer
+  model.py               FSPEN model (full/sub-band paths + DPE blocks)
+  streaming.py           Frame-by-frame streamer (inter-GRU state carry)
+  train.py               CMGAN training loop
+  export_onnx.py         FP32 ONNX export (whole-utterance + streaming state I/O)
+  quant_onnx.py          Static (+ dynamic) int8 quantization
+  eval_deploy.py         PESQ (per backend) + streaming RTF eval
+
 configs/                 Per-run configs for all model families
 tests/                   Pytest suite
 RESULTS_NSNET2.md        NSNet2 results
 RESULTS_CONVFSENET.md    ConvFSENet results
 RESULTS_LISENNET.md      LiSenNet results
+RESULTS_FSPEN.md         FSPEN integration status
 ```
 
 Scripts are run as modules from the repository root, for example:
@@ -105,6 +116,7 @@ Scripts are run as modules from the repository root, for example:
 python -m nsnet2.train --config configs/baseline.json --checkpoint_path cp_baseline
 python -m convfsenet.train --config configs/convfsenet.json --checkpoint_path cp_convfsenet
 python -m lisennet.train --config configs/lisennet.json --checkpoint_path cp_lisennet
+python -m fspen.train --config configs/fspen.json --checkpoint_path cp_fspen
 ```
 
 ## NSNet2 experiments
@@ -169,6 +181,24 @@ The reproduction reaches **PESQ 3.006** (full VBD test split, within ~0.06 of th
 
 The GRU model above is the quality reference but does not compile to the STM32N6 Neural-ART NPU (GRU + 2-axis LayerNorm are compiler blockers). An **NPU-deployable variant** (`configs/lisennet_conv_wide.json`, `bottleneck: "conv"`) replaces the dual-path GRU with a dual-path conv bottleneck — exported graph has 0 GRU / 0 LayerNormalization nodes — and adds a frame-by-frame streaming graph with explicit FIFO state I/O (the stedgeai target). It reaches **PESQ 2.970** FP32 / **2.855** real-time int8.
 
+## FSPEN experiments
+
+FSPEN is an ultra-compact (~35 K-param) full-band + sub-band enhancer from [Yang *et al.*, ICASSP 2024](https://ieeexplore.ieee.org/document/10446016): a Conv1d U-Net over the complex spectrum (full-band path) runs next to a 5-group band-split encoder over the magnitude spectrum (sub-band path); the merged features pass through dual-path-extension blocks (bidirectional GRU over frequency bands, grouped unidirectional GRU over time) and split back into a complex mask plus per-band magnitude gains. Because the mask is complex, the phase is learned — there is no Griffin-Lim anywhere, which makes FSPEN a natural comparison point for LiSenNet's magnitude-only + noisy-phase real-time recipe.
+
+The model is re-implemented from the paper (the unofficial reference repo, [gitwukeyi/FSPEN](https://github.com/gitwukeyi/FSPEN), carries no license); with weights copied across, the post-STFT core (`enhance_spectrum`) is bit-exact to the reference except for a documented upstream indexing bug in its sub-band decoder that this implementation fixes, and the STFT itself deliberately uses the repo-standard Hann window where the reference uses Hamming (both documented in `fspen/model.py`). The only time-recurrent state is the inter-frame grouped-GRU hidden state — everything else is per-frame — so the model streams frame-by-frame natively, and the streaming ONNX export carries exactly one state tensor per dual-path block.
+
+Typical workflow:
+
+```bash
+python -m fspen.train --config configs/fspen.json --checkpoint_path cp_fspen --training_epochs 100
+python -m fspen.export_onnx --checkpoint_file cp_fspen/g_best
+python -m fspen.export_onnx --checkpoint_file cp_fspen/g_best --streaming
+python -m fspen.quant_onnx --fp32 cp_fspen/g_best_fp32.onnx --mode static --config cp_fspen/config.json
+python -m fspen.eval_deploy --checkpoint_file cp_fspen/g_best --n_utts 824
+```
+
+Training on VoiceBank-DEMAND has not been run yet; [RESULTS_FSPEN.md](RESULTS_FSPEN.md) tracks the integration status and the implementation-level parity gates (streaming and ONNX exports are loss-free by construction, verified in `tests/test_fspen_*`).
+
 ## Trained checkpoints
 
 Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
@@ -192,6 +222,7 @@ This repository also builds on:
 * Miccini, Laroche, Piechowiak & Pezzarossa, *Scalable Speech Enhancement with Dynamic Channel Pruning*, ICASSP 2025, for the ConvFSENet base architecture.
 * ConvTasNet, for the convolutional design principles used by ConvFSENet.
 * Yan, Zhou, Chen & Lu, *LiSenNet: Lightweight Sub-band and Dual-Path Modeling for Real-Time Speech Enhancement*, [arXiv:2409.13285](https://arxiv.org/abs/2409.13285) ([hyyan2k/LiSenNet](https://github.com/hyyan2k/LiSenNet), MIT), for the LiSenNet architecture.
+* Yang, Liu, Meng, Lee, Baek & Moon, *FSPEN: An Ultra-Lightweight Network for Real Time Speech Enhancement*, [ICASSP 2024](https://ieeexplore.ieee.org/document/10446016), for the FSPEN architecture (hyperparameters cross-checked against the unofficial [gitwukeyi/FSPEN](https://github.com/gitwukeyi/FSPEN)).
 * Butterfly and Monarch structured matrix factorizations, as packaged in `torch-structured`.
 * JacobLinCool’s resampled VoiceBank-DEMAND-16k dataset.
 
