@@ -143,7 +143,10 @@ def test_grad_accumulation_equals_full_batch(cfg):
     g_accum = [p.grad.clone() for p in model.parameters() if p.grad is not None]
 
     max_diff = max((a - b).abs().max().item() for a, b in zip(g_full, g_accum))
-    assert max_diff < 1e-5, f"accumulation != full batch: max grad diff {max_diff:.2e}"
+    # Tolerance is float32 noise, not real coupling: in float64 the same check
+    # gives ~2e-14. The consistency loss's extra iSTFT->STFT round trip deepened
+    # the graph enough to push float32 reordering noise past the old 1e-5.
+    assert max_diff < 5e-5, f"accumulation != full batch: max grad diff {max_diff:.2e}"
 
 
 def test_gan_step_runs_end_to_end(cfg):

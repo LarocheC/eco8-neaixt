@@ -42,7 +42,8 @@
         "magnitude": 0.9,
         "phase": 0.3,
         "complex": 0.1,
-        "time": 0.2
+        "time": 0.2,
+        "consistency": 0.1
     },
     "gan": {
         "enabled": true,

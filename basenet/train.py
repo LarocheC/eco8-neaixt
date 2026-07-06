@@ -43,7 +43,8 @@ from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-_DEFAULT_LOSS_WEIGHTS = {"magnitude": 0.9, "phase": 0.3, "complex": 0.1, "time": 0.2}
+_DEFAULT_LOSS_WEIGHTS = {"magnitude": 0.9, "phase": 0.3, "complex": 0.1, "time": 0.2,
+                         "consistency": 0.1}
 
 
 def _to_dev(t, device):
@@ -93,18 +94,26 @@ def generator_loss(model, noisy_audio, clean_audio, h, weights=None):
     n = min(audio_g.shape[-1], clean.shape[-1])
     loss_time = F.l1_loss(audio_g[..., :n], clean[..., :n])
 
+    # MP-SENet's STFT-consistency loss: the (mag, phase) prediction must survive
+    # the iSTFT -> STFT round trip. mag_g_hat (the consistent magnitude) is also
+    # what MP-SENet shows the metric discriminator, not the raw network output.
+    mag_g_hat, _, com_g_hat = mag_pha_stft(audio_g, n_fft, hop, win, cf)
+    loss_consistency = F.mse_loss(com_g, com_g_hat) * 2.0
+
     loss = (weights["magnitude"] * sl["magnitude"]
             + weights["phase"] * sl["phase"]
             + weights["complex"] * sl["complex"]
-            + weights["time"] * loss_time)
+            + weights["time"] * loss_time
+            + weights["consistency"] * loss_consistency)
 
     parts = {
         "magnitude": float(sl["magnitude"].item()),
         "phase": float(sl["phase"].item()),
         "complex": float(sl["complex"].item()),
         "time": float(loss_time.item()),
+        "consistency": float(loss_consistency.item()),
         "clean_mag": clean_mag,
-        "pred_mag": mag_g,
+        "pred_mag": mag_g_hat,
         "audio_g": audio_g,
         "clean_audio": clean,
     }
@@ -178,6 +187,7 @@ def gan_step(model, discriminator, optim, optim_d, noisy_audio, clean_audio,
         "phase": parts["phase"],
         "complex": parts["complex"],
         "time": parts["time"],
+        "consistency": parts["consistency"],
     }
 
 
@@ -329,7 +339,7 @@ def train(a, h):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                     optim.step()
                 metrics = {"loss": float(loss.item()), **{
-                    k: parts[k] for k in ("magnitude", "phase", "complex", "time")
+                    k: parts[k] for k in ("magnitude", "phase", "complex", "time", "consistency")
                 }}
 
             # Accumulate until the effective batch is complete; only then
@@ -350,7 +360,7 @@ def train(a, h):
                 )
             if steps % a.summary_interval == 0:
                 sw.add_scalar("Training/Loss", metrics["loss"], steps)
-                for k in ("magnitude", "phase", "complex", "time"):
+                for k in ("magnitude", "phase", "complex", "time", "consistency"):
                     sw.add_scalar(f"Training/{k}", metrics[k], steps)
                 if use_gan:
                     sw.add_scalar("Training/Base Loss", metrics["base_loss"], steps)
