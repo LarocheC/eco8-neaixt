@@ -1,0 +1,41 @@
+{
+    "_comment": "FSPEN (Yang et al., ICASSP 2024) re-implemented into this framework; architecture hyperparameters pinned to the reference config (gitwukeyi/FSPEN): n_fft 512 / hop 256 @ 16 kHz, 5-group sub-band split of the 257 bins, 3 dual-path-extension blocks (intra 16 bidir + inter 16 in 8 groups) -> ~35k-param generator. The upstream repo ships no training recipe, so training follows the house CMGAN recipe shared with lisennet.json: VoiceBank-DEMAND, 2 s segments, AdamW lr 5e-4 betas [0.8,0.99], ExponentialLR gamma 0.98/epoch, losses (complex 0.1, mag 0.9, adv 0.05) on power-0.3-compressed spectra. compress_factor only shapes the loss domain; the network itself consumes the raw complex spectrum.",
+
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 1234,
+
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+
+    "sub_band_channels": 32,
+    "compress_rate": 2,
+    "dpe_modules": 3,
+    "dpe_groups": 8,
+    "dpe_intra_hidden": 16,
+    "dpe_inter_hidden": 16,
+
+    "loss": {
+        "complex": 0.1,
+        "mag": 0.9,
+        "adv": 0.05
+    },
+
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
