@@ -14,15 +14,16 @@ The code here focuses on open benchmarking and model exploration: streamable arc
 
 ## Model families
 
-The repo contains three model families. They share the dataset wrapper, training utilities, metrics, and quantization scaffolding, but each model family has its own architecture, configs, training entry point, ONNX export path, and quantization pipeline.
+The repo contains four model families. They share the dataset wrapper, training utilities, metrics, and quantization scaffolding, but each model family has its own architecture, configs, training entry point, ONNX export path, and quantization pipeline.
 
 | family         | architecture                                                                                                                                                           | causal | streaming                               | role                                                         |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------- | ------------------------------------------------------------ |
 | **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, and Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
 | **ConvFSENet** | Fully-convolutional ConvTasNet-derived magnitude-mask predictor using stacked Temporal Conv Module blocks. The architecture is based on Miccini *et al.*, ICASSP 2025. | yes    | yes, frame-by-frame with zero lookahead | Fast causal CNN enhancer and int8 quantization study.        |
 | **LiSenNet**   | Lightweight (~37 K-param) sub-band U-Net with a dual-path-recurrent bottleneck and a magnitude-only mask (Griffin-Lim phase). A port of Yan *et al.*, arXiv:2409.13285.   | yes    | yes, frame-by-frame with bounded state  | Ultra-compact real-time enhancer and int8 quantization study. |
+| **BASENet**    | Bark-band-adaptive encoder (density-derived per-band depth) with cross-band attention and a CRN, mask+phase prediction (MP-SENet paradigm). A reproduction of Martins Gomes & Capman, arXiv:2606.12662. | yes    | yes, frame-by-frame with bounded state  | Paper-reproduction gap-closing study (in progress).          |
 
-All three families export to streaming-shape ONNX and support int8 quantization, allowing comparison under the same evaluation conditions: PESQ, real-time factor, and model size under ONNX Runtime.
+The first three families export to streaming-shape ONNX and support int8 quantization, allowing comparison under the same evaluation conditions: PESQ, real-time factor, and model size under ONNX Runtime. BASENet's deployment pipeline (ONNX export, int8, streaming) is also built and parity-verified, but on a pre-gap-closing checkpoint — see [RESULTS_BASENET.md](RESULTS_BASENET.md).
 
 ## Results
 
@@ -31,6 +32,7 @@ Detailed results are kept in separate files:
 * [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
 * [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
 * [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/static-int8 ONNX, and the real-time (noisy-phase) deployment eval.
+* [RESULTS_BASENET.md](RESULTS_BASENET.md): BASENet paper-reproduction, in progress (PESQ 3.359 vs. the paper's 3.55) — width re-derivation from published params/MACs, trainer fidelity fixes, and an open investigation into the remaining gap.
 
 
 ## Setup
@@ -92,11 +94,21 @@ lisennet/                Ultra-compact sub-band + dual-path enhancer
   quant_onnx.py          Static (+ dynamic) int8 quantization
   eval_deploy.py         PESQ (backend × phase) + streaming RTF eval
 
+basenet/                 Bark-band-adaptive enhancer (paper reproduction, in progress)
+  model.py               BASENet model (band encoders + cross-band attention + CRN)
+  losses.py              MP-SENet-style spectral losses (magnitude/phase/complex)
+  train.py               MP-SENet training recipe (mask+phase, MetricGAN)
+  profile_macs.py        Per-module params/MACs accounting
+  streaming.py           Frame-by-frame streamer (bounded state)
+  export_onnx.py         FP32 ONNX export
+  quant_onnx.py          Dynamic/static int8 quantization
+
 configs/                 Per-run configs for all model families
 tests/                   Pytest suite
 RESULTS_NSNET2.md        NSNet2 results
 RESULTS_CONVFSENET.md    ConvFSENet results
 RESULTS_LISENNET.md      LiSenNet results
+RESULTS_BASENET.md       BASENet results (reproduction in progress)
 ```
 
 Scripts are run as modules from the repository root, for example:
