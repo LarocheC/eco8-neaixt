@@ -388,12 +388,20 @@ class EfficientDenseNet(nn.Module):
     This is the encoder branch E_b (and the body of each decoder). Deeper
     branches (larger `depth`) reach exponentially further along the frequency
     axis via the dense block's d = 2^i dilations.
+
+    The paper's IR block spec ("Expand projects C channels to rC, r in {2,4}")
+    doesn't say which blocks get which ratio, so the dense layers' expand
+    ratio (`expand_ratio`) and the trailing standalone IR block's
+    (`ir_expand_ratio`) are independent knobs. `ir_expand_ratio=None` (the
+    default) reuses `expand_ratio`, reproducing the old single-ratio behaviour.
     """
 
-    def __init__(self, channels, depth, expand_ratio=4, causal=True, growth=None):
+    def __init__(self, channels, depth, expand_ratio=4, causal=True, growth=None,
+                 ir_expand_ratio=None):
         super().__init__()
         self.dense = DenseBlock(channels, depth, expand_ratio, causal, growth=growth)
-        self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal)
+        self.ir = IRBlock(channels, ir_expand_ratio or expand_ratio,
+                          freq_dilation=1, causal=causal)
 
     def forward(self, x):
         return self.ir(self.dense(x))
@@ -555,12 +563,14 @@ class EfficientDecoder(nn.Module):
     """
 
     def __init__(self, channels, depth, in_freq, full_freq, expand_ratio=4, causal=True,
-                 growth=None, upsample_first=False):
+                 growth=None, upsample_first=False, ir_expand_ratio=None):
         super().__init__()
         self.upsample_first = upsample_first
-        self.dense = EfficientDenseNet(channels, depth, expand_ratio, causal, growth=growth)
+        self.dense = EfficientDenseNet(channels, depth, expand_ratio, causal, growth=growth,
+                                       ir_expand_ratio=ir_expand_ratio)
         self.upsample = FreqResample(in_freq, full_freq, "nearest")
-        self.ir = IRBlock(channels, expand_ratio, freq_dilation=1, causal=causal)
+        self.ir = IRBlock(channels, ir_expand_ratio or expand_ratio,
+                          freq_dilation=1, causal=causal)
         self.norm = make_norm(channels, causal)
 
     def forward(self, x):
@@ -596,11 +606,12 @@ class MagMaskDecoder(nn.Module):
     """
 
     def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True,
-                 growth=None, upsample_first=False, use_skip=True):
+                 growth=None, upsample_first=False, use_skip=True, ir_expand_ratio=None):
         super().__init__()
         self.use_skip = use_skip
         self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal,
-                                     growth=growth, upsample_first=upsample_first)
+                                     growth=growth, upsample_first=upsample_first,
+                                     ir_expand_ratio=ir_expand_ratio)
         if use_skip:
             self.merge = nn.Conv2d(channels * 2, channels, 1)
             self.merge_norm = make_norm(channels, causal)
@@ -626,11 +637,12 @@ class PhaseDecoder(nn.Module):
     """
 
     def __init__(self, channels, depth, in_freq, n_freq, expand_ratio=4, causal=True,
-                 growth=None, upsample_first=False, use_skip=True):
+                 growth=None, upsample_first=False, use_skip=True, ir_expand_ratio=None):
         super().__init__()
         self.use_skip = use_skip
         self.body = EfficientDecoder(channels, depth, in_freq, n_freq, expand_ratio, causal,
-                                     growth=growth, upsample_first=upsample_first)
+                                     growth=growth, upsample_first=upsample_first,
+                                     ir_expand_ratio=ir_expand_ratio)
         if use_skip:
             self.merge = nn.Conv2d(channels * 2, channels, 1)
             self.merge_norm = make_norm(channels, causal)
@@ -668,8 +680,17 @@ class BASENet(nn.Module):
                  band_edges_hz=(0, 1000, 4000, 8000), band_depths=(4, 3, 2),
                  crn_freq=16, crn_hidden=128, dec_depth=2, causal=True,
                  growth=None, crn_mode="flat", dec_upsample_first=False,
-                 dec_skip=True, band_stems=False, fusion_ir=True):
+                 dec_skip=True, band_stems=False, fusion_ir=True,
+                 enc_dense_expand_ratio=None, enc_ir_expand_ratio=None,
+                 dec_dense_expand_ratio=None, dec_ir_expand_ratio=None):
         super().__init__()
+        # The paper's IR block spec ("r in {2,4}") doesn't say which modules
+        # get which ratio; each defaults to the single `expand_ratio` so
+        # existing configs are unaffected unless they set these explicitly.
+        enc_dense_expand_ratio = enc_dense_expand_ratio or expand_ratio
+        enc_ir_expand_ratio = enc_ir_expand_ratio or expand_ratio
+        dec_dense_expand_ratio = dec_dense_expand_ratio or expand_ratio
+        dec_ir_expand_ratio = dec_ir_expand_ratio or expand_ratio
         self.n_fft = n_fft
         self.hop_size = hop_size
         self.sampling_rate = sampling_rate
@@ -696,7 +717,8 @@ class BASENet(nn.Module):
             self.input_proj = nn.Conv2d(2, C, 1)   # single shared 1x1 projection
             self.band_stem = None
         self.encoders = nn.ModuleList(
-            EfficientDenseNet(C, depth, expand_ratio, causal, growth=growth)
+            EfficientDenseNet(C, depth, enc_dense_expand_ratio, causal, growth=growth,
+                              ir_expand_ratio=enc_ir_expand_ratio)
             for depth in band_depths
         )
         self.cross_band = CrossBandAttention(C, n_bands, attn_reduction, causal)
@@ -704,11 +726,13 @@ class BASENet(nn.Module):
                                        use_ir=fusion_ir)
         self.crn = CRN(C, crn_freq, crn_hidden, causal, mode=crn_mode)
         self.mag_decoder = MagMaskDecoder(
-            C, dec_depth, crn_freq, self.n_features, expand_ratio, causal,
-            growth=growth, upsample_first=dec_upsample_first, use_skip=dec_skip)
+            C, dec_depth, crn_freq, self.n_features, dec_dense_expand_ratio, causal,
+            growth=growth, upsample_first=dec_upsample_first, use_skip=dec_skip,
+            ir_expand_ratio=dec_ir_expand_ratio)
         self.phase_decoder = PhaseDecoder(
-            C, dec_depth, crn_freq, self.n_features, expand_ratio, causal,
-            growth=growth, upsample_first=dec_upsample_first, use_skip=dec_skip)
+            C, dec_depth, crn_freq, self.n_features, dec_dense_expand_ratio, causal,
+            growth=growth, upsample_first=dec_upsample_first, use_skip=dec_skip,
+            ir_expand_ratio=dec_ir_expand_ratio)
 
     def forward(self, mag, pha):                   # (B, F, N) each
         x = torch.stack([mag, pha], dim=1)         # (B, 2, F, N)
@@ -768,6 +792,10 @@ def build_basenet(h=None, causal=True):
         dec_skip=bool(g("dec_skip", True)),
         band_stems=bool(g("band_stems", False)),
         fusion_ir=bool(g("fusion_ir", True)),
+        enc_dense_expand_ratio=g("enc_dense_expand_ratio", None) and int(g("enc_dense_expand_ratio", None)),
+        enc_ir_expand_ratio=g("enc_ir_expand_ratio", None) and int(g("enc_ir_expand_ratio", None)),
+        dec_dense_expand_ratio=g("dec_dense_expand_ratio", None) and int(g("dec_dense_expand_ratio", None)),
+        dec_ir_expand_ratio=g("dec_ir_expand_ratio", None) and int(g("dec_ir_expand_ratio", None)),
     )
 
 
