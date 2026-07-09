@@ -30,6 +30,7 @@ from nsnet2.model import NSNet2  # noqa: E402
 @pytest.mark.parametrize("cfg", [
     {"kind": "linear"},
     {"kind": "monarch", "nblocks": 4},
+    {"kind": "monarch2", "nblocks": 4},
     {"kind": "butterfly", "nblocks": 1, "init": "randn"},
     {"kind": "butterfly", "nblocks": 1, "init": "ortho"},
 ])
@@ -48,6 +49,7 @@ def test_make_linear_forward_shape(cfg):
 GRU_CFGS = [
     {"kind": "gru"},
     {"kind": "monarch", "nblocks": 4},
+    {"kind": "monarch2", "nblocks": 4},
     {"kind": "butterfly", "nblocks": 1, "h_init": "ortho"},
     {"kind": "triton"},
     {"kind": "triton_monarch", "nblocks": 4, "struct_input": True},
@@ -99,6 +101,7 @@ def _cfg(linear, gru):
 
 @pytest.mark.parametrize("linear,gru", [
     ({"kind": "monarch", "nblocks": 4}, {"kind": "monarch", "nblocks": 4}),
+    ({"kind": "monarch2", "nblocks": 4}, {"kind": "monarch2", "nblocks": 4}),
     ({"kind": "monarch", "nblocks": 4},
      {"kind": "triton_monarch", "nblocks": 4, "struct_input": True}),
     ({"kind": "butterfly", "nblocks": 1, "init": "randn"},

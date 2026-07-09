@@ -7,17 +7,30 @@ Two registries:
     * ``"linear"``    — dense ``nn.Linear``                 (O(N^2)).
     * ``"butterfly"`` — ``torch_structured.Butterfly``       (~O(N log N)).
     * ``"monarch"``   — ``torch_structured.monarch.BlockdiagLinear``
-                        block-diagonal linear (~O(N^2 / nblocks)).
+                        single block-diagonal factor, no permutation
+                        (~O(N^2 / nblocks)); zero cross-block mixing by
+                        construction.
+    * ``"monarch2"``  — ``torch_structured.monarch.MonarchLinear``
+                        genuine two-factor Monarch (block-diagonal x
+                        permutation x block-diagonal); full cross-channel
+                        mixing by construction, unlike ``"monarch"``.
 
 - ``make_gru(input_size, hidden_size, num_layers, *, cfg)`` — same idea for
   the GRU stack. ``cfg["kind"]`` selects:
     * ``"gru"``       — cuDNN-fused ``nn.GRU``.
-    * ``"butterfly"`` / ``"monarch"`` — ``StructuredGRU``: a Python time-loop
-                        wrapping ``StructuredGRUCell``, whose ``W_ih`` and
-                        ``W_hh`` projections (packed across r/z/n gates) come
-                        from ``make_linear`` with the same backend. The h->3h
-                        projection defaults to ``init='ortho'`` for butterfly
-                        — recurrent stability needs near-orthogonal weights.
+    * ``"butterfly"`` / ``"monarch"`` / ``"monarch2"`` — ``StructuredGRU``: a
+                        Python time-loop wrapping ``StructuredGRUCell``, whose
+                        ``W_ih`` and ``W_hh`` projections (packed across
+                        r/z/n gates) come from ``make_linear`` with the same
+                        backend. The h->3h projection defaults to
+                        ``init='ortho'`` for butterfly — recurrent stability
+                        needs near-orthogonal weights. ``"monarch"``/
+                        ``"monarch2"`` have no ``init`` knob (BlockdiagLinear/
+                        MonarchLinear don't accept one); with ``"monarch"``
+                        the GRU's cross-block mixing is an accidental
+                        byproduct of nblocks/hidden_size not dividing the
+                        r/z/n gate width evenly, whereas ``"monarch2"``
+                        mixes fully regardless of that alignment.
 
 All ``cfg`` blocks accept the per-backend knobs (e.g. ``nblocks`` for
 butterfly/monarch, ``init`` for butterfly).
@@ -53,6 +66,13 @@ except ImportError:
     HAVE_MONARCH = False
 
 try:
+    from torch_structured.monarch.monarch_linear import MonarchLinear
+    HAVE_MONARCH2 = True
+except ImportError:
+    MonarchLinear = None
+    HAVE_MONARCH2 = False
+
+try:
     from gru_qat import GRULayer as _GRULayer
     from gru_qat import QuantRecipe as _QuantRecipe
     from gru_qat import QuantizerConfig as _QuantizerConfig
@@ -66,7 +86,7 @@ except ImportError:
 # Linear factory
 # ---------------------------------------------------------------------------
 
-LINEAR_KINDS = ("linear", "butterfly", "monarch")
+LINEAR_KINDS = ("linear", "butterfly", "monarch", "monarch2")
 
 
 def make_linear(in_size: int, out_size: int, bias: bool = True, *,
@@ -90,6 +110,14 @@ def make_linear(in_size: int, out_size: int, bias: bool = True, *,
         if not HAVE_MONARCH:
             raise ImportError("torch_structured.monarch.BlockdiagLinear unavailable; rebuild torch-butterfly.")
         return BlockdiagLinear(
+            in_features=in_size, out_features=out_size, bias=bias,
+            nblocks=cfg.get("nblocks", 4),
+        )
+
+    if kind == "monarch2":
+        if not HAVE_MONARCH2:
+            raise ImportError("torch_structured.monarch.MonarchLinear unavailable; rebuild torch-butterfly.")
+        return MonarchLinear(
             in_features=in_size, out_features=out_size, bias=bias,
             nblocks=cfg.get("nblocks", 4),
         )
@@ -254,7 +282,7 @@ class TritonGRU(nn.Module):
 # GRU factory
 # ---------------------------------------------------------------------------
 
-GRU_KINDS = ("gru", "butterfly", "monarch", "triton", "triton_monarch", "triton_butterfly")
+GRU_KINDS = ("gru", "butterfly", "monarch", "monarch2", "triton", "triton_monarch", "triton_butterfly")
 
 
 def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
@@ -321,7 +349,7 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
             pre_batch_input=False,
         )
 
-    if kind not in ("butterfly", "monarch"):
+    if kind not in ("butterfly", "monarch", "monarch2"):
         raise ValueError(f"Unknown gru kind: {kind!r} (expected one of {GRU_KINDS})")
 
     base = {k: v for k, v in cfg.items() if k not in ("kind", "h_init", "x_init")}
