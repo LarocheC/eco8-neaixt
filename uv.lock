@@ -516,7 +516,7 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=2.14,<4" },
     { name = "einops", specifier = ">=0.7" },
-    { name = "gru-qat", extras = ["triton", "structured"], specifier = ">=0.4.0" },
+    { name = "gru-qat", extras = ["triton", "structured"], specifier = ">=0.5.0" },
     { name = "huggingface-hub", specifier = ">=0.20" },
     { name = "joblib", specifier = ">=1.3" },
     { name = "jupyter", specifier = ">=1.0" },
@@ -704,15 +704,15 @@ wheels = [
 
 [[package]]
 name = "gru-qat"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d6/19/0bbf53ca41e7fd8b53b856fcd3bac3ab7259371f5e9bb1b371c5e6640ef3/gru_qat-0.4.0.tar.gz", hash = "sha256:6670852bdd8c38178673158c94fe4c32b177783a32577b7c9652553cd972fe05", size = 781849, upload-time = "2026-07-09T13:20:33.56Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/ee/559aab7a2a511a17b3b1b7febf57cd9441e2745166491fd54c01613f77fb/gru_qat-0.5.0.tar.gz", hash = "sha256:7927ab8bd9d93a2c5c7cb9347777baf06b9206883ccbf5884491a20e500fd508", size = 785660, upload-time = "2026-07-09T16:08:43.689Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8e/63/7330d8d1421b7192d287aef22260b50dea29d7d3d25a9c51254d780e7c0e/gru_qat-0.4.0-py3-none-any.whl", hash = "sha256:5b2ad2f36b9a374c2fa15e9dd044d1a96c6e72203db50581097c88f0268b17da", size = 78610, upload-time = "2026-07-09T13:20:31.868Z" },
+    { url = "https://files.pythonhosted.org/packages/31/58/3bd53551c14c301a0bd2a83f005c59c8dd89c4bb88e22738f0a3832a6e76/gru_qat-0.5.0-py3-none-any.whl", hash = "sha256:ccb5ec9118820acd96dfa4623d83378c39ebd789bac1949972c0eff7f2686e5d", size = 80844, upload-time = "2026-07-09T16:08:41.842Z" },
 ]
 
 [package.optional-dependencies]

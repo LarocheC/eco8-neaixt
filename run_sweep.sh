@@ -36,7 +36,11 @@
 # The structured FC layers are unchanged and already run on torch-structured's
 # Triton/native backend. Same parameter count and structured-matrix family as
 # the HF runs (verified +0.0%); NOT bit-identical (gru_qat packs the gates as
-# three per-gate matrices vs the original fused input->3H matrix). The Triton
+# three per-gate matrices vs the original fused input->3H matrix). For genuine
+# Monarch the +0.0% parity requires gru-qat >= 0.5.0's FUSED (shared-w1) layout
+# (StructureConfig.monarch_fused=True, the default) — the older per-gate layout
+# triplicated the Monarch w1 factor (+~29% params). blockdiag/butterfly are
+# +0.0% regardless of layout. The Triton
 # hidden kernel needs a CUDA device; on CPU gru_qat falls back to an equivalent
 # per-step loop. Triton runs land in cp_<name>_triton/ so they never clobber
 # the canonical HF-reproduction runs.
