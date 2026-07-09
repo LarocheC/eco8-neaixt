@@ -41,13 +41,23 @@ class NSNet2(nn.Module):
         self.fc_out = make_linear(fc_hidden, n_freq, cfg=linear_cfg)
         self.act = nn.ReLU()
 
-    def forward(self, noisy_mag, noisy_pha):
-        x = noisy_mag.transpose(1, 2)
-        h = self.act(self.fc_in(x))
+    def predict_mask(self, feats):
+        """Run the FC + GRU + FC body on features shaped ``(B, T, F)`` and
+        return a per-T/F gain in ``[0, 1]`` of the same shape.
+
+        Factored out of ``forward`` so alternative front-ends (e.g. the learned
+        butterfly transform in ``model_e2e.NSNet2E2E``) can reuse the exact same
+        core network. ``forward`` below is unchanged in behaviour.
+        """
+        h = self.act(self.fc_in(feats))
         h, _ = self.gru(h)
         h = self.act(self.fc1(h))
         h = self.act(self.fc2(h))
-        mask = torch.sigmoid(self.fc_out(h))
+        return torch.sigmoid(self.fc_out(h))
+
+    def forward(self, noisy_mag, noisy_pha):
+        x = noisy_mag.transpose(1, 2)
+        mask = self.predict_mask(x)
         mask = mask.transpose(1, 2)
 
         denoised_mag = noisy_mag * mask
