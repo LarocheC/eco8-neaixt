@@ -32,7 +32,7 @@ def cfg():
         "win_size": 512, "hop_size": 256, "n_coeffs": 512,
         "hidden_dim": 96, "fc_hidden_dim": 96, "num_gru_layers": 2,
         "transform": {"learnable_window": True, "window_init": "sqrt_hann",
-                      "nblocks": 1, "init": "randn"},
+                      "nblocks": 1, "init": "ortho"},
         "seed": 0,
     })
 

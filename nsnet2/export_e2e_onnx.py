@@ -39,9 +39,9 @@ class _E2EExport(nn.Module):
         self.m = model
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        w = self.m.analysis(wav)                 # (B, T, N)
+        w = self.m.transform.analyze(wav)        # (B, T, N)
         mask = self.m.core.predict_mask(w)       # (B, T, N)
-        return self.m.synthesis(w * mask)        # (B, L)
+        return self.m.transform.synthesize(w * mask)   # (B, L)
 
 
 def _valid_len(win: int, hop: int, n_frames: int) -> int:

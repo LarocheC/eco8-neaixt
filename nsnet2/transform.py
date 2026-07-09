@@ -8,17 +8,23 @@ is free to learn a different basis end-to-end. Crucially, unlike ``torch.stft``,
 a butterfly lowers to plain structured MatMuls and therefore lives *inside* the
 exported ONNX graph, enabling a single waveform->waveform enhancement model.
 
-Design (TasNet-style, confirmed with the user):
+Design:
+  * ONE shared butterfly. Analysis runs it forward; synthesis runs it
+    TRANSPOSED (``transpose=True``) — the exact inverse when the twiddles are
+    orthogonal. This mirrors how the real STFT/iSTFT share one transform
+    (DFT / iDFT), gives near-perfect reconstruction by construction (~+29 dB at
+    init with ``init='ortho'`` vs ~-38 dB for an independent random synthesis),
+    and halves the transform parameters. The orthogonality penalty
+    (``nsnet2.layers.butterfly_ortho_penalty``, applied by the trainer) keeps
+    ``transpose == inverse`` valid as the transform learns.
   * framing / overlap-add are fixed identity Conv1d / ConvTranspose1d (kept in
     the graph, ONNX-native, non-trainable),
-  * the per-frame window is learnable (init = sqrt-Hann so analysis*synthesis
-    starts near COLA at 50% hop),
-  * analysis and synthesis butterflies are *independent* learned transforms
-    (not constrained to be exact inverses) — the end-to-end loss shapes both.
+  * separate learnable analysis / synthesis windows (init = sqrt-Hann so the
+    windowed overlap-add starts near COLA at 50% hop).
 
-The butterfly is always applied on a 2D ``(B*T, N)`` reshape. That matches the
-``_butterfly_export_forward`` contract in ``nsnet2/export_onnx.py`` (which
-collapses leading dims to ``-1``), so eager and exported forward are identical.
+The butterfly is applied on a 2D ``(B*T, N)`` reshape (single ``-1`` collapse so
+the traced graph keeps T dynamic) — matching the ``_butterfly_export_forward``
+contract in ``nsnet2/export_onnx.py``, so eager and exported forward agree.
 """
 
 from __future__ import annotations
@@ -58,71 +64,51 @@ def _init_window(win: int, kind: str) -> torch.Tensor:
     raise ValueError(f"Unknown window init: {kind!r}")
 
 
-def _register_window(module: nn.Module, win: int, learnable: bool, kind: str) -> None:
-    """Register ``module.window`` as a trainable Parameter or a fixed buffer."""
+def _register_window(module: nn.Module, name: str, win: int, learnable: bool, kind: str) -> None:
+    """Register ``module.<name>`` as a trainable Parameter or a fixed buffer."""
     w = _init_window(win, kind)
     if learnable:
-        module.window = nn.Parameter(w)
+        setattr(module, name, nn.Parameter(w))
     else:
-        module.register_buffer("window", w)
+        module.register_buffer(name, w)
 
 
-class ButterflyAnalysis(nn.Module):
-    """waveform ``(B, L)`` -> coefficients ``(B, T, N)``.
+class ButterflyTransform(nn.Module):
+    """Shared learned butterfly used forward for analysis and transposed for
+    synthesis.
 
-    ``L`` must satisfy ``(L - win) % hop == 0`` (the caller pads); ``T`` is then
-    ``(L - win) // hop + 1``.
+    ``analyze``:  waveform ``(B, L)`` -> coefficients ``(B, T, N)`` with
+    ``N == win`` and ``T = (L - win) // hop + 1`` (caller ensures ``L`` is
+    frame-aligned).
+    ``synthesize``: coefficients ``(B, T, N)`` -> waveform ``(B, L)`` with
+    ``L = (T - 1) * hop + win``.
     """
 
-    def __init__(self, win: int = 512, hop: int = 256, n_coeffs: int | None = None,
+    def __init__(self, win: int = 512, hop: int = 256,
                  learnable_window: bool = True, window_init: str = "sqrt_hann",
-                 nblocks: int = 1, init: str = "randn"):
+                 nblocks: int = 1, init: str = "ortho"):
         super().__init__()
         if not HAVE_BUTTERFLY:
             raise ImportError("torch_structured.Butterfly unavailable; rebuild torch-butterfly.")
         self.win = win
         self.hop = hop
-        self.n_coeffs = n_coeffs or win
+        self.n_coeffs = win
         self.register_buffer("frame_kernel", _identity_frame_kernel(win))
-        _register_window(self, win, learnable_window, window_init)
-        self.butterfly = Butterfly(in_size=win, out_size=self.n_coeffs, bias=False,
+        self.register_buffer("oa_kernel", _identity_frame_kernel(win))
+        _register_window(self, "ana_window", win, learnable_window, window_init)
+        _register_window(self, "syn_window", win, learnable_window, window_init)
+        self.butterfly = Butterfly(in_size=win, out_size=win, bias=False,
                                    nblocks=nblocks, init=init)
 
-    def forward(self, wav: torch.Tensor) -> torch.Tensor:
-        # frames: (B, win, T) via a fixed strided identity conv
+    def analyze(self, wav: torch.Tensor) -> torch.Tensor:
         frames = F.conv1d(wav.unsqueeze(1), self.frame_kernel, stride=self.hop)
-        frames = frames.transpose(1, 2)                          # (B, T, win)
-        frames = frames * self.window                            # learnable window
-        # Collapse (B, T) with a single -1 so the traced Reshape keeps T dynamic
-        # (a literal B*T would bake the trace-time length in). The butterfly is
-        # applied on 2D — matching the _butterfly_export_forward contract.
+        frames = frames.transpose(1, 2) * self.ana_window        # (B, T, win)
         w = self.butterfly(frames.reshape(-1, self.win))         # (B*T, N)
         return w.reshape(frames.shape[0], -1, self.n_coeffs)     # (B, T, N)
 
-
-class ButterflySynthesis(nn.Module):
-    """coefficients ``(B, T, N)`` -> waveform ``(B, L)`` via inverse butterfly +
-    windowed overlap-add. ``L = (T - 1) * hop + win``."""
-
-    def __init__(self, win: int = 512, hop: int = 256, n_coeffs: int | None = None,
-                 learnable_window: bool = True, window_init: str = "sqrt_hann",
-                 nblocks: int = 1, init: str = "randn"):
-        super().__init__()
-        if not HAVE_BUTTERFLY:
-            raise ImportError("torch_structured.Butterfly unavailable; rebuild torch-butterfly.")
-        self.win = win
-        self.hop = hop
-        self.n_coeffs = n_coeffs or win
-        self.register_buffer("oa_kernel", _identity_frame_kernel(win))
-        _register_window(self, win, learnable_window, window_init)
-        self.butterfly = Butterfly(in_size=self.n_coeffs, out_size=win, bias=False,
-                                   nblocks=nblocks, init=init)
-
-    def forward(self, w: torch.Tensor) -> torch.Tensor:
-        # Single -1 collapse keeps T dynamic in the traced graph (see analysis).
-        frames = self.butterfly(w.reshape(-1, self.n_coeffs))    # (B*T, win)
-        frames = frames.reshape(w.shape[0], -1, self.win)        # (B, T, win)
-        frames = frames * self.window
-        frames = frames.transpose(1, 2)                          # (B, win, T)
-        wav = F.conv_transpose1d(frames, self.oa_kernel, stride=self.hop)
+    def synthesize(self, w: torch.Tensor) -> torch.Tensor:
+        # transpose=True runs the shared butterfly as its (orthogonal) inverse.
+        frames = self.butterfly(w.reshape(-1, self.n_coeffs), transpose=True)
+        frames = frames.reshape(w.shape[0], -1, self.win) * self.syn_window
+        wav = F.conv_transpose1d(frames.transpose(1, 2), self.oa_kernel, stride=self.hop)
         return wav.squeeze(1)                                    # (B, L)

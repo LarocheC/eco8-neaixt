@@ -17,10 +17,11 @@
         "learnable_window": true,
         "window_init": "sqrt_hann",
         "nblocks": 1,
-        "init": "randn"
+        "init": "ortho"
     },
     "loss": {
-        "time": 1.0,
+        "sisnr": 1.0,
+        "time": 0.0,
         "mrstft": 1.0,
         "metric": 0.05
     },

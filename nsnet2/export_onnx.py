@@ -69,8 +69,8 @@ def _butterfly_export_forward(self, input, transpose=False, conjugate=False, sub
     Input contract: 2D `(B, in_size)` — what the streaming wrapper feeds via
     fc_in/fc1/fc2/fc_out and what each StructuredGRUCell projection sees.
     """
-    assert not (transpose or conjugate or subtwiddle), (
-        "_butterfly_export_forward only supports the default forward path"
+    assert not (conjugate or subtwiddle), (
+        "_butterfly_export_forward only supports the default / transpose path"
     )
     assert not self.complex, (
         "_butterfly_export_forward only supports real-valued Butterfly"
@@ -81,6 +81,18 @@ def _butterfly_export_forward(self, input, transpose=False, conjugate=False, sub
     nblocks = int(self.nblocks)
     log_n   = int(twiddle.shape[2])
     n       = 1 << log_n
+
+    # transpose=True runs the butterfly as its inverse (exact for orthogonal
+    # twiddles) — used by ButterflyTransform.synthesize. Mirror the reference
+    # torch_structured.Butterfly.forward: transpose each 2x2, reverse the
+    # block/stage order, and flip the starting stride parity. The per-stage
+    # loop below is unchanged; only `twiddle` and `start_increasing` differ.
+    if transpose:
+        twiddle = twiddle.transpose(-1, -2).flip([1, 2])
+        last_increasing_stride = self.increasing_stride != ((nblocks - 1) % 2 == 1)
+        start_increasing = not last_increasing_stride
+    else:
+        start_increasing = self.increasing_stride
 
     # --- pre_process (no Shape extracts) ---------------------------------
     input_size = input.size(-1)                           # static at trace
@@ -94,7 +106,7 @@ def _butterfly_export_forward(self, input, transpose=False, conjugate=False, sub
         output = output[:, :, :n]
     out_size_intrinsic = self.out_size if nstacks == 1 else n
 
-    cur_inc = self.increasing_stride
+    cur_inc = start_increasing
     for block in range(nblocks):
         for idx in range(log_n):
             log_stride = idx if cur_inc else log_n - 1 - idx

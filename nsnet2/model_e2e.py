@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from nsnet2.model import NSNet2
-from nsnet2.transform import ButterflyAnalysis, ButterflySynthesis
+from nsnet2.transform import ButterflyTransform
 
 
 class NSNet2E2E(nn.Module):
@@ -30,21 +30,16 @@ class NSNet2E2E(nn.Module):
         self.h = h
         self.win = getattr(h, "win_size", 512)
         self.hop = getattr(h, "hop_size", 256)
-        self.n_coeffs = getattr(h, "n_coeffs", self.win)
+        self.n_coeffs = self.win        # square orthogonal butterfly transform
 
         tcfg = getattr(h, "transform", None) or {}
         learnable_window = tcfg.get("learnable_window", True)
         window_init = tcfg.get("window_init", "sqrt_hann")
         nblocks = tcfg.get("nblocks", 1)
-        init = tcfg.get("init", "randn")
+        init = tcfg.get("init", "ortho")
 
-        self.analysis = ButterflyAnalysis(
-            self.win, self.hop, self.n_coeffs,
-            learnable_window=learnable_window, window_init=window_init,
-            nblocks=nblocks, init=init,
-        )
-        self.synthesis = ButterflySynthesis(
-            self.win, self.hop, self.n_coeffs,
+        self.transform = ButterflyTransform(
+            self.win, self.hop,
             learnable_window=learnable_window, window_init=window_init,
             nblocks=nblocks, init=init,
         )
@@ -66,18 +61,17 @@ class NSNet2E2E(nn.Module):
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         wav_p, L = self._pad_to_valid(wav)
-        w = self.analysis(wav_p)                 # (B, T, N)
+        w = self.transform.analyze(wav_p)        # (B, T, N)
         mask = self.core.predict_mask(w)         # (B, T, N) in [0, 1]
-        w_hat = w * mask
-        wav_hat = self.synthesis(w_hat)          # (B, L_p)
+        wav_hat = self.transform.synthesize(w * mask)   # (B, L_p)
         return wav_hat[..., :L]
 
     def ortho_penalty(self) -> torch.Tensor:
-        """Mean butterfly orthogonality penalty across analysis + synthesis
-        twiddles (reuses ``nsnet2.layers.butterfly_ortho_penalty``)."""
+        """Butterfly orthogonality penalty on the shared twiddle — keeps the
+        transform orthogonal so synthesis (transpose) stays the exact inverse
+        of analysis. Reuses ``nsnet2.layers.butterfly_ortho_penalty``."""
         from nsnet2.layers import butterfly_ortho_penalty
-        return 0.5 * (butterfly_ortho_penalty(self.analysis.butterfly.twiddle)
-                      + butterfly_ortho_penalty(self.synthesis.butterfly.twiddle))
+        return butterfly_ortho_penalty(self.transform.butterfly.twiddle)
 
 
 class _CoreDims:

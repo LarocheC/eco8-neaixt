@@ -49,6 +49,20 @@ def mrstft_mag_loss(clean, esti, resolutions, compress):
     return total / len(resolutions)
 
 
+def sisnr_loss(est, ref, eps=1e-8):
+    """Negative scale-invariant SNR (dB), mean over batch. The dominant
+    reconstruction objective for waveform enhancement — unlike magnitude-only
+    losses it constrains phase, which is exactly what a learned transform needs
+    to reconstruct coherent audio. est, ref: (B, L)."""
+    ref = ref - ref.mean(dim=-1, keepdim=True)
+    est = est - est.mean(dim=-1, keepdim=True)
+    alpha = (est * ref).sum(-1, keepdim=True) / (ref.pow(2).sum(-1, keepdim=True) + eps)
+    proj = alpha * ref
+    noise = est - proj
+    snr = 10 * torch.log10((proj.pow(2).sum(-1) + eps) / (noise.pow(2).sum(-1) + eps))
+    return -snr.mean()
+
+
 def train(rank, a, h):
     if h.num_gpus > 1:
         init_process_group(backend=h.dist_config['dist_backend'], init_method=h.dist_config['dist_url'],
@@ -62,7 +76,8 @@ def train(rank, a, h):
 
     resolutions = h.get("mrstft_resolutions", DEFAULT_MRSTFT)
     loss_w = h.get("loss", {})
-    w_time = loss_w.get("time", 1.0)
+    w_sisnr = loss_w.get("sisnr", 1.0)
+    w_time = loss_w.get("time", 0.0)
     w_mrstft = loss_w.get("mrstft", 1.0)
     w_metric = loss_w.get("metric", 0.05)
     ortho_lambda = h.get("butterfly_ortho_lambda", 0.0)
@@ -197,12 +212,14 @@ def train(rank, a, h):
             # Generator
             optim_g.zero_grad()
 
+            loss_sisnr = sisnr_loss(audio_g, clean_audio)
             loss_time = F.l1_loss(clean_audio, audio_g)
             loss_mrstft = mrstft_mag_loss(clean_audio, audio_g, resolutions, compress)
             metric_g = discriminator(clean_mag, mag_g_hat)
             loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
 
-            loss_gen_all = (loss_time * w_time
+            loss_gen_all = (loss_sisnr * w_sisnr
+                            + loss_time * w_time
                             + loss_mrstft * w_mrstft
                             + loss_metric * w_metric)
 
@@ -220,10 +237,10 @@ def train(rank, a, h):
                 if steps % a.stdout_interval == 0:
                     with torch.no_grad():
                         metric_error = F.mse_loss(metric_g.flatten(), one_labels).item()
-                        time_error = loss_time.item()
+                        sisnr_db = -loss_sisnr.item()
                         mrstft_error = loss_mrstft.item()
-                    print('Steps : {:d}, Gen Loss: {:4.3f}, Disc Loss: {:4.3f}, Metric loss: {:4.3f}, MR-STFT Loss : {:4.3f}, Time Loss : {:4.3f}, s/b : {:4.3f}'.
-                          format(steps, loss_gen_all, loss_disc_all, metric_error, mrstft_error, time_error, time.time() - start_b))
+                    print('Steps : {:d}, Gen Loss: {:4.3f}, Disc Loss: {:4.3f}, Metric loss: {:4.3f}, SI-SNR dB : {:4.2f}, MR-STFT Loss : {:4.3f}, s/b : {:4.3f}'.
+                          format(steps, loss_gen_all, loss_disc_all, metric_error, sisnr_db, mrstft_error, time.time() - start_b))
 
                 if steps % a.checkpoint_interval == 0 and steps != 0:
                     checkpoint_path = "{}/g_{:08d}".format(a.checkpoint_path, steps)
@@ -241,8 +258,8 @@ def train(rank, a, h):
                     sw.add_scalar("Training/Generator Loss", loss_gen_all, steps)
                     sw.add_scalar("Training/Discriminator Loss", loss_disc_all, steps)
                     sw.add_scalar("Training/Metric Loss", metric_error, steps)
+                    sw.add_scalar("Training/SI-SNR dB", sisnr_db, steps)
                     sw.add_scalar("Training/MR-STFT Loss", mrstft_error, steps)
-                    sw.add_scalar("Training/Time Loss", time_error, steps)
                     if ortho_loss is not None:
                         sw.add_scalar("Training/Butterfly Ortho Penalty", ortho_loss.item(), steps)
 

@@ -55,7 +55,7 @@ def cfg():
         "hidden_dim": 96, "fc_hidden_dim": 96, "num_gru_layers": 2,
         "compress_factor": 0.3,
         "transform": {"learnable_window": True, "window_init": "sqrt_hann",
-                      "nblocks": 1, "init": "randn"},
+                      "nblocks": 1, "init": "ortho"},
         "learning_rate": 1e-3, "seed": 0,
     })
 
@@ -67,12 +67,29 @@ SMOKE_RES = [[256, 128, 256], [512, 256, 512]]
 def test_build_and_shapes(cfg):
     torch.manual_seed(0)
     model = NSNet2E2E(cfg)
-    # core sees n_coeffs bins, not the STFT's n_fft//2+1
-    assert model.core.fc_in.in_features == cfg.n_coeffs
-    assert model.core.fc_out.out_features == cfg.n_coeffs
+    # core sees win bins (square orthogonal butterfly), not the STFT's n_fft//2+1
+    assert model.core.fc_in.in_features == cfg.win_size
+    assert model.core.fc_out.out_features == cfg.win_size
     for L in (8192, 8000, 500):
         y = model(torch.randn(2, L))
         assert y.shape == (2, L), (L, y.shape)
+
+
+def test_transform_reconstructs_at_init(cfg):
+    """The shared orthogonal butterfly + transpose synthesis must reconstruct
+    (mask=1) at init — this is what lets the net learn denoising instead of
+    inversion. Guards against regressing to an independent random synthesis."""
+    torch.manual_seed(0)
+    t = NSNet2E2E(cfg).transform.eval()
+    x = torch.randn(1, 8192)
+    with torch.no_grad():
+        rec = t.synthesize(t.analyze(x))
+    n = min(rec.shape[-1], x.shape[-1])
+    a, b = rec[0, :n], x[0, :n]
+    a = a - a.mean(); b = b - b.mean()
+    alpha = (a * b).sum() / b.pow(2).sum()
+    sisnr = 10 * torch.log10(alpha.pow(2) * b.pow(2).sum() / (a - alpha * b).pow(2).sum())
+    assert sisnr.item() > 15, f"init reconstruction SI-SNR too low: {sisnr.item():.1f} dB"
 
 
 def test_train_step_loss_decreases(cfg):
@@ -90,9 +107,10 @@ def test_train_step_loss_decreases(cfg):
                 + mrstft_mag_loss(clean, audio_g, SMOKE_RES, 0.3)
                 + 0.01 * model.ortho_penalty())
         loss.backward()
-        # gradients must reach the structured twiddles and the learnable windows
-        assert model.analysis.butterfly.twiddle.grad is not None
-        assert model.analysis.window.grad is not None
+        # gradients must reach the shared structured twiddle and both windows
+        assert model.transform.butterfly.twiddle.grad is not None
+        assert model.transform.ana_window.grad is not None
+        assert model.transform.syn_window.grad is not None
         optim.step()
         l = float(loss.item())
         assert np.isfinite(l)
