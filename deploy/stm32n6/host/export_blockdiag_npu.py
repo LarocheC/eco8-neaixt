@@ -1,16 +1,24 @@
-"""Export a trained fully-monarch NSNet2 into an NPU-deployable int8 ONNX.
+"""Export a trained fully-blockdiag NSNet2 into an NPU-deployable int8 ONNX.
 
 Works for any NSNet2 config whose `linear` AND `gru` backends are both
-`monarch` (e.g. `monarch_8` nblocks=8, `monarch_full` nblocks=4,
-`wide_monarch`) — the architecture dims (n_freq, hidden, num GRU layers, block
-count) are all read from the checkpoint, nothing is hard-coded. Configs with a
-dense GRU (`monarch_fc`) are rejected: their GRU has no block structure to
-re-express here.
+`blockdiag` (single block-diagonal factor; e.g. `blockdiag_8` nblocks=8,
+`blockdiag_full` nblocks=4, `wide_blockdiag`) — the architecture dims (n_freq,
+hidden, num GRU layers, block count) are all read from the checkpoint, nothing
+is hard-coded. Configs with a dense GRU (`blockdiag_fc`) are rejected: their
+GRU has no block structure to re-express here.
+
+NOTE: this exporter is specific to the block-diagonal structure — it reads each
+projection's single `.weight` factor `[nblocks, out_blksz, in_blksz]` and makes
+the block-diagonal structure explicit as per-block MatMuls. The genuine
+two-factor Monarch (`kind="monarch"`, MonarchLinear with `w1`/`w2` and a
+permutation between them) has NO single `.weight` and needs a different NPU
+decomposition (two block-diagonal MatMul stages with a channel-permutation
+Gather/Reshape between them); that exporter does not exist yet.
 
 Why this exists
 ---------------
-The stock monarch ONNX (e.g. `cp_monarch_8/g_best.onnx`) does NOT compile for
-the STM32N6 Neural-ART: the monarch block-matmul exports as
+The stock blockdiag ONNX (e.g. `cp_blockdiag_8/g_best.onnx`) does NOT compile
+for the STM32N6 Neural-ART: the block-diagonal block-matmul exports as
 `Einsum 'bkp,kqp->bkq'` wrapped in dynamic-shape `Pad`/`Reshape` plumbing that
 the compiler's shape engine rejects (`Error in computation of shapes`).
 Lowering the `Einsum` and constant-folding the shapes is not enough — the
@@ -20,7 +28,7 @@ What works (this script)
 ------------------------
 Re-express the model in the exact op vocabulary that the dense NSNet2 baseline
 compiles with: **rank-2 `MatMul` + `Add`** (no `Einsum`, no `Pad`, no grouped
-`Conv`). Each monarch block-diagonal projection becomes per-block
+`Conv`). Each block-diagonal projection becomes per-block
 `Slice` + `MatMul` + `Concat` (the block-diagonal structure made explicit).
 The GRU update gate is rewritten `(1-z)*n + z*h == n + z*(h-n)` to drop the
 scalar-constant `Sub` that trips the Neural-ART int8 elementwise HW lowering.
@@ -37,9 +45,9 @@ does not re-fuse anything (see NSNET2_DEPLOYMENT_NOTES.md).
 
 Usage
 -----
-    python deploy/stm32n6/host/export_monarch8_npu.py \
-        --checkpoint_dir cp_monarch_full --num_utterances 200 \
-        --out_fp32 /tmp/monarch_npu_fp32.onnx --out_int8 /tmp/monarch_npu_int8.onnx
+    python deploy/stm32n6/host/export_blockdiag_npu.py \
+        --checkpoint_dir cp_blockdiag_full --num_utterances 200 \
+        --out_fp32 /tmp/blockdiag_npu_fp32.onnx --out_int8 /tmp/blockdiag_npu_int8.onnx
 
 Then generate/load/profile per ONBOARD_MEASUREMENT.md, e.g.:
     stedgeai generate -m <out_int8> --target stm32n6 \
@@ -71,7 +79,7 @@ class BlockLin(nn.Module):
     """A torch_structured BlockdiagLinear re-expressed as per-block rank-2
     MatMuls (Slice + MatMul + Concat). Numerically identical; emits only the
     ops the Neural-ART maps to HW. The input-pad / output-trim that the stock
-    monarch layer does with `F.pad` are folded away: the last input block just
+    blockdiag layer does with `F.pad` are folded away: the last input block just
     uses fewer columns, and the output is sliced to `out_features`."""
 
     def __init__(self, m):
@@ -93,8 +101,8 @@ class BlockLin(nn.Module):
         return torch.cat(ys, dim=-1)[:, :self.out_f] + self.bias
 
 
-class MonarchNPU(nn.Module):
-    """Streaming fully-monarch NSNet2 with flat per-layer states and the GRU
+class BlockdiagNPU(nn.Module):
+    """Streaming fully-blockdiag NSNet2 with flat per-layer states and the GRU
     gate rewritten to avoid the constant-Sub. Dims (n_freq, hidden, num layers)
     are read from the trained model. forward(frame_in, h0_in, ..., h{L-1}_in)
     -> (mask, h0_out, ..., h{L-1}_out)."""
@@ -102,11 +110,12 @@ class MonarchNPU(nn.Module):
     def __init__(self, st: NSNet2Streaming):
         super().__init__()
         b = st.base
-        if b.gru_kind != "monarch":
+        if b.gru_kind != "blockdiag":
             raise ValueError(
-                f"gru_kind={b.gru_kind!r}; this exporter needs a fully-monarch "
-                f"config (both linear and gru = 'monarch'). monarch_fc (dense GRU) "
-                f"is not supported.")
+                f"gru_kind={b.gru_kind!r}; this exporter needs a fully-blockdiag "
+                f"config (both linear and gru = 'blockdiag'). blockdiag_fc (dense GRU) "
+                f"is not supported. The genuine two-factor 'monarch' kind is also "
+                f"not supported by this block-diagonal exporter.")
         self.L = int(st.num_layers)
         self.H = int(st.hidden_size)
         self.n_freq = int(b.fc_in.in_features)
@@ -159,14 +168,14 @@ class _Rank2Reader(CalibrationDataReader):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint_dir", default="cp_monarch_8")
+    ap.add_argument("--checkpoint_dir", default="cp_blockdiag_8")
     ap.add_argument("--num_utterances", type=int, default=200)
-    ap.add_argument("--out_fp32", default="/tmp/monarch_npu_fp32.onnx")
-    ap.add_argument("--out_int8", default="/tmp/monarch_npu_int8.onnx")
+    ap.add_argument("--out_fp32", default="/tmp/blockdiag_npu_fp32.onnx")
+    ap.add_argument("--out_int8", default="/tmp/blockdiag_npu_int8.onnx")
     a = ap.parse_args()
 
     st = NSNet2Streaming.from_checkpoint(str(Path(a.checkpoint_dir) / "g_best")).eval()
-    model = MonarchNPU(st).eval()
+    model = BlockdiagNPU(st).eval()
     L, H, n_freq = model.L, model.H, model.n_freq
     print(f"config: n_freq={n_freq} hidden={H} num_layers={L}")
 

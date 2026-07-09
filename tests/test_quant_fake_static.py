@@ -124,7 +124,7 @@ def test_prepare_for_qat_static_activation():
 
 def test_blockdiag_weight_quant_pergroup_fallback():
     """group_size that doesn't divide the per-block axis must silently fall
-    back to per-channel rather than crash (the monarch axis=1 dim 8 case)."""
+    back to per-channel rather than crash (the blockdiag axis=1 dim 8 case)."""
     bd = pytest.importorskip("torch_structured.monarch.blockdiag_linear")
     layer = bd.BlockdiagLinear(64, 64, bias=True, nblocks=8)   # weight (8, 8, 8), axis=1 dim 8
     x = torch.randn(2, 64)

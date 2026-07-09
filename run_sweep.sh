@@ -12,19 +12,22 @@
 #
 # Override per-run by setting RUNS, EPOCHS, VAL_INTERVAL, BEST_START in env.
 # Skip / pick a subset by setting RUNS, e.g.:
-#   RUNS="baseline monarch_fc"      ./run_sweep.sh   # original first batch
-#   RUNS="$ORIGINAL_RUNS $NEW_RUNS" ./run_sweep.sh   # everything
+#   RUNS="baseline blockdiag_fc"    ./run_sweep.sh   # original first batch
+#   RUNS="$ORIGINAL_RUNS $NEW_RUNS" ./run_sweep.sh   # everything (block-diagonal)
+#   RUNS="$MONARCH_RUNS"            ./run_sweep.sh   # genuine 2-factor Monarch
 #
 # TRITON=1 reproduces the SAME nine architectures using the Triton GRU
-# kernel from gru-qat (>=0.2.0) + the structured-matrix primitives from
+# kernel from gru-qat (>=0.4.0) + the structured-matrix primitives from
 # torch-structured, via the configs/<name>_triton.json variants:
 #   TRITON=1 ./run_sweep.sh
 # These map each run's GRU onto gru_qat.GRULayer:
-#   gru      -> "triton"            dense GRU through gru_qat's per-step path
-#                                   (no persistent kernel exists for a dense
-#                                   hidden; same architecture as cuDNN nn.GRU).
-#   monarch  -> "triton_monarch"    structured hidden via the persistent Triton
-#   butterfly-> "triton_butterfly"  scan kernel; both add struct_input=true so
+#   gru      -> "triton"             dense GRU through gru_qat's per-step path
+#                                    (no persistent kernel exists for a dense
+#                                    hidden; same architecture as cuDNN nn.GRU).
+#   blockdiag-> "triton_blockdiag"   single block-diagonal hidden via the
+#   monarch  -> "triton_monarch"     persistent Triton scan kernel (gru-qat
+#   butterfly-> "triton_butterfly"   >=0.4.0 ships scan_blockdiag + a genuine
+#                                    scan_monarch); all add struct_input=true so
 #                                   the GRU *input* projection also stays
 #                                   structured (matching the HF runs that
 #                                   structured BOTH GRU projections). The input
@@ -45,8 +48,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-ORIGINAL_RUNS="baseline monarch_fc butterfly_fc monarch_full butterfly_full"
-NEW_RUNS="monarch_8 butterfly_ortho butterfly_2blocks wide_monarch"
+ORIGINAL_RUNS="baseline blockdiag_fc butterfly_fc blockdiag_full butterfly_full"
+NEW_RUNS="blockdiag_8 butterfly_ortho butterfly_2blocks wide_blockdiag"
+
+# Genuine two-factor Monarch runs (torch-structured >= 1.3.0). These are the
+# real-Monarch analogs of the blockdiag_* runs above, for a like-for-like
+# comparison of block-diagonal vs true-Monarch structure. Opt in explicitly:
+#   RUNS="$MONARCH_RUNS" ./run_sweep.sh
+MONARCH_RUNS="monarch_8 monarch_full monarch_fc wide_monarch"
 
 # Default: full 9-run sweep (5 originals + 4 follow-ups), all at n_fft=512.
 RUNS="${RUNS:-$ORIGINAL_RUNS $NEW_RUNS}"

@@ -21,7 +21,7 @@ from common.quant_fake import QSpec, apply_ptq
 
 REPO = "claroche1/sparse-nsnet2-checkpoints"
 RUNS = [
-    "wide_monarch", "baseline", "monarch_8", "monarch_full", "monarch_fc",
+    "wide_blockdiag", "baseline", "blockdiag_8", "blockdiag_full", "blockdiag_fc",
     "butterfly_2blocks", "butterfly_fc", "butterfly_ortho", "butterfly_full",
 ]
 
