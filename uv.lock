@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12' and platform_machine != 's390x' and sys_platform == 'win32'",
@@ -532,7 +532,7 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.12" },
     { name = "tensorboard", specifier = ">=2.14" },
     { name = "torch", specifier = ">=2.6,<2.8", index = "https://download.pytorch.org/whl/cu118" },
-    { name = "torch-structured", specifier = ">=1.2.4" },
+    { name = "torch-structured", specifier = ">=1.2.5" },
 ]
 
 [package.metadata.requires-dev]
@@ -2667,7 +2667,7 @@ wheels = [
 
 [[package]]
 name = "torch-structured"
-version = "1.2.4"
+version = "1.2.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
@@ -2676,9 +2676,9 @@ dependencies = [
     { name = "scipy" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ad/ac/48a8b3785dee966fa08ddedc336758d5a36d83df829625be7edc4228146b/torch_structured-1.2.4.tar.gz", hash = "sha256:3cb07ae7981eac98aba9206f4ef0768cc3bb0fa087b68fe97b1337ec4ee402ea", size = 161418, upload-time = "2026-05-31T08:11:58.97Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/80/79/dbc099c69e074999f344bd3361a7c79028ed4cbf93c84740acf24e4d7845/torch_structured-1.2.5.tar.gz", hash = "sha256:7594bf069ee5e773313576649654b06719140d35f66a74dee7234b4571e95d1e", size = 161959, upload-time = "2026-07-09T09:22:34.041Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/76/19/23dc0a7e78a69d3bf58edf9898cefebf56620a662c910a7b5c74f7c6296b/torch_structured-1.2.4-py3-none-any.whl", hash = "sha256:6976b2a0324b07bf186291fa581fe6eb29b6eca9587281940a76e1b62de0126d", size = 116335, upload-time = "2026-05-31T08:11:57.393Z" },
+    { url = "https://files.pythonhosted.org/packages/06/ef/ed35d80513814b139499cc3f4260599a4df9234d824f61f9aeb27f6bf693/torch_structured-1.2.5-py3-none-any.whl", hash = "sha256:c77f4ec5de763044ac73131e4532aa10fbe8217c62952a7e5e08b90e6130810d", size = 116737, upload-time = "2026-07-09T09:22:32.36Z" },
 ]
 
 [[package]]
@@ -2737,10 +2737,6 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "filelock", marker = "platform_machine == 's390x' or sys_platform == 'emscripten' or sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/86/17/d9a5cf4fcf46291856d1e90762e36cbabd2a56c7265da0d1d9508c8e3943/triton-3.1.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0f34f6e7885d1bf0eaaf7ba875a5f0ce6f3c13ba98f9503651c1e6dc6757ed5c", size = 209506424, upload-time = "2024-10-14T16:05:42.337Z" },
-    { url = "https://files.pythonhosted.org/packages/78/eb/65f5ba83c2a123f6498a3097746607e5b2f16add29e36765305e4ac7fdd8/triton-3.1.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c8182f42fd8080a7d39d666814fa36c5e30cc00ea7eeeb1a2983dbb4c99a0fdc", size = 209551444, upload-time = "2024-10-14T16:05:53.433Z" },
 ]
 
 [[package]]

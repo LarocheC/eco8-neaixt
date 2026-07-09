@@ -37,13 +37,13 @@ import torch.nn.functional as F
 
 from nsnet2.layers import Butterfly, HAVE_BUTTERFLY
 
-# The default "auto" backend resolves to a Triton butterfly whose *backward*
-# kernel fails to compile with triton 3.3.1 (the forward is fine). The pure-
-# PyTorch backend is mathematically identical and works on CPU and CUDA, so we
-# force it here — the single import chokepoint for every consumer of this
-# module (training, export, tests). An explicit TORCH_STRUCTURED_BACKEND env
-# override is respected (e.g. =cuda once a working native kernel is built).
-if HAVE_BUTTERFLY and "TORCH_STRUCTURED_BACKEND" not in os.environ:
+# Backend: torch_structured>=1.2.5 fixes the Triton butterfly backward kernel,
+# so we use the fast Triton path on CUDA. The library's dispatch delegator
+# auto-routes CPU tensors to the pure-PyTorch kernel regardless of backend, so
+# CPU-only runs (e.g. the test suite) still work. Set TORCH_STRUCTURED_BACKEND=
+# torch to force the pure-PyTorch path everywhere (e.g. debugging / older wheels
+# with the Triton backward bug).
+if HAVE_BUTTERFLY and os.environ.get("TORCH_STRUCTURED_BACKEND", "").lower() == "torch":
     import torch_structured as _ts
     _ts.set_backend("torch")
 
