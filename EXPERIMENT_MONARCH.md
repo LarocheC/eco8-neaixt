@@ -45,6 +45,21 @@ Config files: `configs/{monarch_8,monarch_full,monarch_fc,wide_monarch}.json`
 / `tr_monarch_full.json` / `triton_monarch4.json` / `triton_monarch8.json` for
 the bench/QAT-seed configs).
 
+### Fused vs per-gate Monarch (param parity)
+
+A GRU projection maps `in→3H` (3 gates). MonarchLinear's first factor `w1`
+`∝ in_blksz²` is **independent of output width**; `w2 ∝ out`. So a **fused**
+`Monarch(in→3H)` shares one `w1`, whereas splitting into three per-gate
+`Monarch(in→H)` **triplicates `w1`** (+~29% params). (Block-diagonal has no
+`w1`, so fused == per-gate, +0.0% — which is why only Monarch is affected.)
+
+The **fused** layout is the correct, param-efficient Monarch and the honest
+analog of the fused block-diagonal runs. It requires **gru-qat ≥ 0.5.0**
+(`StructureConfig.monarch_fused=True`, the default); the native `StructuredGRU`
+path is fused by construction. Verified: `monarch_8` native = `monarch_8_triton`
+= **0.553M** (parity), and the fused Triton `scan_monarch` matches the PyTorch
+reference (fwd ~4e-4, bwd ~1e-3, tf32).
+
 ### Fairness note (two ways to compare)
 
 A true Monarch at `nblocks=k` has ~2× the params of block-diagonal at the same
