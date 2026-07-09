@@ -23,11 +23,23 @@ collapses leading dims to ``-1``), so eager and exported forward are identical.
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from nsnet2.layers import Butterfly, HAVE_BUTTERFLY
+
+# The default "auto" backend resolves to a Triton butterfly whose *backward*
+# kernel fails to compile with triton 3.3.1 (the forward is fine). The pure-
+# PyTorch backend is mathematically identical and works on CPU and CUDA, so we
+# force it here — the single import chokepoint for every consumer of this
+# module (training, export, tests). An explicit TORCH_STRUCTURED_BACKEND env
+# override is respected (e.g. =cuda once a working native kernel is built).
+if HAVE_BUTTERFLY and "TORCH_STRUCTURED_BACKEND" not in os.environ:
+    import torch_structured as _ts
+    _ts.set_backend("torch")
 
 
 def _identity_frame_kernel(win: int) -> torch.Tensor:
