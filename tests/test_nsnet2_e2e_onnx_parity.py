@@ -23,16 +23,16 @@ import torch
 
 from common.env import AttrDict
 from nsnet2.model_e2e import NSNet2E2E
-from nsnet2.export_e2e_onnx import _E2EExport, export_e2e_fp32, _valid_len
+from nsnet2.export_e2e_onnx import _E2EExportReal, export_e2e_fp32, _valid_len
 
 
 @pytest.fixture
 def cfg():
     return AttrDict({
-        "win_size": 512, "hop_size": 256, "n_coeffs": 512,
+        "win_size": 512, "hop_size": 256,
         "hidden_dim": 96, "fc_hidden_dim": 96, "num_gru_layers": 2,
-        "transform": {"learnable_window": True, "window_init": "sqrt_hann",
-                      "nblocks": 1, "init": "ortho"},
+        "compress_factor": 0.3,
+        "transform": {"learnable_window": True, "window_init": "sqrt_hann"},
         "seed": 0,
     })
 
@@ -77,12 +77,25 @@ def test_export_smoke(onnx_path):
     assert {"noisy_wav", "enhanced_wav"} <= io
 
 
+def test_real_decomp_matches_complex_model(model):
+    """The real-decomposed export wrapper must match the eager complex-butterfly
+    model (this is what makes the ONNX graph faithful)."""
+    torch.manual_seed(3)
+    L = _valid_len(model.win, model.hop, 40)
+    wav = torch.randn(1, L)
+    with torch.no_grad():
+        ref = model(wav)                      # eager complex path (+ internal pad/crop)
+        got = _E2EExportReal(model)(wav)       # real-decomposed, frame-aligned L
+    err = (ref[..., :got.shape[-1]] - got).abs().max().item()
+    assert err < 1e-4, f"real-decomp vs complex max_abs_err={err:.3e}"
+
+
 def test_parity_pt_vs_onnx(model, onnx_path):
     torch.manual_seed(1)
     L = _valid_len(model.win, model.hop, 64)
     wav = torch.randn(1, L)
     with torch.no_grad():
-        ref = _E2EExport(model)(wav).numpy()
+        ref = _E2EExportReal(model)(wav).numpy()
     sess = _make_session(onnx_path)
     got = sess.run(["enhanced_wav"], {"noisy_wav": wav.numpy()})[0]
     err = np.max(np.abs(ref - got))
@@ -95,7 +108,7 @@ def test_dynamic_time_axis(model, onnx_path):
     L = _valid_len(model.win, model.hop, 100)
     wav = torch.randn(1, L)
     with torch.no_grad():
-        ref = _E2EExport(model)(wav).numpy()
+        ref = _E2EExportReal(model)(wav).numpy()
     sess = _make_session(onnx_path)
     got = sess.run(["enhanced_wav"], {"noisy_wav": wav.numpy()})[0]
     assert got.shape == (1, L)

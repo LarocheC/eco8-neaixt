@@ -35,13 +35,10 @@ class NSNet2E2E(nn.Module):
         tcfg = getattr(h, "transform", None) or {}
         learnable_window = tcfg.get("learnable_window", True)
         window_init = tcfg.get("window_init", "sqrt_hann")
-        nblocks = tcfg.get("nblocks", 1)
-        init = tcfg.get("init", "ortho")
 
         self.transform = ButterflyTransform(
-            self.win, self.hop,
+            self.win, self.hop, compress_factor=getattr(h, "compress_factor", 0.3),
             learnable_window=learnable_window, window_init=window_init,
-            nblocks=nblocks, init=init,
         )
         # Reuse the exact NSNet2 core; feed it n_coeffs "frequency" bins.
         self.core = NSNet2(_CoreDims(h, self.n_coeffs))
@@ -61,17 +58,11 @@ class NSNet2E2E(nn.Module):
 
     def forward(self, wav: torch.Tensor) -> torch.Tensor:
         wav_p, L = self._pad_to_valid(wav)
-        w = self.transform.analyze(wav_p)        # (B, T, N)
-        mask = self.core.predict_mask(w)         # (B, T, N) in [0, 1]
-        wav_hat = self.transform.synthesize(w * mask)   # (B, L_p)
+        mag, X = self.transform.analyze(wav_p)       # compressed mag (B,T,N), complex X
+        mask = self.core.predict_mask(mag)           # (B, T, N) in [0, 1]
+        X_masked = X * self.transform.gain_from_mask(mask)   # real gain, phase preserved
+        wav_hat = self.transform.synthesize(X_masked)
         return wav_hat[..., :L]
-
-    def ortho_penalty(self) -> torch.Tensor:
-        """Butterfly orthogonality penalty on the shared twiddle — keeps the
-        transform orthogonal so synthesis (transpose) stays the exact inverse
-        of analysis. Reuses ``nsnet2.layers.butterfly_ortho_penalty``."""
-        from nsnet2.layers import butterfly_ortho_penalty
-        return butterfly_ortho_penalty(self.transform.butterfly.twiddle)
 
 
 class _CoreDims:

@@ -15,21 +15,18 @@
     "n_coeffs": 512,
     "transform": {
         "learnable_window": true,
-        "window_init": "sqrt_hann",
-        "nblocks": 1,
-        "init": "ortho"
+        "window_init": "sqrt_hann"
     },
     "loss": {
-        "sisnr": 1.0,
-        "time": 0.0,
-        "mrstft": 1.0,
-        "metric": 0.05
+        "mrstft": 15.0,
+        "time": 0.2,
+        "metric": 0.05,
+        "sisnr": 0.0
     },
     "mrstft_resolutions": [[512, 256, 512], [1024, 256, 1024], [256, 128, 256]],
     "disc_n_fft": 512,
     "disc_hop_size": 256,
     "disc_win_size": 512,
-    "butterfly_ortho_lambda": 0.01,
     "sampling_rate": 16000,
     "segment_size": 32000,
     "num_workers": 8,

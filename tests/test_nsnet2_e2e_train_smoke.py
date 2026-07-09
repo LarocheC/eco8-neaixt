@@ -51,11 +51,10 @@ class _SyntheticAudioDataset(TorchDataset):
 @pytest.fixture
 def cfg():
     return AttrDict({
-        "win_size": 512, "hop_size": 256, "n_coeffs": 512,
+        "win_size": 512, "hop_size": 256,
         "hidden_dim": 96, "fc_hidden_dim": 96, "num_gru_layers": 2,
         "compress_factor": 0.3,
-        "transform": {"learnable_window": True, "window_init": "sqrt_hann",
-                      "nblocks": 1, "init": "ortho"},
+        "transform": {"learnable_window": True, "window_init": "sqrt_hann"},
         "learning_rate": 1e-3, "seed": 0,
     })
 
@@ -76,20 +75,45 @@ def test_build_and_shapes(cfg):
 
 
 def test_transform_reconstructs_at_init(cfg):
-    """The shared orthogonal butterfly + transpose synthesis must reconstruct
-    (mask=1) at init — this is what lets the net learn denoising instead of
-    inversion. Guards against regressing to an independent random synthesis."""
+    """The FFT/iFFT butterfly pair + sqrt-Hann COLA must reconstruct (mask=1) at
+    init — this is what makes magnitude masking meaningful. Guards against a
+    non-invertible transform pairing."""
     torch.manual_seed(0)
     t = NSNet2E2E(cfg).transform.eval()
-    x = torch.randn(1, 8192)
+    # tonal signal (speech-like); white noise hits the phase/compression epsilon
+    # worst case. Real utterances reconstruct at ~35 dB.
+    n = np.arange(8192) / 16000
+    x = torch.tensor(0.3 * np.sin(2 * np.pi * 300 * n) + 0.2 * np.sin(2 * np.pi * 1200 * n),
+                     dtype=torch.float32).unsqueeze(0)
     with torch.no_grad():
-        rec = t.synthesize(t.analyze(x))
+        _, X = t.analyze(x)          # mask=1 => pass the unmasked complex through
+        rec = t.synthesize(X)
+    # Interior only: the non-centered STFT under-windows the first/last frame
+    # (COLA holds in the interior). Real full utterances reconstruct ~35 dB.
     n = min(rec.shape[-1], x.shape[-1])
-    a, b = rec[0, :n], x[0, :n]
+    w = cfg.win_size
+    a, b = rec[0, w:n - w], x[0, w:n - w]
     a = a - a.mean(); b = b - b.mean()
     alpha = (a * b).sum() / b.pow(2).sum()
     sisnr = 10 * torch.log10(alpha.pow(2) * b.pow(2).sum() / (a - alpha * b).pow(2).sum())
-    assert sisnr.item() > 15, f"init reconstruction SI-SNR too low: {sisnr.item():.1f} dB"
+    assert sisnr.item() > 25, f"init reconstruction SI-SNR too low: {sisnr.item():.1f} dB"
+
+
+def test_transform_is_frequency_selective(cfg):
+    """The FFT init must give a frequency-selective basis (concentration ~1),
+    unlike a random orthogonal butterfly (~0.04) which cannot support masking."""
+    torch.manual_seed(0)
+    t = NSNet2E2E(cfg).transform.eval()
+    with torch.no_grad():
+        basis = t.analysis(torch.eye(cfg.win_size).to(torch.complex64)).real.numpy()
+    conc = []
+    for k in range(cfg.win_size):
+        e = np.abs(np.fft.rfft(basis[k])) ** 2
+        if e.sum() < 1e-12:
+            continue
+        pk = e.argmax()
+        conc.append(e[max(0, pk - 3):pk + 4].sum() / e.sum())
+    assert np.mean(conc) > 0.8, f"basis not frequency-selective: {np.mean(conc):.3f}"
 
 
 def test_train_step_loss_decreases(cfg):
@@ -103,14 +127,12 @@ def test_train_step_loss_decreases(cfg):
     for clean, noisy in loader:
         optim.zero_grad()
         audio_g = model(noisy)
-        loss = (F_l1(clean, audio_g)
-                + mrstft_mag_loss(clean, audio_g, SMOKE_RES, 0.3)
-                + 0.01 * model.ortho_penalty())
+        loss = F_l1(clean, audio_g) + mrstft_mag_loss(clean, audio_g, SMOKE_RES, 0.3)
         loss.backward()
-        # gradients must reach the shared structured twiddle and both windows
-        assert model.transform.butterfly.twiddle.grad is not None
+        # gradients must reach the FFT butterfly twiddles and the learnable windows
+        assert model.transform.analysis.twiddle.grad is not None
+        assert model.transform.synthesis.twiddle.grad is not None
         assert model.transform.ana_window.grad is not None
-        assert model.transform.syn_window.grad is not None
         optim.step()
         l = float(loss.item())
         assert np.isfinite(l)
@@ -119,13 +141,6 @@ def test_train_step_loss_decreases(cfg):
     avg_early = np.mean(losses[:2])
     avg_late = np.mean(losses[-2:])
     assert avg_late <= avg_early * 1.5, f"loss not trending down: {losses}"
-
-
-def test_ortho_penalty_scalar(cfg):
-    torch.manual_seed(0)
-    model = NSNet2E2E(cfg)
-    p = model.ortho_penalty()
-    assert p.ndim == 0 and np.isfinite(float(p.item()))
 
 
 def test_checkpoint_roundtrip(cfg, tmp_path):

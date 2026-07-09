@@ -76,11 +76,13 @@ def train(rank, a, h):
 
     resolutions = h.get("mrstft_resolutions", DEFAULT_MRSTFT)
     loss_w = h.get("loss", {})
-    w_sisnr = loss_w.get("sisnr", 1.0)
-    w_time = loss_w.get("time", 0.0)
-    w_mrstft = loss_w.get("mrstft", 1.0)
+    # MR-STFT (spectral) is the dominant, PESQ-correlated objective; SI-SNR is a
+    # small phase/reconstruction anchor. (The first run made SI-SNR dominant,
+    # which improved waveform SNR but degraded PESQ.)
+    w_mrstft = loss_w.get("mrstft", 15.0)
+    w_time = loss_w.get("time", 0.2)
     w_metric = loss_w.get("metric", 0.05)
-    ortho_lambda = h.get("butterfly_ortho_lambda", 0.0)
+    w_sisnr = loss_w.get("sisnr", 0.0)
     # Fixed STFT (loss-side only) that feeds the MetricGAN discriminator's magnitudes.
     d_nfft = h.get("disc_n_fft", 512)
     d_hop = h.get("disc_hop_size", 256)
@@ -218,17 +220,10 @@ def train(rank, a, h):
             metric_g = discriminator(clean_mag, mag_g_hat)
             loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
 
-            loss_gen_all = (loss_sisnr * w_sisnr
+            loss_gen_all = (loss_mrstft * w_mrstft
                             + loss_time * w_time
-                            + loss_mrstft * w_mrstft
-                            + loss_metric * w_metric)
-
-            # Butterfly orthogonality penalty (analysis + synthesis twiddles).
-            ortho_loss = None
-            if ortho_lambda > 0:
-                gen_inner = generator.module if h.num_gpus > 1 else generator
-                ortho_loss = gen_inner.ortho_penalty()
-                loss_gen_all = loss_gen_all + ortho_lambda * ortho_loss
+                            + loss_metric * w_metric
+                            + loss_sisnr * w_sisnr)
 
             loss_gen_all.backward()
             optim_g.step()
@@ -260,8 +255,6 @@ def train(rank, a, h):
                     sw.add_scalar("Training/Metric Loss", metric_error, steps)
                     sw.add_scalar("Training/SI-SNR dB", sisnr_db, steps)
                     sw.add_scalar("Training/MR-STFT Loss", mrstft_error, steps)
-                    if ortho_loss is not None:
-                        sw.add_scalar("Training/Butterfly Ortho Penalty", ortho_loss.item(), steps)
 
                 if steps % a.validation_interval == 0 and steps != 0:
                     generator.eval()

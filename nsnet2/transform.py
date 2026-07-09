@@ -1,30 +1,24 @@
-"""Learned butterfly analysis / synthesis transform (STFT replacement).
+"""Learned butterfly STFT (FFT-warm-started) replacing torch.stft / torch.istft.
 
-Drop-in replacement for the fixed ``torch.stft`` / ``torch.istft`` front-/
-back-end in the NSNet2 pipeline. Instead of a DFT the time->feature map is a
-learnable ``torch_structured.Butterfly`` — the same O(N log N) factorization the
-FFT itself uses (Cooley-Tukey), so it *can* represent an STFT-like transform but
-is free to learn a different basis end-to-end. Crucially, unlike ``torch.stft``,
-a butterfly lowers to plain structured MatMuls and therefore lives *inside* the
-exported ONNX graph, enabling a single waveform->waveform enhancement model.
+The analysis/synthesis transforms are a **complex butterfly pair initialised to
+the exact FFT / iFFT** (`fft_no_br` / `ifft_no_br` — the butterfly IS the
+Cooley-Tukey factorisation of the DFT). So at init the front-/back-end is a real
+STFT (frequency-selective basis, magnitude/phase interface, perfect
+reconstruction), and training is free to let it deviate. Unlike `torch.stft`, a
+butterfly lowers to (real-decomposable) structured MatMuls, so it can live
+inside the exported ONNX graph — a single waveform->waveform enhancer.
 
-Design:
-  * ONE shared butterfly. Analysis runs it forward; synthesis runs it
-    TRANSPOSED (``transpose=True``) — the exact inverse when the twiddles are
-    orthogonal. This mirrors how the real STFT/iSTFT share one transform
-    (DFT / iDFT), gives near-perfect reconstruction by construction (~+29 dB at
-    init with ``init='ortho'`` vs ~-38 dB for an independent random synthesis),
-    and halves the transform parameters. The orthogonality penalty
-    (``nsnet2.layers.butterfly_ortho_penalty``, applied by the trainer) keeps
-    ``transpose == inverse`` valid as the transform learns.
-  * framing / overlap-add are fixed identity Conv1d / ConvTranspose1d (kept in
-    the graph, ONNX-native, non-trainable),
-  * separate learnable analysis / synthesis windows (init = sqrt-Hann so the
-    windowed overlap-add starts near COLA at 50% hop).
+Why not a random real butterfly (the first attempt): a random orthogonal basis
+stays broadband (spectral concentration ~0.04), and elementwise masking on a
+broadband basis cannot separate speech from noise — it improves SI-SNR by
+removing energy but smears distortion across the spectrum (PESQ drops). A
+frequency-selective basis is what makes magnitude masking work; the FFT init
+provides it from step 0.
 
-The butterfly is applied on a 2D ``(B*T, N)`` reshape (single ``-1`` collapse so
-the traced graph keeps T dynamic) — matching the ``_butterfly_export_forward``
-contract in ``nsnet2/export_onnx.py``, so eager and exported forward agree.
+Config note: `fft_no_br(increasing_stride=True)` + `ifft_no_br(increasing_stride
+=False)` is the pair that reconstructs exactly (bit-reversal cancels). Windows
+are sqrt-Hann on both sides so their product is Hann → COLA at 50% hop → the
+windowed overlap-add reconstructs.
 """
 
 from __future__ import annotations
@@ -38,11 +32,9 @@ import torch.nn.functional as F
 from nsnet2.layers import Butterfly, HAVE_BUTTERFLY
 
 # Backend: torch_structured>=1.2.5 fixes the Triton butterfly backward kernel,
-# so we use the fast Triton path on CUDA. The library's dispatch delegator
-# auto-routes CPU tensors to the pure-PyTorch kernel regardless of backend, so
-# CPU-only runs (e.g. the test suite) still work. Set TORCH_STRUCTURED_BACKEND=
-# torch to force the pure-PyTorch path everywhere (e.g. debugging / older wheels
-# with the Triton backward bug).
+# so CUDA uses the fast Triton path; the dispatch delegator auto-routes CPU
+# tensors to pure-PyTorch (CPU test suite still works). TORCH_STRUCTURED_BACKEND=
+# torch forces pure-PyTorch everywhere.
 if HAVE_BUTTERFLY and os.environ.get("TORCH_STRUCTURED_BACKEND", "").lower() == "torch":
     import torch_structured as _ts
     _ts.set_backend("torch")
@@ -65,7 +57,6 @@ def _init_window(win: int, kind: str) -> torch.Tensor:
 
 
 def _register_window(module: nn.Module, name: str, win: int, learnable: bool, kind: str) -> None:
-    """Register ``module.<name>`` as a trainable Parameter or a fixed buffer."""
     w = _init_window(win, kind)
     if learnable:
         setattr(module, name, nn.Parameter(w))
@@ -74,41 +65,49 @@ def _register_window(module: nn.Module, name: str, win: int, learnable: bool, ki
 
 
 class ButterflyTransform(nn.Module):
-    """Shared learned butterfly used forward for analysis and transposed for
-    synthesis.
+    """FFT-initialised learnable butterfly STFT.
 
-    ``analyze``:  waveform ``(B, L)`` -> coefficients ``(B, T, N)`` with
-    ``N == win`` and ``T = (L - win) // hop + 1`` (caller ensures ``L`` is
-    frame-aligned).
-    ``synthesize``: coefficients ``(B, T, N)`` -> waveform ``(B, L)`` with
-    ``L = (T - 1) * hop + win``.
+    ``analyze(wav) -> (mag, X)`` returns the power-law-compressed magnitude
+    ``(B, T, N)`` (the network's input) and the complex coefficients ``X``
+    (``N == win``). Magnitude masking is a real gain on ``X`` (phase preserved),
+    so ``synthesize(X_masked) -> wav`` takes the already-masked complex — no
+    atan2/cos/sin, which keeps the ONNX export a pure real-valued graph.
     """
 
-    def __init__(self, win: int = 512, hop: int = 256,
-                 learnable_window: bool = True, window_init: str = "sqrt_hann",
-                 nblocks: int = 1, init: str = "ortho"):
+    def __init__(self, win: int = 512, hop: int = 256, compress_factor: float = 0.3,
+                 learnable_window: bool = True, window_init: str = "sqrt_hann"):
         super().__init__()
         if not HAVE_BUTTERFLY:
             raise ImportError("torch_structured.Butterfly unavailable; rebuild torch-butterfly.")
         self.win = win
         self.hop = hop
         self.n_coeffs = win
+        self.compress_factor = compress_factor
         self.register_buffer("frame_kernel", _identity_frame_kernel(win))
         self.register_buffer("oa_kernel", _identity_frame_kernel(win))
         _register_window(self, "ana_window", win, learnable_window, window_init)
         _register_window(self, "syn_window", win, learnable_window, window_init)
-        self.butterfly = Butterfly(in_size=win, out_size=win, bias=False,
-                                   nblocks=nblocks, init=init)
+        # FFT / iFFT butterfly pair. This stride combination reconstructs exactly.
+        self.analysis = Butterfly(win, win, bias=False, complex=True,
+                                  init="fft_no_br", increasing_stride=True)
+        self.synthesis = Butterfly(win, win, bias=False, complex=True,
+                                   init="ifft_no_br", increasing_stride=False)
 
-    def analyze(self, wav: torch.Tensor) -> torch.Tensor:
+    def analyze(self, wav: torch.Tensor):
         frames = F.conv1d(wav.unsqueeze(1), self.frame_kernel, stride=self.hop)
-        frames = frames.transpose(1, 2) * self.ana_window        # (B, T, win)
-        w = self.butterfly(frames.reshape(-1, self.win))         # (B*T, N)
-        return w.reshape(frames.shape[0], -1, self.n_coeffs)     # (B, T, N)
+        frames = frames.transpose(1, 2) * self.ana_window       # (B, T, win)
+        X = self.analysis(frames.reshape(-1, self.win).to(torch.complex64))  # (B*T, N) complex
+        X = X.reshape(frames.shape[0], -1, self.n_coeffs)       # (B, T, N)
+        mag = (X.real.pow(2) + X.imag.pow(2) + 1e-9).sqrt().pow(self.compress_factor)
+        return mag, X
 
-    def synthesize(self, w: torch.Tensor) -> torch.Tensor:
-        # transpose=True runs the shared butterfly as its (orthogonal) inverse.
-        frames = self.butterfly(w.reshape(-1, self.n_coeffs), transpose=True)
-        frames = frames.reshape(w.shape[0], -1, self.win) * self.syn_window
+    def gain_from_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Compressed-domain mask [0,1] -> linear-domain gain applied to X.
+        new_mag^c = mag^c * mask  =>  linear gain = mask^(1/compress)."""
+        return mask.pow(1.0 / self.compress_factor)
+
+    def synthesize(self, X: torch.Tensor) -> torch.Tensor:
+        frames = self.synthesis(X.reshape(-1, self.n_coeffs)).real      # (B*T, win)
+        frames = frames.reshape(X.shape[0], -1, self.win) * self.syn_window
         wav = F.conv_transpose1d(frames.transpose(1, 2), self.oa_kernel, stride=self.hop)
-        return wav.squeeze(1)                                    # (B, L)
+        return wav.squeeze(1)                                   # (B, L)
