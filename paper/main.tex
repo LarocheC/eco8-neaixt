@@ -1,0 +1,366 @@
+% ICASSP paper — NPU-friendly LiSenNet.
+% Template: ICASSP author kit (spconf.sty + IEEEbib.bst, vendored).
+% NOTE: check the target year's anonymity policy before submission; the author
+% block below is NOT anonymized.
+\documentclass{article}
+\usepackage{spconf,amsmath,graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{url}
+
+% Red bold TODO marker for everything still to be filled in.
+\newcommand{\todo}[1]{\textbf{\textcolor{red}{[TODO: #1]}}}
+
+\graphicspath{{figures/}}
+
+% ---------------------------------------------------------------------------
+% Title candidates (pick one):
+%  (a) the one below;
+%  (b) "From GRUs to the NPU: A Deployment-Hardened LiSenNet for
+%       Microcontroller Speech Enhancement";
+%  (c) "LiSenNet on a Milliwatt NPU: Hardware-Aware Redesign, Quantization,
+%       and Frame-Level Streaming".
+% ---------------------------------------------------------------------------
+\title{Rethinking LiSenNet for Microcontroller NPUs:\\
+       Hardware-Aware Redesign, Quantization, and On-Device Streaming}
+
+\name{Cl\'ement Laroche \todo{co-authors}\thanks{\todo{Acknowledge the EU
+NeAIxt project / funding as appropriate. Check the ICASSP anonymity policy of
+the target year before adding names.}}}
+\address{\todo{Affiliation(s)}}
+
+\begin{document}
+\ninept
+\maketitle
+
+% ===========================================================================
+\begin{abstract}
+Lightweight speech-enhancement models are designed for real-time CPU
+inference, but the emerging class of microcontroller NPUs accelerates only a
+narrow, integer-quantized operator vocabulary --- typically excluding the
+recurrent layers and normalizations these models rely on. We take LiSenNet, a
+37\,k-parameter sub-band dual-path enhancer, as a case study and redesign it
+for the STM32N6 Neural-ART accelerator. We (i) replace the dual-path GRU
+bottleneck with an equally accurate dual-path \emph{convolutional} one,
+(ii) harden every primitive for int8 hardware (BatchNorm folding, bounded
+ReLU6 activations, transposed-convolution upsampling), and (iii) show that
+post-training-quantization loss concentrates in the model's \emph{decoder},
+which activation clipping and a two-recipe quantization scheme largely
+recover. The result matches the GRU reference in FP32 (PESQ 3.084 vs.\ 3.006
+on VoiceBank-DEMAND) and surpasses it after quantization (3.052 hybrid /
+3.014 all-int8 vs.\ 2.930). On silicon, the model streams frame-by-frame with
+16\,ms algorithmic latency at 2.79\,ms/frame (real-time factor 0.17)
+\todo{update with relu6-deep on-board numbers}, making it the
+highest-quality real-time enhancer measured on this NPU class.
+\end{abstract}
+
+\begin{keywords}
+speech enhancement, edge AI, neural processing unit, quantization, real-time
+streaming
+\end{keywords}
+
+% ===========================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Single-channel speech enhancement (SE) has reached remarkable quality at tiny
+parameter budgets: models such as RNNoise~\cite{valin2018rnnoise},
+NSNet2~\cite{braun2020nsnet2}, DeepFilterNet~\cite{schroter2022deepfilternet}
+and LiSenNet~\cite{yan2024lisennet} run in real time on a single CPU thread.
+Meanwhile, microcontrollers are acquiring dedicated neural accelerators ---
+e.g.\ the Arm Ethos-U family and ST's Neural-ART --- that promise an order of
+magnitude better energy per inference than the host core. These NPUs,
+however, accelerate a narrow operator vocabulary: int8 convolutions and
+matrix multiplies with a fixed set of layout, kernel and normalization
+constraints. The recurrent layers, multi-axis LayerNorms, and parametric
+activations that lightweight SE models favor either fail to compile or fall
+back to the microcontroller core, forfeiting the accelerator.
+
+This paper asks what it actually takes to move a state-of-the-art
+lightweight enhancer onto such an accelerator \emph{without giving up
+quality}. Using LiSenNet~\cite{yan2024lisennet} and the STM32N6570-DK
+(Neural-ART NPU @ 1\,GHz + Cortex-M55 @ 800\,MHz) as the concrete pair, we
+contribute:
+
+\begin{itemize}
+\item a \textbf{dual-path convolutional bottleneck} that replaces LiSenNet's
+  dual-path GRU with NPU-mappable primitives (depthwise-separable
+  frequency and causal dilated time convolutions) at equal FP32 quality;
+\item a \textbf{deployment-hardening recipe} --- per-channel BatchNorm that
+  folds into convolutions, bounded ReLU6 activations, and 4-D transposed
+  convolution upsampling --- which we show is also what makes the model
+  \emph{quantization-robust} (post-training int8 loss shrinks from $-0.115$
+  to $-0.016$ PESQ);
+\item a \textbf{quantization study} that localizes the residual int8 loss of
+  long-receptive-field variants to the decoder's linear upsampling path via a
+  seeded selective-quantization scan, and recovers it with activation
+  clipping and an optional hybrid recipe that keeps the decoder in float
+  (PESQ 3.052 real-time, $+0.122$ over the GRU reference);
+\item \textbf{on-device measurements} of two deployment graphs --- a
+  stateless windowed graph for latency-tolerant use and a 17-state streaming
+  graph with true 16\,ms hop latency --- including compiler epoch mappings,
+  memory placement, and a per-epoch latency breakdown.
+\end{itemize}
+
+% ===========================================================================
+\section{LiSenNet and the NPU gap}
+\label{sec:background}
+
+\textbf{LiSenNet}~\cite{yan2024lisennet} is a $\sim$37\,k-parameter
+magnitude-masking enhancer. A three-channel input
+$[\,|X|^{0.3},\, \Delta_f\varphi/\pi,\, \mathrm{IFD}/\pi\,]$ (power-compressed
+magnitude, group delay, and instantaneous-frequency deviation) feeds a
+sub-band U-Net encoder, a dual-path recurrent (DPR) bottleneck
+--- a bidirectional GRU over frequency and a unidirectional GRU over time ---
+and a mask decoder producing two additive multiplicative gains on the noisy
+magnitude. Phase is not modeled: the enhanced magnitude is combined with the
+noisy phase, optionally refined by two Griffin-Lim
+iterations~\cite{griffin1984gl} offline. Trained with the CMGAN
+recipe~\cite{cao2022cmgan} (complex + magnitude + MetricGAN~\cite{fu2021metricganplus}
+losses) on VoiceBank-DEMAND~\cite{valentini2016vbd}, our reproduction reaches
+wideband PESQ~\cite{itu2007pesq} 3.006 (paper: $\sim$3.07).
+
+\textbf{The target NPU.} Neural-ART is an int8-only convolution/matmul
+engine. The compiler partitions the graph into \emph{epochs} that run on the
+accelerator (HW), on the Cortex-M55 (SW), or cooperatively (hybrid); every
+operator outside the supported vocabulary silently becomes M55 software.
+Stock LiSenNet does not even compile: the DPR's two-axis LayerNorm has a 2-D
+affine the hardware's per-channel normalization cannot express, and the
+frequency-axis GRU is unimportable in both its fused and unrolled forms
+(a 32-step bidirectional recurrence explodes to $\sim$850 slices). Beyond
+these hard blockers, three further primitives break int8 codegen:
+per-channel PReLU/Mish activations, the sub-pixel upsampler (its
+view--permute--view emits rank-5 tensors, which segfault the compiler), and
+--- for the streaming export --- a \texttt{Pad} operator form discussed in
+Sec.~\ref{ssec:deploy}.\footnote{The last is a pure toolchain defect:
+\texttt{F.pad} exports \texttt{Pad(data, pads, "")} with a present-but-empty
+optional input, which crashes the Neural-ART backend inside multi-branch
+subgraphs. We strip the empty slot at export time; the transform is
+bit-exact.}
+
+% ===========================================================================
+\section{NPU-friendly redesign}
+\label{sec:redesign}
+
+\begin{figure}[t]
+  \centering
+  % \includegraphics[width=\columnwidth]{architecture}
+  \fbox{\parbox[c][11em][c]{0.92\columnwidth}{\centering
+  \todo{Fig.~1: block diagram --- sub-band encoder / dual-path conv
+  bottleneck (intra-frequency depthwise conv $\;\|\;$ causal dilated time
+  stack) / mask decoder, annotated with the four hardening swaps and the
+  FIFO state tensors of the streaming export.}}}
+  \caption{NPU-hardened LiSenNet. \todo{final caption}}
+  \label{fig:arch}
+\end{figure}
+
+\subsection{Dual-path convolutions replace the DPR}
+\label{ssec:dpc}
+
+We keep LiSenNet's macro-structure --- sub-band encoder
+($257\!\to\!128\!\to\!64\!\to\!32$ frequency bins; each stage splits the band
+into a low quarter processed at stride 1 and a high three-quarters
+downsampled by 3), U-Net skip connections, and the two-gain mask head --- and
+replace only the bottleneck. The \emph{intra-frequency} GRU becomes a
+symmetric depthwise convolution over frequency (kernel 11) followed by a
+pointwise mix: frequency is fully available at each frame, so bidirectional
+context needs no recurrence. The \emph{inter-time} GRU becomes a stack of
+causal dilated depthwise convolutions (kernel 3, dilations $1,2,4,8$, with a
+convolutional GLU~\cite{luo2019convtasnet} after each block), giving a
+bounded receptive field of 68 frames ($\approx$1.1\,s) in the base
+configuration and 196 frames ($\approx$3.1\,s) in the deeper one (3 blocks,
+dilations up to 16). The exported graph contains no GRU and no
+LayerNormalization node.
+
+\subsection{Hardening the primitives}
+\label{ssec:hardening}
+
+Three further swaps make every operator HW-mappable \emph{and}, as
+Sec.~\ref{ssec:quant} shows, quantization-friendly:
+(1)~\textbf{norm}: the per-frame two-axis LayerNorm becomes per-channel
+BatchNorm, which folds into the preceding convolution at export;
+(2)~\textbf{activation}: PReLU/Mish become ReLU6 --- a bounded, NPU-native
+clip that also caps every activation's dynamic range for the quantizer;
+(3)~\textbf{upsampling}: the sub-pixel shuffle becomes a plain
+$1\times3$/stride-3 transposed convolution (4-D tensors only, $\sim$3$\times$
+fewer decoder MACs). Retrained from scratch with the unchanged CMGAN recipe,
+the hardened model \emph{matches} the GRU reference at the right capacity
+(Table~\ref{tab:quality}): capacity is non-monotonic (36\,k $>$ 49\,k), and
+clipping even helps training in the deep configuration.
+
+\subsection{Two deployment graphs}
+\label{ssec:deploy}
+
+The streaming model carries one FIFO ring buffer per causal time convolution.
+We export it two ways. The \textbf{windowed} graph is stateless: the host
+keeps a rolling context of $\mathrm{RF}+T$ frames and the graph re-emits $T$
+frames per call --- trading recompute
+($\times(\mathrm{RF}+T)/T$) and block latency ($T$ frames) for the simplest
+possible deployment. The \textbf{streaming} graph exposes every ring buffer
+as an explicit graph input/output (17 state tensors for the base model), runs
+one frame per call with no recompute, and achieves true one-hop (16\,ms)
+algorithmic latency. Both compile after the \texttt{Pad} normalization of
+Sec.~\ref{sec:background}; the streaming states quantize with a calibration
+loader that propagates \emph{real} state trajectories through the trained
+model rather than zeros.
+
+\subsection{Quantization: finding and fixing the int8 loss}
+\label{ssec:quant}
+
+All deployments use signed per-channel QDQ post-training quantization (PTQ)
+with percentile calibration; the NPU rejects unsigned activations.
+Quantization-aware fine-tuning with a reconstruction loss \emph{regressed}
+($-0.085$ PESQ): it pulls weights off the MetricGAN optimum, and with a
+$-0.016$ PTQ gap there is nothing to recover, so PTQ is the deployment path.
+Extending the receptive field, however, exposed a real PTQ problem: the
+long-RF variants gain up to $+0.056$ FP32 but lose $\approx0.08$ to int8. A
+selective-quantization scan --- one node group kept FP32 at a time, under
+\emph{seeded} calibration crops, since calibration-draw noise alone spans
+$\pm0.04$ --- localizes the loss: keeping the \emph{decoder} FP32 recovers
+$+0.052$ of the $+0.078$ gap, while every other group, the dilated time stack
+included, contributes $\leq+0.010$. The decoder's upsampling path is linear
+(no ReLU between skip-concatenations and convolutions), so its activation
+range grows unchecked as features enrich with receptive field. Two remedies
+compose: ReLU6 bounds every clipped tensor (all-int8 PESQ 3.014), and a
+\textbf{hybrid} recipe leaves the decoder's nodes ($\sim$36\% of MACs)
+unquantized in the QDQ graph for PESQ 3.052 at the cost of float epochs on
+the device \todo{verify hybrid on-board compile + latency}. Mask-level
+knowledge distillation~\cite{hinton2015kd} from the deep teacher into the
+small base architecture is a third option (3.004 all-int8 at 36\,k params).
+
+% ===========================================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{ssec:setup}
+
+All models train on VoiceBank-DEMAND (16\,kHz)~\cite{valentini2016vbd} with
+the CMGAN losses (complex 0.1, magnitude 0.9, adversarial 0.05;
+MetricGAN-PESQ discriminator), AdamW ($\beta{=}0.8/0.99$, lr $5{\cdot}10^{-4}$,
+decay 0.98), STFT 512/256, 100--140 epochs. PESQ is wideband, on the full
+824-utterance test split; \emph{real-time int8} means static-int8 mask
+inference combined with the noisy phase (no Griffin-Lim). Deployment uses ST
+Edge AI Core 4.0.1~\cite{st2024edgeai} on the STM32N6570-DK; ONNX export and
+quantization use ONNX Runtime~\cite{onnxruntime}. On-board latency is the
+on-target validation figure (10 runs); the epoch/memory data come from the
+compiler report and an on-device per-epoch profiler.
+
+\subsection{Quality}
+\label{ssec:quality}
+
+\begin{table}[t]
+  \centering
+  \caption{VoiceBank-DEMAND quality ladder (full 824-utt test split). RT-int8
+  = static int8 + noisy phase, the deployable configuration. RF in frames
+  (16\,ms hop).}
+  \label{tab:quality}
+  \small
+  \begin{tabular}{@{}lrrcc@{}}
+    \toprule
+    model & params & RF & FP32 & RT-int8 \\
+    \midrule
+    LiSenNet (GRU, repro.)~\cite{yan2024lisennet} & 36.8\,k & $\infty$ & 3.006 & 2.930 \\
+    dual-path conv (unhardened)        & 41.1\,k & 68  & 2.970 & 2.855 \\
+    \midrule
+    hardened, 20 ch                    & 25.7\,k & 68  & 2.895 & 2.853 \\
+    hardened, 24 ch                    & 36.3\,k & 68  & 3.013 & 2.998 \\
+    hardened, 28 ch                    & 48.7\,k & 68  & 2.927 & 2.867 \\
+    \midrule
+    ~+ dilation 16                     & 37.7\,k & 132 & 3.034 & 2.954 \\
+    ~+ 3 blocks (deep)                 & 46.2\,k & 196 & 3.069 & 2.985 \\
+    \textbf{relu6-deep}                & 46.2\,k & 196 & \textbf{3.084} & \textbf{3.014} \\
+    \textbf{relu6-deep, hybrid dec.}   & 46.2\,k & 196 & 3.084 & \textbf{3.052} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:quality} tells the story in three acts. Hardening costs
+nothing at the right width --- 24 channels matches the GRU reference in FP32
+--- and \emph{fixes quantization}: the PTQ drop shrinks from $-0.115$
+(unhardened) to $-0.016$, attributable to BatchNorm folding, parameter-free
+bounded activations, and signed per-channel quantization rather than
+capacity. Receptive field buys FP32 quality almost linearly
+($\approx+0.02$ per doubling) but PTQ initially takes it all back
+($-0.080$/$-0.084$); the decoder-localized fixes of Sec.~\ref{ssec:quant}
+then unlock it. Net effect across the study: deployable real-time PESQ rises
+from 2.855 to \textbf{3.052} ($+0.122$ over the GRU reference), with every
+operator NPU-safe. A second seed reproduces the 24-channel result within
+$\pm0.004$.
+
+\subsection{On-device results}
+\label{ssec:silicon}
+
+\begin{table}[t]
+  \centering
+  \caption{Measured on the STM32N6570-DK (Neural-ART @ 1\,GHz, Cortex-M55 @
+  800\,MHz), int8. Latency per 16\,ms frame; ``block'' = algorithmic latency.
+  Baselines are the other model families deployed on the same board with the
+  same flow.}
+  \label{tab:silicon}
+  \small
+  \setlength{\tabcolsep}{3.5pt}
+  \begin{tabular}{@{}lrrrrcc@{}}
+    \toprule
+    deployment & weights & \begin{tabular}[c]{@{}r@{}}MAC/\\frame\end{tabular} & \begin{tabular}[c]{@{}r@{}}ms/\\frame\end{tabular} & RTF & block & PESQ \\
+    \midrule
+    \textbf{LiSenNet stream.\ (24 ch)} & 47\,KiB & 1.30\,M & 2.79 & 0.17 & 16\,ms & 2.963 \\
+    LiSenNet windowed (24 ch)          & 492\,KiB & 2.78\,M & \textbf{1.15} & \textbf{0.07} & 1.02\,s & 2.998 \\
+    LiSenNet stream.\ (relu6-deep)     & \todo{~} & \todo{~} & \todo{~} & \todo{~} & 16\,ms & \todo{~} \\
+    LiSenNet wind.\ (relu6-deep)       & \todo{~} & \todo{~} & \todo{~} & \todo{~} & 1.02\,s & \todo{~} \\
+    \midrule
+    ConvFSENet (streaming)             & 1.40\,MB & 1.47\,M & 4.40 & 0.28 & 16\,ms & 2.91 \\
+    NSNet2 monarch\_full~\cite{dao2022monarch} & 0.72\,MB & --- & 2.13 & 0.13 & 16\,ms & 2.85 \\
+    NSNet2 monarch\_8                  & 0.37\,MB & 0.39\,M & 2.89 & 0.18 & 16\,ms & 2.83 \\
+    NSNet2 dense~\cite{braun2020nsnet2}$^\dagger$ & 2.70\,MB & --- & 22.94 & 1.43 & 16\,ms & 2.84 \\
+    \bottomrule
+    \multicolumn{7}{@{}l@{}}{\footnotesize $^\dagger$exceeds the 16\,ms
+    budget (weights overflow on-chip RAM; memory-bound): not real-time.}
+  \end{tabular}
+\end{table}
+
+Table~\ref{tab:silicon} places both LiSenNet graphs among all models deployed
+on this board. The streaming graph runs at 2.79\,ms per frame (74 of 131
+compiler epochs pure-hardware; 47\,KiB weights and 147\,KiB activations
+entirely in on-chip NPU RAM) --- the \textbf{best-quality real-time
+streaming enhancer on this silicon}, at 16\,ms algorithmic latency. The
+windowed graph trades latency for throughput: at a 64-frame emit block it
+amortizes to 1.15\,ms per frame ($14\times$ real-time headroom), with all
+2.72\,MiB of window activations on-chip and only the 492\,KiB weight stream
+in external flash. Per-epoch profiling shows the streaming frame cost is
+\emph{not} compute-bound: the NPU core is busy only 0.72\,ms (26\%); the
+floor is the distributed launch and state-plumbing overhead of 131 epochs
+--- the same regime we measure for the ConvFSENet baseline, and the reason
+sub-band conv models with fewer, fatter epochs amortize better in windowed
+mode. On-target accuracy tracks the host int8 reference at cosine 0.998
+under threaded state on real speech.
+
+\todo{Deploy relu6-deep (windowed window 260 and streaming) with the same
+flow and fill the two rows; expected: same-class latency, PESQ 3.014.}
+
+% ===========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We turned a GRU-centric lightweight enhancer into an NPU-native one and
+showed the redesign is not a compromise: the convolutional dual-path
+bottleneck matches the recurrent original in FP32, the hardening that the
+hardware demands is precisely what makes int8 quantization nearly free, and
+the one place quantization still hurts --- the linear decoder --- can be
+diagnosed with a seeded selective-quantization scan and repaired by
+activation clipping, a hybrid float decoder, or distillation. The deployed
+model streams with 16\,ms algorithmic latency at real-time factor 0.17 on a
+microcontroller NPU while \emph{exceeding} the quality of the CPU-oriented
+original's deployable configuration by $+0.122$ PESQ. We believe the recipe
+--- re-express recurrence as bounded-context convolution, harden primitives
+for the int8 vocabulary, and treat quantization robustness as an
+architecture-design criterion rather than an afterthought --- transfers
+beyond this model and this accelerator.
+
+% ===========================================================================
+\vfill\pagebreak
+
+\bibliographystyle{IEEEbib}
+\bibliography{refs}
+
+\end{document}
