@@ -90,6 +90,53 @@ per-region memory bandwidth that exposed the external-flash bottleneck.
 | weights in octoFlash (`n6-allmems-O3`) | 7.14 ms | 0.45 | 3.73 ms | 27% (memory-bound) | 0.990 |
 | weights in npuRAM (`n6-noextmem`)      | **4.40 ms** | **0.275** | 1.26 ms | **81% (compute-bound)** | 0.990 |
 
+## LiSenNet variant sweep (2026-07-14) — every hardened variant, both graphs
+
+All six hardened architectures compiled and measured in one pass (13 graphs;
+`stedgeai generate` → `n6_loader` → `validate --mode target`). Every one
+succeeded. ms/frame is per **emitted** 16 ms frame (windowed = duration ÷ 64).
+Streaming profile `n6-noextmem`, windowed `n6-allmems-O3`, all with
+`--fix-parametric-shapes "{'B':1}"`.
+
+| variant (int8) | params | RF | streaming ms/frame (RTF) | windowed ms/frame (RTF) | int8 PESQ |
+|---|---:|---:|---:|---:|---:|
+| hardened nc20 ‡ | 25.7 k | 68 | 2.59 (0.162) | 0.93 (0.058) | 2.853 |
+| hardened nc24 | 36.3 k | 68 | 2.79 (0.174) | 1.15 (0.072) | 2.963 str / 2.998 win |
+| hardened nc28 ‡ | 48.7 k | 68 | 3.15 (0.197) | 1.45 (0.091) | 2.867 |
+| + dilation 16 ‡ | 37.7 k | 132 | 3.63 (0.227) | 1.82 (0.114) | 2.954 |
+| + 3 blocks (deep) ‡ | 46.2 k | 196 | 4.88 (0.305) | 5.72 (0.358) | 2.985 |
+| **relu6-deep** (deploy) | 46.2 k | 196 | **4.83 (0.302)** | 3.09 (0.193) | **3.013 str / 3.014 win** |
+| relu6-deep, hybrid dec. | 46.2 k | 196 | — | **33.99 (2.125) ✗** | 3.052 |
+
+‡ no trained checkpoint on this box (never published from the training box) —
+latency is from the compiled graph with re-initialized weights, which is
+weight-independent; PESQ is the host-study value. **The local
+`cp_lisennet_conv_hardened/g_best` is NOT the trained nc20** (torch FP32 2.198
+vs the study's 2.895) — it is a July-1 compile-proof checkpoint. Copy the real
+nc20/nc28/dil16/deep checkpoints over if their PESQ rows are ever needed.
+
+Findings:
+- **The whole design space streams in real time.** 2.59 → 4.88 ms/frame across
+  25.7–48.7 k params and RF 68 → 196; weights 35–62 KB and activations ≤ 304 KB
+  stay entirely in on-chip npuRAM. Doubling RF (68→196) costs only 1.7× frame time.
+- **relu6-deep streaming = 4.83 ms/frame, RTF 0.30, PESQ 3.013** — the
+  best-quality real-time streaming enhancer on this board (ConvFSENet 2.911 @
+  4.40 ms; monarch_full 2.848 @ 2.13 ms). Its streaming graph costs *nothing*
+  vs windowed (3.013 vs 3.014), unlike nc24 (2.963 vs 2.998).
+- **Windowed is only cheap while it fits on-chip.** RF-68/132 windows amortize to
+  0.93–1.82 ms/frame (RTF 0.058 — a T=1 graph can't fill the conv pipeline). The
+  RF-196 windows (260 frames) need >5 MB activations, spill ~2.5 MB to hyperRAM
+  and go memory-bound: `deep` 5.72 vs `relu6-deep` 3.09 ms/frame for the *same
+  topology*, differing only in how the allocator splits the spill. Don't read
+  that as a ReLU6 speedup — their streaming graphs are within 1%.
+- **The hybrid decoder-fp32 recipe is not deployable**: 19 SW epochs (vs 6),
+  3.5 MB weights, 12.3 MB activations → 34 ms/frame, RTF 2.1. The best offline
+  PESQ (3.052) does not survive contact with the latency budget; ReLU6 (3.014
+  at 4.83 ms streaming) is the repair that fits.
+- **Reproducibility:** nc24 re-measured 11 days later at 2.789 / 73.643 ms vs
+  2.791 / 73.633 ms, and its compile is byte-identical (1,299,086 MACC, 131
+  epochs). Raw data + table generator: `paper/data/` (on the `paper` branch).
+
 ## Results — all six deployments (same generate → load → validate/profile flow)
 On-board, int8, STM32N657 @ MCU 800 MHz / NPU 1 GHz; frame period = hop 256 @ 16 kHz = 16 ms.
 The NSNet2 family needed graph surgery first (see

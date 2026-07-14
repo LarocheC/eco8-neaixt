@@ -313,6 +313,47 @@ The deploy artifact is the windowed signed-int8 graph
 verified QInt8-only) — published as `conv-hardened/g_best_windowed_int8_static.onnx`
 on the HF repo and deployed below.
 
+### Variant sweep on silicon — every hardened variant, both graphs (2026-07-14)
+
+All six hardened architectures were deployed on the STM32N6570-DK in both graph
+forms (13 compiles, 13 on-board measurements, one toolchain pass each). Latency
+is per **emitted** 16 ms frame; full table + method in
+[`deploy/stm32n6/ONBOARD_MEASUREMENT.md`](deploy/stm32n6/ONBOARD_MEASUREMENT.md),
+raw data in `paper/data/` (branch `paper`).
+
+| variant | RF | streaming ms/frame (RTF) | windowed ms/frame (RTF) | int8 PESQ |
+|---|---:|---:|---:|---:|
+| nc20 ‡ | 68 | 2.59 (0.162) | 0.93 (0.058) | 2.853 |
+| nc24 | 68 | 2.79 (0.174) | 1.15 (0.072) | 2.963 str / 2.998 win |
+| nc28 ‡ | 68 | 3.15 (0.197) | 1.45 (0.091) | 2.867 |
+| dil16 ‡ | 132 | 3.63 (0.227) | 1.82 (0.114) | 2.954 |
+| deep ‡ | 196 | 4.88 (0.305) | 5.72 (0.358) | 2.985 |
+| **relu6-deep** | 196 | **4.83 (0.302)** | 3.09 (0.193) | **3.013 / 3.014** |
+| relu6-deep hybrid | 196 | — | 33.99 (2.125) ✗ | 3.052 |
+
+‡ latency from the compiled architecture with re-initialized weights (no trained
+checkpoint on the deploy box — see the note below); PESQ from the host study.
+
+* **The whole design space is real-time streaming** (RTF 0.16–0.31, everything
+  on-chip): the quality knobs of rounds 1–3 are affordable. Doubling the
+  receptive field (68 → 196) costs only 1.7× frame time.
+* **relu6-deep ships at 4.83 ms/frame, PESQ 3.013, 16 ms latency** — and its
+  *streaming* graph gives up nothing vs windowed (3.013 vs 3.014), unlike nc24
+  (2.963 vs 2.998), because ReLU6 also bounds the streamed state.
+* **The hybrid decoder-fp32 recipe (PESQ 3.052) is NOT deployable**: the float
+  decoder pulls 19 epochs onto the M55 and needs 3.5 MB weights + 12.3 MB
+  activations → **34 ms/frame, RTF 2.1**. This closes the round-3 open question:
+  ReLU6, not the hybrid, is the repair that fits the latency budget.
+* **Windowed mode is only cheap on-chip.** The RF-196 windows (260 frames) need
+  >5 MB of activations, spill ~2.5 MB into external hyperRAM and become
+  memory-bound (`deep` 5.72 vs `relu6-deep` 3.09 ms/frame for the *same*
+  topology — an allocator artifact, not an activation-function effect).
+* **NB — the local nc20 checkpoint is not the trained one.**
+  `cp_lisennet_conv_hardened/g_best` scores torch FP32 **2.198**, not the 2.895
+  in the table above; it is a July-1 compile-proof checkpoint. nc28/dil16/deep
+  were never copied off the training box either. Only **nc24** and
+  **relu6-deep** (both on HF) reproduce their published quality here.
+
 ### On-board deployment — STM32N6570-DK (measured 2026-07-03)
 
 The published nc24 artifact compiles to the Neural-ART NPU (stedgeai 4.0.1,
