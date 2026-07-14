@@ -205,3 +205,33 @@ def test_scan_checkpoint_picks_latest(tmp_path):
     (tmp_path / "g_00000200").touch()
     latest = scan_checkpoint(str(tmp_path), "g_")
     assert latest is not None and Path(latest).name == "g_00000300"
+
+
+def test_no_nan_gradients_on_digital_silence(cfg):
+    """Same hazard as LiSenNet's (see tests/test_lisennet_smoke.py): a complex
+    zero in the STFT of the model's own output gives `abs(x)**c` / `angle(x)` an
+    infinite gradient. ConvFSENet is guarded by construction — it goes through
+    the eps-protected `mag_pha_from_complex` / `mag_pha_stft` — but the loss is
+    shared, so pin it here too rather than rely on that staying true."""
+    torch.manual_seed(0)
+    model = build_causal_model(cfg)
+
+    clean = torch.randn(2, 1, 8000) * 0.1
+    noisy = clean.clone()
+    clean[..., :2000] = 0.0
+    noisy[..., :2000] = 0.0
+
+    s = forward_spectra(model, noisy, clean, cfg)
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+    )
+    for name in ("magnitude", "complex", "consistency", "time"):
+        model.zero_grad(set_to_none=True)
+        terms[name].backward(retain_graph=True)
+        bad = [n for n, p in model.named_parameters()
+               if p.grad is not None and not torch.isfinite(p.grad).all()]
+        assert not bad, (
+            f"'{name}' term produced non-finite gradients on digitally-silent audio "
+            f"({len(bad)} params, e.g. {bad[0]})"
+        )

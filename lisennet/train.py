@@ -41,6 +41,7 @@ from common.env import AttrDict, build_env
 from common.discriminator import MetricDiscriminator, batch_pesq
 from common.losses import (
     discriminator_loss, generator_loss, generator_terms, loss_weights,
+    mag_pha_from_complex,
 )
 from common.metrics import pesq_score
 from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
@@ -58,20 +59,41 @@ def _to_dev(t, device):
 def forward_spectra(model, noisy, clean):
     """Forward LiSenNet and produce every tensor the MP-SENet loss needs.
 
-    The model already hands back the clean/predicted compressed spectra; what it
-    does not compute is the iSTFT -> STFT round trip, which the consistency term
-    needs and which is also what the discriminator must be shown. We rebuild it
-    with the model's own STFT + compression helpers so the geometry and the
-    power-law convention are guaranteed to match the spectra it returned.
+    The model hands back its own magnitude/complex output; what it does not
+    compute is the iSTFT -> STFT round trip that the consistency term compares
+    against (and that the discriminator must be shown).
+
+    The round trip and the clean target go through ``mag_pha_from_complex``, NOT
+    the model's ``power_compress``. That is not a stylistic choice — it is
+    required for the loss to have finite gradients:
+
+      ``power_compress`` computes ``abs(x)**0.3`` and ``angle(x)`` with no
+      epsilon. Real utterances contain exact digital silence, so the STFT of the
+      model's own output has exact complex zeros there, where
+      ``d(|x|**0.3)/dx -> inf`` and ``d(angle(x))/dx -> 0/0``. Backprop through
+      the consistency term then NaNs the whole model within ~200 steps. The
+      forward values all look finite, so only a backward pass on real audio
+      shows it.
+
+      ``mag_pha_from_complex`` is MP-SENet's own convention —
+      ``sqrt(re**2 + im**2 + 1e-9)`` plus the offsets inside the ``atan2`` —
+      which keeps the magnitude strictly positive and the gradient finite. This
+      is exactly why upstream guards it. See tests::test_no_nan_gradients_on_digital_silence.
+
+    ``mag_g``/``com_g`` stay as the network's raw (unguarded) output, matching
+    upstream's ``mag_g``: no gradient hazard there, since they are built from
+    ``est_mag`` directly rather than from ``abs()`` of a complex number.
     """
+    cf = float(model.compress_factor)
     r = model(noisy, clean)
 
-    spec_g_hat = model.power_compress(model.apply_stft(r["est"]))
+    mag_r, _, com_r = mag_pha_from_complex(model.apply_stft(r["tgt"]), cf)
+    mag_g_hat, _, com_g_hat = mag_pha_from_complex(model.apply_stft(r["est"]), cf)
 
     return dict(
-        mag_r=r["tgt_mag"], com_r=torch.view_as_real(r["tgt_spec"]),
+        mag_r=mag_r, com_r=com_r,
         mag_g=r["est_mag"], com_g=torch.view_as_real(r["est_spec"]),
-        mag_g_hat=spec_g_hat.abs(), com_g_hat=torch.view_as_real(spec_g_hat),
+        mag_g_hat=mag_g_hat, com_g_hat=com_g_hat,
         audio_g=r["est"], audio_r=r["tgt"],
         est_mag=r["est_mag"],
     )

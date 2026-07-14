@@ -1,0 +1,44 @@
+{
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0008,
+    "lr_min": 1e-05,
+    "scheduler": "cosine",
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "lr_decay": 0.9985,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "win_length": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "n_features": 257,
+    "n_channels_res": 128,
+    "n_channels_conv": 256,
+    "kernel_size": 3,
+    "n_blocks": 3,
+    "n_stacks": 3,
+    "extractor_type": "mag_compressed",
+    "compress_factor": 0.3,
+    "causal": true,
+    "gan": {
+        "enabled": true,
+        "metric_loss_lambda": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    },
+    "loss": {
+        "magnitude": 0.9,
+        "complex": 0.1,
+        "consistency": 0.1,
+        "time": 0.2,
+        "metric": 0.05
+    },
+    "_comment": "Lower-capacity ConvFSENet: 128/256 channels vs the 192/384 deploy backbone (same recipe otherwise). Recovered from the published checkpoint at https://huggingface.co/claroche1/convfsenet (subfolder 128-256/), which had no config checked into this repo. Carried over to the MP-SENet loss like every other config: the `loss` block is the shared objective and gan.disc_compress_factor is gone (the discriminator now sees the same compressed magnitude the loss uses, per upstream)."
+}

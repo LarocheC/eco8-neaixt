@@ -148,3 +148,40 @@ def test_shipped_config_builds():
     model = build_lisennet(h)
     n = sum(p.numel() for p in model.parameters())
     assert 20_000 < n < 80_000
+
+
+def test_no_nan_gradients_on_digital_silence(cfg):
+    """Regression: the consistency term used to NaN the whole model.
+
+    Real VBD utterances contain EXACT digital silence, so the STFT of the model's
+    own output has exact complex zeros there. `LiSenNet.power_compress` computes
+    `abs(x)**0.3` / `angle(x)` with no epsilon, whose gradients at a complex zero
+    are inf / 0-over-0 — training went NaN within ~200 steps. The forward values
+    are all finite, so ONLY a backward pass on silence-containing audio catches
+    it. forward_spectra now uses MP-SENet's eps-guarded `mag_pha_from_complex`.
+
+    Note this must stay a *gradient* check: asserting finite loss values passes
+    even on the broken version.
+    """
+    torch.manual_seed(0)
+    model = build_lisennet(cfg)
+
+    clean = torch.randn(2, 32000) * 0.1
+    noisy = clean.clone()
+    clean[:, :6000] = 0.0          # exact zeros, as in a real utterance's lead-in
+    noisy[:, :6000] = 0.0
+
+    s = forward_spectra(model, noisy, clean)
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+    )
+    for name in ("magnitude", "complex", "consistency", "time"):
+        model.zero_grad(set_to_none=True)
+        terms[name].backward(retain_graph=True)
+        bad = [n for n, p in model.named_parameters()
+               if p.grad is not None and not torch.isfinite(p.grad).all()]
+        assert not bad, (
+            f"'{name}' term produced non-finite gradients on digitally-silent audio "
+            f"({len(bad)} params, e.g. {bad[0]})"
+        )
