@@ -8,14 +8,14 @@
 # Override via env:
 #   ./run_qat_sweep.sh                     # 100-epoch sweep -> cp_qat100_*
 #   EPOCHS=10 ./run_qat_sweep.sh           # 10-epoch sweep  -> cp_qat10_*
-#   RUNS="monarch_8 butterfly_fc" ./run_qat_sweep.sh   # subset of the 7
+#   RUNS="blockdiag_8 butterfly_fc" ./run_qat_sweep.sh   # subset of the 7
 #   LR=1e-4 ./run_qat_sweep.sh             # override the QAT learning rate
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-ALL_RUNS="wide_monarch monarch_full monarch_8 butterfly_2blocks \
+ALL_RUNS="wide_blockdiag blockdiag_full blockdiag_8 butterfly_2blocks \
           butterfly_full butterfly_ortho butterfly_fc"
 
 RUNS="${RUNS:-$ALL_RUNS}"

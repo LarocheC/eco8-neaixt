@@ -18,7 +18,7 @@ The repo contains four model families. They share the dataset wrapper, training 
 
 | family         | architecture                                                                                                                                                           | causal | streaming                               | role                                                         |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------- | ------------------------------------------------------------ |
-| **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, and Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
+| **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, block-diagonal, and (genuine two-factor) Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
 | **ConvFSENet** | Fully-convolutional ConvTasNet-derived magnitude-mask predictor using stacked Temporal Conv Module blocks. The architecture is based on Miccini *et al.*, ICASSP 2025. | yes    | yes, frame-by-frame with zero lookahead | Fast causal CNN enhancer and int8 quantization study.        |
 | **LiSenNet**   | Lightweight (~37 K-param) sub-band U-Net with a dual-path-recurrent bottleneck and a magnitude-only mask (Griffin-Lim phase). A port of Yan *et al.*, arXiv:2409.13285.   | yes    | yes, frame-by-frame with bounded state  | Ultra-compact real-time enhancer and int8 quantization study. |
 | **BASENet**    | Bark-band-adaptive encoder (density-derived per-band depth) with cross-band attention and a CRN, mask+phase prediction (MP-SENet paradigm). A reproduction of Martins Gomes & Capman, arXiv:2606.12662. | yes    | yes, frame-by-frame with bounded state  | Paper-reproduction gap-closing study (in progress).          |
@@ -69,7 +69,7 @@ common/                  Shared infrastructure
 
 nsnet2/                  GRU recurrent enhancer
   model.py               NSNet2 model wiring
-  layers.py              Dense / Butterfly / Monarch layer factories
+  layers.py              Dense / Butterfly / block-diagonal / Monarch layer factories
   streaming.py           Streaming-shape wrapper for ONNX export
   train.py               Training loop
   export_onnx.py         FP32 ONNX export
@@ -126,9 +126,16 @@ The NSNet2 branch explores whether structured linear transforms can reduce model
 Supported layer types include:
 
 ```json
-"linear": {"kind": "linear" | "butterfly" | "monarch"},
-"gru": {"kind": "gru" | "butterfly" | "monarch"}
+"linear": {"kind": "linear" | "butterfly" | "blockdiag" | "monarch"},
+"gru": {"kind": "gru" | "butterfly" | "blockdiag" | "monarch"
+                | "triton" | "triton_blockdiag" | "triton_monarch" | "triton_butterfly"}
 ```
+
+`blockdiag` is a single block-diagonal factor (no cross-block mixing);
+`monarch` is the genuine two-factor Monarch (block-diagonal × permutation ×
+block-diagonal, full cross-channel mixing — torch-structured ≥ 1.3.0). The runs
+published as `monarch_*` were actually block-diagonal and have been renamed
+`blockdiag_*`; see `EXPERIMENT_MONARCH.md` for the genuine-Monarch study.
 
 The main sweep scripts are:
 
@@ -139,7 +146,7 @@ The main sweep scripts are:
 ./run_qat_sweep.sh
 ```
 
-The results show that Monarch-based variants are particularly friendly to int8 QDQ quantization, while Butterfly variants are more sensitive unless constrained by orthogonal initialization or recovered through QAT.
+The results show that block-diagonal variants (`blockdiag_*`, published earlier under the `monarch_*` name) are particularly friendly to int8 QDQ quantization, while Butterfly variants are more sensitive unless constrained by orthogonal initialization or recovered through QAT.
 
 ## ConvFSENet experiments
 
@@ -204,7 +211,7 @@ This repository also builds on:
 * Miccini, Laroche, Piechowiak & Pezzarossa, *Scalable Speech Enhancement with Dynamic Channel Pruning*, ICASSP 2025, for the ConvFSENet base architecture.
 * ConvTasNet, for the convolutional design principles used by ConvFSENet.
 * Yan, Zhou, Chen & Lu, *LiSenNet: Lightweight Sub-band and Dual-Path Modeling for Real-Time Speech Enhancement*, [arXiv:2409.13285](https://arxiv.org/abs/2409.13285) ([hyyan2k/LiSenNet](https://github.com/hyyan2k/LiSenNet), MIT), for the LiSenNet architecture.
-* Butterfly and Monarch structured matrix factorizations, as packaged in `torch-structured`.
+* Butterfly, block-diagonal, and genuine two-factor Monarch structured matrix factorizations, as packaged in `torch-structured`.
 * JacobLinCool’s resampled VoiceBank-DEMAND-16k dataset.
 
 ## License

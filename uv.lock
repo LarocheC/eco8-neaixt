@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12' and platform_machine != 's390x' and sys_platform == 'win32'",
@@ -516,7 +516,7 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=2.14,<4" },
     { name = "einops", specifier = ">=0.7" },
-    { name = "gru-qat", extras = ["triton", "structured"], specifier = ">=0.2.0" },
+    { name = "gru-qat", extras = ["triton", "structured"], specifier = ">=0.5.0" },
     { name = "huggingface-hub", specifier = ">=0.20" },
     { name = "joblib", specifier = ">=1.3" },
     { name = "jupyter", specifier = ">=1.0" },
@@ -532,7 +532,7 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.12" },
     { name = "tensorboard", specifier = ">=2.14" },
     { name = "torch", specifier = ">=2.6,<2.8", index = "https://download.pytorch.org/whl/cu118" },
-    { name = "torch-structured", specifier = ">=1.2.4" },
+    { name = "torch-structured", specifier = ">=1.3.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -704,15 +704,15 @@ wheels = [
 
 [[package]]
 name = "gru-qat"
-version = "0.2.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d6/a2/d1dedf4369379fdb71e24206cab46d1b1a4efaa04e5e64e5e04f123a368b/gru_qat-0.2.0.tar.gz", hash = "sha256:290d241e6bc2c2740467057425dbd7219fce28d46dbed91aca7439ed80508edc", size = 983049, upload-time = "2026-05-29T08:00:49.739Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/ee/559aab7a2a511a17b3b1b7febf57cd9441e2745166491fd54c01613f77fb/gru_qat-0.5.0.tar.gz", hash = "sha256:7927ab8bd9d93a2c5c7cb9347777baf06b9206883ccbf5884491a20e500fd508", size = 785660, upload-time = "2026-07-09T16:08:43.689Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/63/80e06879c6c05291078041d9399539c44e1357fe080a0cb3e44707f2cbfc/gru_qat-0.2.0-py3-none-any.whl", hash = "sha256:4d1522eb50f104da80a766fd2297904d49b4ee8f1da342a19012e39ce4da6788", size = 70238, upload-time = "2026-05-29T08:00:47.903Z" },
+    { url = "https://files.pythonhosted.org/packages/31/58/3bd53551c14c301a0bd2a83f005c59c8dd89c4bb88e22738f0a3832a6e76/gru_qat-0.5.0-py3-none-any.whl", hash = "sha256:ccb5ec9118820acd96dfa4623d83378c39ebd789bac1949972c0eff7f2686e5d", size = 80844, upload-time = "2026-07-09T16:08:41.842Z" },
 ]
 
 [package.optional-dependencies]
@@ -2667,7 +2667,7 @@ wheels = [
 
 [[package]]
 name = "torch-structured"
-version = "1.2.4"
+version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "einops" },
@@ -2676,9 +2676,9 @@ dependencies = [
     { name = "scipy" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ad/ac/48a8b3785dee966fa08ddedc336758d5a36d83df829625be7edc4228146b/torch_structured-1.2.4.tar.gz", hash = "sha256:3cb07ae7981eac98aba9206f4ef0768cc3bb0fa087b68fe97b1337ec4ee402ea", size = 161418, upload-time = "2026-05-31T08:11:58.97Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/c6/b9d7473c1167a87cd7d3bae44d1cf7142b33db607e21e30d00e2ba529e7f/torch_structured-1.3.0.tar.gz", hash = "sha256:aed5b3eedf4a23cd727199229d9fb664b481c98b43deafbdb34ffc7e33fcc6bb", size = 164163, upload-time = "2026-07-09T13:36:39.028Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/76/19/23dc0a7e78a69d3bf58edf9898cefebf56620a662c910a7b5c74f7c6296b/torch_structured-1.2.4-py3-none-any.whl", hash = "sha256:6976b2a0324b07bf186291fa581fe6eb29b6eca9587281940a76e1b62de0126d", size = 116335, upload-time = "2026-05-31T08:11:57.393Z" },
+    { url = "https://files.pythonhosted.org/packages/05/89/2f86a7eadbc0cf1e95aab6f8e7fd3f03495741b775b1e7e46e9ca366b824/torch_structured-1.3.0-py3-none-any.whl", hash = "sha256:f7a6db3dca28fa441da6e32402ecd96563c14f7311e88510fd7f7c5cde4662b2", size = 119572, upload-time = "2026-07-09T13:36:37.711Z" },
 ]
 
 [[package]]
@@ -2737,10 +2737,6 @@ resolution-markers = [
 ]
 dependencies = [
     { name = "filelock", marker = "platform_machine == 's390x' or sys_platform == 'emscripten' or sys_platform == 'win32'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/86/17/d9a5cf4fcf46291856d1e90762e36cbabd2a56c7265da0d1d9508c8e3943/triton-3.1.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0f34f6e7885d1bf0eaaf7ba875a5f0ce6f3c13ba98f9503651c1e6dc6757ed5c", size = 209506424, upload-time = "2024-10-14T16:05:42.337Z" },
-    { url = "https://files.pythonhosted.org/packages/78/eb/65f5ba83c2a123f6498a3097746607e5b2f16add29e36765305e4ac7fdd8/triton-3.1.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:c8182f42fd8080a7d39d666814fa36c5e30cc00ea7eeeb1a2983dbb4c99a0fdc", size = 209551444, upload-time = "2024-10-14T16:05:53.433Z" },
 ]
 
 [[package]]

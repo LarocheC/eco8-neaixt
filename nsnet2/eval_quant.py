@@ -6,12 +6,12 @@ pre-hooks before evaluation. Lets us sweep (weight_bits, act_bits,
 group_size) without touching the checkpoint on disk.
 
 Usage:
-    python -m nsnet2.eval_quant --checkpoint_file cp_tr_monarch_8/g_best \\
+    python -m nsnet2.eval_quant --checkpoint_file cp_tr_blockdiag_8/g_best \\
         --w_bits 4 --a_bits 8 --w_group_size 64 --max_utterances 50
 
 Or run a small predefined sweep with --sweep:
 
-    python -m nsnet2.eval_quant --checkpoint_file cp_tr_monarch_8/g_best \\
+    python -m nsnet2.eval_quant --checkpoint_file cp_tr_blockdiag_8/g_best \\
         --sweep --max_utterances 50
 """
 from __future__ import annotations

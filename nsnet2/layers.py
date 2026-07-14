@@ -6,29 +6,48 @@ Two registries:
   ``nn.Linear``. ``cfg["kind"]`` selects the backend:
     * ``"linear"``    — dense ``nn.Linear``                 (O(N^2)).
     * ``"butterfly"`` — ``torch_structured.Butterfly``       (~O(N log N)).
-    * ``"monarch"``   — ``torch_structured.monarch.BlockdiagLinear``
-                        block-diagonal linear (~O(N^2 / nblocks)).
+    * ``"blockdiag"`` — ``torch_structured.monarch.BlockdiagLinear``:
+                        a SINGLE block-diagonal factor (no permutation, zero
+                        cross-block mixing), ~O(N^2 / nblocks). This is what
+                        this repo historically (and incorrectly) called
+                        ``"monarch"``.
+    * ``"monarch"``   — ``torch_structured.monarch.MonarchLinear``: the
+                        GENUINE two-factor Monarch (block-diagonal x
+                        permutation x block-diagonal, full cross-channel
+                        mixing), Dao et al. 2022. Needs torch-structured
+                        >= 1.3.0.
 
 - ``make_gru(input_size, hidden_size, num_layers, *, cfg)`` — same idea for
   the GRU stack. ``cfg["kind"]`` selects:
     * ``"gru"``       — cuDNN-fused ``nn.GRU``.
-    * ``"butterfly"`` / ``"monarch"`` — ``StructuredGRU``: a Python time-loop
-                        wrapping ``StructuredGRUCell``, whose ``W_ih`` and
-                        ``W_hh`` projections (packed across r/z/n gates) come
-                        from ``make_linear`` with the same backend. The h->3h
-                        projection defaults to ``init='ortho'`` for butterfly
-                        — recurrent stability needs near-orthogonal weights.
+    * ``"butterfly"`` / ``"blockdiag"`` / ``"monarch"`` — ``StructuredGRU``: a
+                        Python time-loop wrapping ``StructuredGRUCell``, whose
+                        ``W_ih`` and ``W_hh`` projections (packed across r/z/n
+                        gates) come from ``make_linear`` with the same backend.
+                        The h->3h projection defaults to ``init='ortho'`` for
+                        butterfly — recurrent stability needs near-orthogonal
+                        weights.
 
 All ``cfg`` blocks accept the per-backend knobs (e.g. ``nblocks`` for
-butterfly/monarch, ``init`` for butterfly).
+butterfly/blockdiag/monarch, ``init`` for butterfly).
 
-The ``triton``/``triton_monarch``/``triton_butterfly`` GRU kinds route the
-recurrence through ``gru_qat.GRULayer`` (persistent Triton hidden kernel on
-CUDA, per-step fallback elsewhere). ``triton_*`` structures the GRU *hidden*
-projection; add ``"struct_input": true`` to also structure the *input*
-projection so the triton path mirrors a config that structured BOTH GRU
-projections (the HF ``monarch_full`` / ``butterfly_full`` family). Requires
-gru-qat >= 0.2.0.
+The ``triton``/``triton_blockdiag``/``triton_monarch``/``triton_butterfly``
+GRU kinds route the recurrence through ``gru_qat.GRULayer`` (persistent Triton
+hidden kernel on CUDA, per-step fallback elsewhere). ``triton_*`` structures
+the GRU *hidden* projection; add ``"struct_input": true`` to also structure
+the *input* projection so the triton path mirrors a config that structured
+BOTH GRU projections (the HF ``blockdiag_full`` / ``butterfly_full`` family).
+Requires gru-qat >= 0.4.0 (which splits the structured kinds into
+``diagonal`` / ``blockdiag`` / true ``monarch``).
+
+Naming note: prior to this rename the block-diagonal path was called
+``"monarch"`` everywhere (kinds, configs, HF checkpoints). ``"monarch"`` now
+means the true two-factor construction; the old block-diagonal path is
+``"blockdiag"``. There is deliberately NO silent alias — a config that still
+says ``"monarch"`` now builds a genuinely different (2-factor) layer, so old
+block-diagonal checkpoints must be migrated to ``"blockdiag"`` (their g_best
+state_dict has a single ``.weight`` per factor and will fail to load into a
+MonarchLinear's ``w1``/``w2``, i.e. the mismatch is loud, not silent).
 """
 
 from __future__ import annotations
@@ -47,9 +66,16 @@ except ImportError:
 
 try:
     from torch_structured.monarch.blockdiag_linear import BlockdiagLinear
-    HAVE_MONARCH = True
+    HAVE_BLOCKDIAG = True
 except ImportError:
     BlockdiagLinear = None
+    HAVE_BLOCKDIAG = False
+
+try:
+    from torch_structured.monarch.monarch_linear import MonarchLinear
+    HAVE_MONARCH = True
+except ImportError:
+    MonarchLinear = None
     HAVE_MONARCH = False
 
 try:
@@ -66,7 +92,7 @@ except ImportError:
 # Linear factory
 # ---------------------------------------------------------------------------
 
-LINEAR_KINDS = ("linear", "butterfly", "monarch")
+LINEAR_KINDS = ("linear", "butterfly", "blockdiag", "monarch")
 
 
 def make_linear(in_size: int, out_size: int, bias: bool = True, *,
@@ -86,10 +112,22 @@ def make_linear(in_size: int, out_size: int, bias: bool = True, *,
             init=cfg.get("init", "randn"),
         )
 
+    if kind == "blockdiag":
+        if not HAVE_BLOCKDIAG:
+            raise ImportError("torch_structured.monarch.BlockdiagLinear unavailable; install torch-structured>=1.3.0.")
+        return BlockdiagLinear(
+            in_features=in_size, out_features=out_size, bias=bias,
+            nblocks=cfg.get("nblocks", 4),
+        )
+
     if kind == "monarch":
         if not HAVE_MONARCH:
-            raise ImportError("torch_structured.monarch.BlockdiagLinear unavailable; rebuild torch-butterfly.")
-        return BlockdiagLinear(
+            raise ImportError(
+                "torch_structured.monarch.MonarchLinear unavailable; the genuine "
+                "two-factor Monarch needs torch-structured>=1.3.0. (The old "
+                "block-diagonal path is now kind='blockdiag'.)"
+            )
+        return MonarchLinear(
             in_features=in_size, out_features=out_size, bias=bias,
             nblocks=cfg.get("nblocks", 4),
         )
@@ -254,7 +292,10 @@ class TritonGRU(nn.Module):
 # GRU factory
 # ---------------------------------------------------------------------------
 
-GRU_KINDS = ("gru", "butterfly", "monarch", "triton", "triton_monarch", "triton_butterfly")
+GRU_KINDS = (
+    "gru", "butterfly", "blockdiag", "monarch",
+    "triton", "triton_blockdiag", "triton_monarch", "triton_butterfly",
+)
 
 
 def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
@@ -282,13 +323,17 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
             pre_batch_input=bool(cfg.get("pre_batch_input", True)),
         )
 
-    if kind in ("triton_monarch", "triton_butterfly"):
+    if kind in ("triton_blockdiag", "triton_monarch", "triton_butterfly"):
         from gru_qat import StructureConfig
-        sub = "monarch" if kind == "triton_monarch" else "butterfly"
+        sub = {
+            "triton_blockdiag": "blockdiag",
+            "triton_monarch": "monarch",
+            "triton_butterfly": "butterfly",
+        }[kind]
 
         def _struct(role: str) -> "StructureConfig":
             sk = {"kind": sub}
-            if sub == "monarch":
+            if sub in ("blockdiag", "monarch"):
                 sk["nblocks"] = cfg.get("nblocks", 4)
             else:
                 # butterfly_nblocks controls the stacked-butterfly depth
@@ -307,7 +352,7 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
         sh = _struct("hidden")
         # struct_input=True structures the GRU *input* projection too, so the
         # triton path faithfully mirrors a config that structured BOTH GRU
-        # projections (e.g. the HF monarch_full / butterfly_full runs). The
+        # projections (e.g. the HF blockdiag_full / butterfly_full runs). The
         # input GEMM is hoisted out of the recurrence and streamed into the
         # hidden kernel (gru-qat >=0.2.0). Default False keeps the historical
         # dense-input triton behaviour for the standalone triton_* configs.
@@ -321,7 +366,7 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
             pre_batch_input=False,
         )
 
-    if kind not in ("butterfly", "monarch"):
+    if kind not in ("butterfly", "blockdiag", "monarch"):
         raise ValueError(f"Unknown gru kind: {kind!r} (expected one of {GRU_KINDS})")
 
     base = {k: v for k, v in cfg.items() if k not in ("kind", "h_init", "x_init")}
