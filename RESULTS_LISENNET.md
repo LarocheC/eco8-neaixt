@@ -313,6 +313,38 @@ The deploy artifact is the windowed signed-int8 graph
 verified QInt8-only) — published as `conv-hardened/g_best_windowed_int8_static.onnx`
 on the HF repo and deployed below.
 
+### FIFO state vs. stateless recompute — measured at equal latency (2026-07-14)
+
+The windowed export's `emit_T` sets the algorithmic latency: **`emit_T=1` (window
+= RF+1 frames in, last frame's mask out) is the stateless twin of the FIFO
+streaming graph** — identical one-hop 16 ms latency, no state machinery at all,
+paying RF-fold recompute instead. It is *bit-exact* to the offline model in
+steady state (FP32 cos 1.0000001, max|diff| 7.2e-07). `emit_T=64` is a
+throughput mode (1.02 s block latency), not a real-time deployment.
+
+| variant | RF | FIFO streaming | stateless window (T=1) | recompute | net |
+|---|---:|---|---|---:|---:|
+| nc20 | 68 | **2.59 ms** (RTF 0.16) | **29.93 ms** (1.87) | 72× | 11.6× slower |
+| nc24 | 68 | **2.79 ms** (0.17) | **32.81 ms** (2.05) | 72× | 11.8× |
+| nc28 | 68 | 3.15 ms (0.20) | 40.01 ms (2.50) | 71× | 12.7× |
+| dil16 | 132 | 3.63 ms (0.23) | 74.72 ms (4.67) | 134× | 20.6× |
+| deep | 196 | 4.88 ms (0.30) | 127.16 ms (7.95) | 199× | 26.1× |
+| **relu6-deep** | 196 | **4.83 ms** (0.30) | **119.86 ms** (7.49) | 202× | 24.8× |
+
+* **The stateless window uses the NPU 6–8× better** (2.2–3.1 GMAC/s vs
+  0.34–0.56): no Slice/Concat state ops, and a 69–197-frame conv extent fills
+  the pipeline — so the streaming graph is confirmed **launch/state-bound, not
+  compute-bound**.
+* **…and it still loses by 11.6–26×**, because it recomputes the receptive field
+  every frame (70× the MACs at RF 68, 200× at RF 196). A 6–8× efficiency gain
+  cannot pay a 70–200× compute bill. **Not real-time for any variant.**
+* Amortizing over an emit block restores real time only by re-adding latency
+  (emit_T ≥ 3 → 48 ms for nc24; ≥ 9 → 144 ms for relu6-deep) and still costs
+  11–15 ms/frame.
+* **⇒ FIFO streaming dominates on both axes** — which is what makes the `Pad`
+  export fix (blocker #4) load-bearing: without it the only NPU-mappable graph
+  was the window, and LiSenNet would not be real-time on this chip.
+
 ### Variant sweep on silicon — every hardened variant, both graphs (2026-07-14)
 
 All six hardened architectures were deployed on the STM32N6570-DK in both graph

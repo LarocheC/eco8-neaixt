@@ -90,6 +90,45 @@ per-region memory bandwidth that exposed the external-flash bottleneck.
 | weights in octoFlash (`n6-allmems-O3`) | 7.14 ms | 0.45 | 3.73 ms | 27% (memory-bound) | 0.990 |
 | weights in npuRAM (`n6-noextmem`)      | **4.40 ms** | **0.275** | 1.26 ms | **81% (compute-bound)** | 0.990 |
 
+## FIFO state vs. stateless recompute, at equal latency (2026-07-14) — the FIFO wins
+
+The windowed graph has an `emit_T` knob: window = RF + T frames in, last T mask
+frames out. **`emit_T=1` is the like-for-like alternative to FIFO streaming** —
+same one-hop (16 ms) algorithmic latency, but zero state machinery, paying
+RF-fold recompute instead. (`emit_T=64`, used in the earlier tables, buys
+throughput at 1.02 s of block latency — a batch mode, not a deployment.)
+Parity: the T=1 sliding window is **bit-exact to the offline model** in steady
+state (FP32 cos 1.0000001, max|diff| 7.2e-07; the first RF frames run on zero
+history, exactly like a FIFO warm-up).
+
+| variant | RF | FIFO streaming | stateless RF-window (T=1) | recompute | net |
+|---|---:|---|---|---:|---:|
+| nc20 | 68 | 0.92 M MAC → **2.59 ms** (RTF 0.16) | 66.5 M → **29.93 ms** (1.87) | 72× | **11.6× slower** |
+| nc24 | 68 | 1.30 M → **2.79 ms** (0.17) | 92.9 M → **32.81 ms** (2.05) | 72× | **11.8×** |
+| nc28 | 68 | 1.75 M → 3.15 ms (0.20) | 123.8 M → 40.01 ms (2.50) | 71× | 12.7× |
+| dil16 | 132 | 1.38 M → 3.63 ms (0.23) | 185.0 M → 74.72 ms (4.67) | 134× | 20.6× |
+| deep | 196 | 1.69 M → 4.88 ms (0.30) | 336.3 M → 127.16 ms (7.95) | 199× | 26.1× |
+| **relu6-deep** | 196 | 1.66 M → **4.83 ms** (0.30) | 335.8 M → **119.86 ms** (7.49) | 202× | **24.8×** |
+
+- **The stateless window maps to the NPU 6–8× BETTER** — 2.2–3.1 GMAC/s vs the
+  streaming graph's 0.34–0.56. No Slice/Concat state ops (which never map to
+  pure HW), and a 69–197-frame conv extent actually fills the pipeline. This
+  confirms the T=1 streaming graph is **launch/state-bound, not compute-bound**.
+- **But it recomputes the whole receptive field every frame** (70× the MACs at
+  RF 68, 200× at RF 196), and a 6–8× efficiency gain cannot pay a 70–200×
+  compute bill. Result: **not real-time for any variant** (RTF 1.87–7.95).
+- **Amortizing** (emit_T > 1) restores real time only by re-adding block
+  latency: min emit_T for RTF ≤ 1 is 2 (nc20, 32 ms) / 3 (nc24, 48 ms) /
+  5 (dil16, 80 ms) / 9 (relu6-deep, 144 ms) / 11 (deep, 176 ms) — and even
+  there it runs 11–15 ms/frame vs streaming's 2.6–4.9.
+- **⇒ FIFO streaming dominates on both axes.** That makes the `Pad` empty-input
+  export fix (blocker #4) the load-bearing step of this whole deployment:
+  without it the only NPU-mappable graph was the window, and LiSenNet would
+  **not** be real-time on this chip.
+
+Reproduce: `lisennet.export_onnx --windowed --emit_T 1` → `quant_onnx --windowed`
+→ compile (`n6-noextmem` fits for RF 68/132; RF 196 needs `n6-allmems-O3`).
+
 ## LiSenNet variant sweep (2026-07-14) — every hardened variant, both graphs
 
 All six hardened architectures compiled and measured in one pass (13 graphs;
