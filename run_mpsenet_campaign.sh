@@ -28,9 +28,13 @@
 #   RUNS="lisennet_conv_hardened_nc24 convfsenet_win" ./run_mpsenet_campaign.sh
 #   GPU=1 ./run_mpsenet_campaign.sh              # pin to GPU 1 (GPU 0 busy elsewhere)
 #   GPU=1,2 JOBS=6 ./run_mpsenet_campaign.sh     # spread runs across GPUs 1 and 2
-#   DETACH=1 ./run_mpsenet_campaign.sh           # run inside tmux, survives SSH drop
+#   DETACH=1 ./run_mpsenet_campaign.sh           # detach; survives an SSH drop.
+#                                                #   uses tmux if installed, else a
+#                                                #   plain detached process.
+#   DETACH_MODE=nohup DETACH=1 ./run_...sh       # force the tmux-free path
 #   DRY_RUN=1 ./run_mpsenet_campaign.sh          # print the plan, train nothing
 #   ./run_mpsenet_campaign.sh --summary          # PESQ table for whatever has run
+#   ./run_mpsenet_campaign.sh --stop             # stop a detached campaign + its trainers
 #
 #   Rough peak VRAM per concurrent run (shipped batch sizes, 32000-sample segments):
 #     lisennet    ~2 GB    (37-46k params, batch 16)
@@ -192,6 +196,54 @@ build_run_list() {
     echo $out
 }
 
+# --stop: kill a detached campaign AND the trainers it spawned. Without tmux
+# there is no session to kill, so the trainers have to be hunted down explicitly —
+# killing only the campaign script would leave them running on the GPU, and the
+# next launch would then fight them for VRAM.
+if [[ "${1:-}" == "--stop" ]]; then
+    killed=0
+    if [[ -f campaign.pid ]]; then
+        pid="$(cat campaign.pid)"
+        if kill -0 "$pid" 2>/dev/null; then
+            # Kill the whole PROCESS GROUP (note the leading '-'), not just the
+            # campaign script. Two reasons this matters:
+            #   - The trainers are separate processes. Killing only the campaign
+            #     orphans them and they keep holding the GPU, so the next launch
+            #     fights the last one for VRAM.
+            #   - Matching them by command line instead is fragile: it depends on
+            #     CKPT_PREFIX being the same at stop time as at launch time, which
+            #     it is not if the campaign was started with a custom prefix.
+            # setsid made the campaign a process-group leader, so its PGID is its
+            # PID and one signal reaches everything it spawned.
+            if kill -TERM -- -"$pid" 2>/dev/null; then
+                echo "stopped campaign and its trainers (process group $pid)"
+            else
+                kill -TERM "$pid" 2>/dev/null && echo "stopped campaign (pid $pid)"
+            fi
+            killed=1
+            # Give them a moment, then make sure they are actually gone.
+            for _ in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+                echo "  (needed SIGKILL)"
+            fi
+        fi
+        rm -f campaign.pid
+    fi
+    # Belt and braces: sweep any trainer still alive under this checkpoint prefix
+    # (covers a campaign started before the pidfile existed, or a stale tmux run).
+    for p in $(pgrep -f -- "--checkpoint_path ${CKPT_PREFIX}" 2>/dev/null || true); do
+        kill -TERM "$p" 2>/dev/null && echo "  stopped stray trainer pid $p" && killed=1
+    done
+    if command -v tmux >/dev/null 2>&1 && tmux has-session -t mpsenet_campaign 2>/dev/null; then
+        tmux kill-session -t mpsenet_campaign && echo "killed tmux session" && killed=1
+    fi
+    (( killed )) || echo "nothing running."
+    echo "Re-launch to resume: finished runs are skipped, a partial run continues"
+    echo "from its latest rolling checkpoint."
+    exit 0
+fi
+
 # --summary: PESQ table for whatever has run so far. Safe to call any time.
 if [[ "${1:-}" == "--summary" ]]; then
     printf '%-42s %10s %8s %s\n' RUN "BEST PESQ" STATE CKPT
@@ -275,16 +327,80 @@ if (( ${#GPU_LIST[@]} > 0 )); then
 fi
 
 if [[ "$DETACH" == "1" && -z "${TMUX:-}" ]]; then
-    SESSION="mpsenet_campaign"
-    tmux has-session -t "$SESSION" 2>/dev/null && \
-        die "tmux session '$SESSION' already exists. Attach: tmux attach -t $SESSION"
-    tmux new-session -d -s "$SESSION" \
-        "MODELS='$MODELS' RUNS='$RUNS' JOBS='$JOBS' GPU='$GPU' CORES_PER_JOB='$CORES_PER_JOB' DETACH=0 ./run_mpsenet_campaign.sh 2>&1 | tee campaign.log"
-    echo "Campaign launched in tmux session '$SESSION'."
-    echo "  attach:  tmux attach -t $SESSION      (detach: Ctrl-b then d)"
+    # The campaign runs for many hours, so it must survive an SSH drop. tmux is
+    # the nicest way (you can attach and watch), but plenty of servers don't have
+    # it — so fall back to a plain detached process. Both are supported; tmux is
+    # used only if it is actually installed.
+    #
+    # DETACH_MODE=nohup forces the tmux-free path even where tmux exists.
+    DETACH_MODE="${DETACH_MODE:-auto}"
+    if [[ "$DETACH_MODE" == "auto" ]]; then
+        if command -v tmux >/dev/null 2>&1; then DETACH_MODE=tmux; else DETACH_MODE=nohup; fi
+    fi
+
+    CHILD_ENV=(
+        "MODELS=$MODELS" "RUNS=$RUNS" "JOBS=$JOBS" "GPU=$GPU"
+        "CORES_PER_JOB=$CORES_PER_JOB" "CKPT_PREFIX=$CKPT_PREFIX"
+        "VAL_INTERVAL=$VAL_INTERVAL" "CHECKPOINT_INTERVAL=$CHECKPOINT_INTERVAL"
+        "STDOUT_INTERVAL=$STDOUT_INTERVAL" "BEST_START=$BEST_START"
+        "LISENNET_EPOCHS=$LISENNET_EPOCHS" "CONVFSENET_EPOCHS=$CONVFSENET_EPOCHS"
+        "NSNET2_EPOCHS=$NSNET2_EPOCHS" "BASENET_EPOCHS=$BASENET_EPOCHS"
+        "DETACH=0"
+    )
+
+    if [[ -f campaign.pid ]] && kill -0 "$(cat campaign.pid)" 2>/dev/null; then
+        die "a campaign is already running (pid $(cat campaign.pid)).
+       Watch it:  tail -f campaign.log
+       Stop it:   ./run_mpsenet_campaign.sh --stop"
+    fi
+
+    case "$DETACH_MODE" in
+    tmux)
+        SESSION="mpsenet_campaign"
+        tmux has-session -t "$SESSION" 2>/dev/null && \
+            die "tmux session '$SESSION' already exists. Attach: tmux attach -t $SESSION"
+        tmux new-session -d -s "$SESSION" \
+            "env $(printf '%q ' "${CHILD_ENV[@]}") ./run_mpsenet_campaign.sh 2>&1 | tee campaign.log"
+        echo "Campaign launched in tmux session '$SESSION'."
+        echo "  attach:  tmux attach -t $SESSION      (detach: Ctrl-b then d)"
+        ;;
+    nohup)
+        # setsid puts the campaign in its own session, so the SIGHUP that fires
+        # when your SSH connection drops cannot reach it. nohup is the fallback
+        # if setsid is missing.
+        #
+        # The child records its OWN pid, via CAMPAIGN_PIDFILE. Do NOT try to
+        # discover it from out here with `pgrep -f run_mpsenet_campaign`: that
+        # also matches the shell currently *launching* it (its command line
+        # contains the script's name), so it records the launcher's pid — and
+        # --stop then kills the wrong process while the campaign runs on.
+        rm -f campaign.pid
+        if command -v setsid >/dev/null 2>&1; then
+            setsid --fork env "${CHILD_ENV[@]}" CAMPAIGN_PIDFILE=campaign.pid \
+                ./run_mpsenet_campaign.sh > campaign.log 2>&1 < /dev/null &
+        else
+            nohup env "${CHILD_ENV[@]}" CAMPAIGN_PIDFILE=campaign.pid \
+                ./run_mpsenet_campaign.sh > campaign.log 2>&1 < /dev/null &
+            disown 2>/dev/null || true
+        fi
+        for _ in $(seq 1 100); do [[ -s campaign.pid ]] && break; sleep 0.2; done
+        [[ -s campaign.pid ]] || die "the detached campaign did not start; see campaign.log"
+        CAMPAIGN_PID="$(cat campaign.pid)"
+        echo "Campaign launched detached (no tmux on this box), pid $CAMPAIGN_PID."
+        echo "  It is in its own session, so it survives an SSH disconnect."
+        ;;
+    *) die "unknown DETACH_MODE '$DETACH_MODE' (want 'auto', 'tmux' or 'nohup')" ;;
+    esac
     echo "  log:     tail -f campaign.log"
     echo "  summary: ./run_mpsenet_campaign.sh --summary"
+    echo "  stop:    ./run_mpsenet_campaign.sh --stop"
     exit 0
+fi
+
+# A detached launch passes CAMPAIGN_PIDFILE so we can stamp our OWN pid — the only
+# reliable way for the launcher to learn it (see the nohup branch above).
+if [[ -n "${CAMPAIGN_PIDFILE:-}" ]]; then
+    echo $$ > "$CAMPAIGN_PIDFILE"
 fi
 
 n_runs=$(echo $RUNS | wc -w)
@@ -390,6 +506,7 @@ for name in $RUNS; do
     [[ -f "${CKPT_PREFIX}${name}/.failed" ]] && failed="$failed $name"
 done
 
+rm -f campaign.pid
 echo
 log "Campaign finished ($started launched)."
 [[ -n "$failed" ]] && log "FAILED:$failed"

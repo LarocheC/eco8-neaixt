@@ -80,7 +80,22 @@ df -h .
 DETACH=1 JOBS=5 ./run_mpsenet_campaign.sh
 ```
 
-`DETACH=1` runs it in a detached tmux session, so an SSH drop doesn't kill it.
+`DETACH=1` detaches the campaign so an SSH drop doesn't kill it. It uses tmux if
+the box has it, and otherwise falls back to a plain detached process (`setsid`,
+its own session, so SIGHUP can't reach it) — **no tmux required**. Force either
+with `DETACH_MODE=tmux` / `DETACH_MODE=nohup`.
+
+Without tmux there's no session to attach to, so watch it through the log:
+
+```bash
+tail -f campaign.log                       # same output you'd see in tmux
+./run_mpsenet_campaign.sh --summary        # PESQ table
+./run_mpsenet_campaign.sh --stop           # stop the campaign AND its trainers
+```
+
+`--stop` signals the whole process group, so it takes the in-flight trainers down
+with it. That matters: killing only the campaign script would orphan them and
+they'd keep holding the GPU, and the next launch would fight them for VRAM.
 
 - [ ] Header shows the GPU and CPU split you expect
 - [ ] Session started; `tmux attach -t mpsenet_campaign` shows runs in flight
@@ -113,8 +128,11 @@ RUNS="lisennet_hybrid_nc24 lisennet_conv_hardened_nc24" ...   # an explicit pair
 tail -f campaign.log                                  # campaign-level START/DONE/FAILED
 tail -f cp_mpsenet_<name>/train.log                   # one run
 ./run_mpsenet_campaign.sh --summary                   # PESQ table, any time
+./run_mpsenet_campaign.sh --stop                      # stop everything (resumable)
 tensorboard --logdir_spec=...                         # printed when the campaign ends
 ```
+
+Everything above works whether or not the box has tmux.
 
 - [ ] **First 20 minutes, check one log for `nan`.** A LiSenNet run that prints
   `G: nan` means a loss term is backpropping through an unguarded
