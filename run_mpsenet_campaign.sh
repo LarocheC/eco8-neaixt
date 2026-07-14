@@ -15,16 +15,19 @@
 #   baseline you need to compare against. Do not "helpfully" repoint these.
 #
 # PARALLELISM
-#   Runs execute JOBS-at-a-time on one GPU. Every shipped batch_size is left
-#   exactly as-is so the new numbers stay a clean A/B against the old ones —
-#   the big card buys wall-clock through concurrency, not through a changed
-#   recipe. Tune JOBS to your VRAM (see the table under "Usage").
+#   Runs execute JOBS-at-a-time. Every shipped batch_size is left exactly as-is
+#   so the new numbers stay a clean A/B against the old ones — the big card buys
+#   wall-clock through concurrency, not through a changed recipe. Tune JOBS to
+#   your VRAM (see the table under "Usage"). GPU=<id> pins the campaign to one
+#   device; GPU=<id>,<id> spreads runs across several.
 #
 # Usage
 #   ./run_mpsenet_campaign.sh                    # default campaign, 3 at a time
 #   JOBS=5 ./run_mpsenet_campaign.sh             # 5 concurrent runs
 #   MODELS="lisennet" ./run_mpsenet_campaign.sh  # one model group
 #   RUNS="lisennet_conv_hardened_nc24 convfsenet_win" ./run_mpsenet_campaign.sh
+#   GPU=1 ./run_mpsenet_campaign.sh              # pin to GPU 1 (GPU 0 busy elsewhere)
+#   GPU=1,2 JOBS=6 ./run_mpsenet_campaign.sh     # spread runs across GPUs 1 and 2
 #   DETACH=1 ./run_mpsenet_campaign.sh           # run inside tmux, survives SSH drop
 #   DRY_RUN=1 ./run_mpsenet_campaign.sh          # print the plan, train nothing
 #   ./run_mpsenet_campaign.sh --summary          # PESQ table for whatever has run
@@ -88,6 +91,23 @@ JOBS="${JOBS:-3}"
 DRY_RUN="${DRY_RUN:-0}"
 DETACH="${DETACH:-0}"
 
+# Which physical GPU(s) to use. Empty = whatever CUDA_VISIBLE_DEVICES already says
+# (i.e. all of them).
+#
+#   GPU=1      pin the whole campaign to GPU 1  (e.g. GPU 0 is busy with another run)
+#   GPU=1,2    spread the runs across GPUs 1 and 2, round-robin
+#
+# Every trainer hardcodes `cuda:0`, so pinning works by making exactly one device
+# VISIBLE to each job — physical GPU 1 then *is* that job's cuda:0.
+#
+# Use this rather than exporting CUDA_VISIBLE_DEVICES yourself: with DETACH=1 the
+# campaign re-execs inside tmux, and `tmux new-session` inherits the tmux SERVER's
+# environment, not your shell's. If a tmux server was already running, an exported
+# CUDA_VISIBLE_DEVICES is silently dropped — you would think you were on GPU 1 and
+# land on GPU 0, on top of the job you were trying to avoid. GPU is forwarded
+# explicitly through the re-exec, so it survives.
+GPU="${GPU:-}"
+
 # Epochs per model — the counts the published runs actually used, so the new
 # numbers are comparable to the old ones.
 LISENNET_EPOCHS="${LISENNET_EPOCHS:-100}"
@@ -119,6 +139,17 @@ die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 # joblib's loky backend honours LOKY_MAX_CPU_COUNT, so give each job a fair share.
 NCORES="$(nproc 2>/dev/null || echo 8)"
 CORES_PER_JOB="${CORES_PER_JOB:-$(( NCORES / JOBS > 0 ? NCORES / JOBS : 1 ))}"
+
+# --- GPU pinning ------------------------------------------------------------
+GPU_LIST=()
+if [[ -n "$GPU" ]]; then
+    IFS=',' read -r -a GPU_LIST <<< "$GPU"
+fi
+
+gpu_for() {   # run index -> physical GPU id, or "" to leave the device choice alone
+    (( ${#GPU_LIST[@]} == 0 )) && { echo ""; return; }
+    echo "${GPU_LIST[$(( $1 % ${#GPU_LIST[@]} ))]}"
+}
 
 model_of() {   # run name -> trainer module
     # The NSNet2 names carry no shared prefix, so they are listed explicitly.
@@ -230,12 +261,25 @@ sys.exit(1 if bad else 0)
 PYEOF
 log "preflight: all $(echo $RUNS | wc -w) runs parse and build"
 
+# A GPU index that doesn't exist would otherwise surface as a confusing CUDA
+# error hours in, or (worse) as a silent fall back to CPU.
+if (( ${#GPU_LIST[@]} > 0 )); then
+    if ! command -v nvidia-smi >/dev/null; then
+        die "GPU=$GPU requested but nvidia-smi is not available."
+    fi
+    n_gpu="$(nvidia-smi -L | wc -l)"
+    for g in "${GPU_LIST[@]}"; do
+        [[ "$g" =~ ^[0-9]+$ ]] || die "GPU='$GPU': '$g' is not a GPU index."
+        (( g < n_gpu )) || die "GPU $g does not exist (this box has $n_gpu: $(nvidia-smi -L | cut -d: -f1 | tr '\n' ' '))."
+    done
+fi
+
 if [[ "$DETACH" == "1" && -z "${TMUX:-}" ]]; then
     SESSION="mpsenet_campaign"
     tmux has-session -t "$SESSION" 2>/dev/null && \
         die "tmux session '$SESSION' already exists. Attach: tmux attach -t $SESSION"
     tmux new-session -d -s "$SESSION" \
-        "MODELS='$MODELS' RUNS='$RUNS' JOBS='$JOBS' DETACH=0 ./run_mpsenet_campaign.sh 2>&1 | tee campaign.log"
+        "MODELS='$MODELS' RUNS='$RUNS' JOBS='$JOBS' GPU='$GPU' CORES_PER_JOB='$CORES_PER_JOB' DETACH=0 ./run_mpsenet_campaign.sh 2>&1 | tee campaign.log"
     echo "Campaign launched in tmux session '$SESSION'."
     echo "  attach:  tmux attach -t $SESSION      (detach: Ctrl-b then d)"
     echo "  log:     tail -f campaign.log"
@@ -248,6 +292,11 @@ log "MP-SENet retraining campaign"
 log "  models : $MODELS"
 log "  runs   : $n_runs, $JOBS at a time"
 log "  cpu    : $NCORES cores -> $CORES_PER_JOB per job (caps joblib's per-step PESQ pool)"
+if (( ${#GPU_LIST[@]} > 0 )); then
+    log "  gpu    : pinned to $GPU$( (( ${#GPU_LIST[@]} > 1 )) && echo ' (runs round-robin across them)')"
+else
+    log "  gpu    : not pinned — set GPU=<id> to keep off a busy device"
+fi
 log "  ckpts  : ${CKPT_PREFIX}<name>/   (fresh dirs — the old cp_<name>/ are left untouched)"
 echo
 printf '  %-42s %-11s %7s  %s\n' RUN TRAINER EPOCHS CKPT
@@ -267,11 +316,19 @@ fi
 # ---------------------------------------------------------------------------
 
 train_one() {
-    local name="$1"
+    local name="$1" gpu="$2"
     local model cp_dir epochs
     model="$(model_of "$name")"
     cp_dir="${CKPT_PREFIX}${name}"
     epochs="$(epochs_of "$name")"
+
+    # This runs in a forked subshell, so the export is scoped to this one job —
+    # which is what lets GPU=0,1 give different jobs different devices.
+    # Only export when a GPU was requested: CUDA_VISIBLE_DEVICES="" would hide
+    # EVERY device and silently drop the run onto the CPU.
+    if [[ -n "$gpu" ]]; then
+        export CUDA_VISIBLE_DEVICES="$gpu"
+    fi
 
     mkdir -p "$cp_dir"
     rm -f "$cp_dir/.failed"
@@ -302,6 +359,7 @@ train_one() {
 
 failed=""
 started=0
+run_idx=0
 for name in $RUNS; do
     cp_dir="${CKPT_PREFIX}${name}"
 
@@ -318,8 +376,10 @@ for name in $RUNS; do
     # Block until a slot frees up.
     while (( $(jobs -rp | wc -l) >= JOBS )); do wait -n || true; done
 
-    log "START  $name -> $cp_dir ($(model_of "$name"), $(epochs_of "$name") epochs)"
-    train_one "$name" &
+    gpu="$(gpu_for "$run_idx")"
+    run_idx=$((run_idx + 1))
+    log "START  $name -> $cp_dir ($(model_of "$name"), $(epochs_of "$name") epochs${gpu:+, GPU $gpu})"
+    train_one "$name" "$gpu" &
     started=$((started + 1))
 done
 

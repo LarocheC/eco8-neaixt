@@ -59,6 +59,8 @@ nproc
 df -h .
 ```
 
+- [ ] **GPU.** `nvidia-smi` — if another job is on the box, note which device is
+  free and pass `GPU=<id>` at launch (step 5).
 - [ ] **VRAM.** Peak per concurrent run at the shipped batch sizes:
   LiSenNet ~2 GB · ConvFSENet ~6 GB · NSNet2 ~10 GB · BASENet ~13 GB.
   On 96 GB, `JOBS=5` is comfortable; `JOBS=8` fits if BASENet stays out.
@@ -80,7 +82,22 @@ DETACH=1 JOBS=5 ./run_mpsenet_campaign.sh
 
 `DETACH=1` runs it in a detached tmux session, so an SSH drop doesn't kill it.
 
+- [ ] Header shows the GPU and CPU split you expect
 - [ ] Session started; `tmux attach -t mpsenet_campaign` shows runs in flight
+
+**Sharing the box with another job?** Pin the campaign to a free device:
+
+```bash
+GPU=1 DETACH=1 JOBS=5 ./run_mpsenet_campaign.sh    # GPU 0 is busy elsewhere
+GPU=1,2 DETACH=1 JOBS=6 ./run_mpsenet_campaign.sh  # spread runs across 1 and 2
+```
+
+Use `GPU=` rather than exporting `CUDA_VISIBLE_DEVICES` yourself. With
+`DETACH=1` the campaign re-execs inside tmux, and `tmux new-session` inherits the
+tmux *server's* environment, not your shell's — so if a tmux server was already
+running, an exported `CUDA_VISIBLE_DEVICES` is silently dropped and you land on
+GPU 0, on top of the job you were trying to avoid. `GPU=` is forwarded through
+the re-exec explicitly. A non-existent index is a hard error, not a fallback.
 
 Useful variants:
 
