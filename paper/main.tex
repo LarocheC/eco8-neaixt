@@ -105,14 +105,18 @@ contribute:
 \begin{figure*}[t]
   \centering
   \includegraphics[width=\textwidth]{architecture}
-  \caption{The NPU-hardened LiSenNet. The sub-band U-Net macro-structure is
-  unchanged; the dual-path GRU bottleneck is re-expressed with NPU-mappable
-  convolutions (blue; one block expanded below: a symmetric depthwise
-  frequency convolution and a stack of causal dilated depthwise time
-  convolutions with a convolutional GLU). Orange tags mark the four hardening
-  swaps (Sec.~\ref{ssec:hardening}); violet chips mark the causal ring
-  buffers that the streaming export exposes as explicit state I/O
-  (Sec.~\ref{ssec:deploy}). Arrow labels give the frequency-axis size.}
+  \caption{The NPU-hardened LiSenNet, drawn as a \emph{diff} against the
+  original architecture (Fig.~1 of~\cite{yan2024lisennet}; same layout and
+  notation). Green blocks are unchanged; blue blocks are the NPU
+  replacements, with orange tags naming what they replace (and globally:
+  LayerNorm~$\Rightarrow$~BatchNorm, which folds into the convolutions;
+  PReLU/Mish~$\Rightarrow$~ReLU6; Sec.~\ref{ssec:hardening}). The ghosted
+  Griffin-Lim refinement is dropped at deployment in favor of the noisy
+  phase. (b)~expands the dual-path \emph{conv} (DPC) module that replaces the
+  dual-path recurrent (DPR) module --- unlike the DPR, it needs no
+  batch-merging reshapes, which are themselves NPU-unmappable
+  (Sec.~\ref{sec:background}). Violet chips mark the causal ring buffers the
+  streaming export exposes as explicit state I/O (Sec.~\ref{ssec:deploy}).}
   \label{fig:arch}
 \end{figure*}
 

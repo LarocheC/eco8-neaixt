@@ -1,165 +1,194 @@
-% Fig. 1 — NPU-hardened LiSenNet architecture (standalone TikZ -> architecture.pdf).
-% Build: pdflatex architecture.tex   (run from paper/figures/)
-% Design: two-row U-Net snake (encoder top, decoder bottom, vertically aligned
-% skips), dual-path conv bottleneck expanded in a detail panel below.
-% Colors validated CVD-safe (dataviz skill): blue = the conv redesign,
-% orange = hardening swaps, violet = FIFO streaming state.
+% Fig. 1 — NPU-hardened LiSenNet as a DIFF against the original paper's figure
+% (arXiv:2409.13285, Fig. 1): same layout, same notation; green = unchanged,
+% blue = replaced for the NPU, orange = what it replaced, violet = streaming
+% state, ghosted = dropped at deployment.
+% Build: pdflatex architecture.tex   (or `make` from paper/)
+% Palette CVD-validated (dataviz skill): #2a78d6/#eb6834/#4a3aa7/#008300.
 \documentclass[tikz,border=2pt]{standalone}
 \usepackage{times}
-\usepackage{amsmath}
-\usetikzlibrary{positioning,calc,arrows.meta,fit}
+\usepackage{amsmath,amsbsy}
+\usetikzlibrary{positioning,calc,arrows.meta,fit,backgrounds}
 
-% palette (validated)
 \definecolor{convblue}{HTML}{2A78D6}
 \definecolor{hardorange}{HTML}{EB6834}
 \definecolor{stviolet}{HTML}{4A3AA7}
+\definecolor{okgreen}{HTML}{008300}
 
 \begin{document}
 \begin{tikzpicture}[
   font=\scriptsize,
-  >={Stealth[length=1.6mm]},
-  flow/.style={->, black!60, line width=0.7pt},
-  skip/.style={->, black!45, densely dashed, line width=0.6pt},
-  blk/.style={draw=black!55, fill=black!6, rounded corners=1.5pt,
-              align=center, inner sep=2.5pt, minimum height=8.5mm},
-  ds/.style={blk, minimum width=20mm},
-  bneck/.style={draw=convblue, fill=convblue!12, rounded corners=1.5pt,
-                align=center, inner sep=2.5pt, line width=0.9pt},
+  >={Stealth[length=1.5mm]},
+  flow/.style={->, black!65, line width=0.6pt},
+  skiparc/.style={->, black!45, line width=0.55pt, rounded corners=1.5mm},
+  keep/.style={draw=okgreen!60!black, fill=okgreen!13, rounded corners=1.2pt,
+               align=center, inner sep=1.5pt},           % unchanged (green, as in the original)
+  fn/.style={draw=black!60, fill=white, rounded corners=1.2pt,
+             align=center, inner sep=2pt},               % functional, unchanged
+  new/.style={draw=convblue, fill=convblue!13, rounded corners=1.2pt,
+              align=center, inner sep=1.5pt, line width=0.8pt}, % NPU replacement
+  ghost/.style={draw=black!35, densely dashed, fill=black!3, rounded corners=1.2pt,
+                align=center, inner sep=2pt, text=black!45},    % dropped at deploy
   swap/.style={draw=hardorange, fill=hardorange!8, rounded corners=1pt,
-               align=left, inner sep=1.8pt, font=\tiny, text=hardorange!50!black},
+               align=center, inner sep=1.6pt, font=\tiny, text=hardorange!50!black},
   fifo/.style={draw=stviolet, fill=stviolet!12, rounded corners=1pt,
                inner sep=1pt, font=\tiny, text=stviolet!50!black},
-  cc/.style={draw=black!55, fill=white, circle, inner sep=0.5pt, font=\tiny},
+  oc/.style={draw=black!65, fill=white, circle, inner sep=0.4pt, font=\scriptsize},
   lbl/.style={font=\tiny, text=black!60},
+  tall/.style={rotate=90, minimum width=15.5mm, minimum height=5.2mm,
+               font=\tiny, align=center},                % rotated tall block
 ]
 
-% =========================== encoder row (top) ==============================
-\node[blk, minimum width=12mm] (c1) at (0,0) {$1{\times}1$ Conv\\[-1pt]{\tiny $3{\to}6$ ch}};
-\node[ds, right=3.5mm of c1] (d1) {\textbf{DSConv} {\tiny $6{\to}12$}\\[-1pt]
-  {\tiny low $\tfrac14$: $2{\times}3$, $s{=}1$}\\[-2pt]
-  {\tiny high $\tfrac34$: $2{\times}5$, $s{=}(1,3)$}};
-\node[ds, right=3.5mm of d1] (d2) {\textbf{DSConv} {\tiny $12{\to}18$}\\[-1pt]
-  {\tiny low $\tfrac14$: $2{\times}3$, $s{=}1$}\\[-2pt]
-  {\tiny high $\tfrac34$: $2{\times}5$, $s{=}(1,3)$}};
-\node[ds, right=3.5mm of d2] (d3) {\textbf{DSConv} {\tiny $18{\to}24$}\\[-1pt]
-  {\tiny low $\tfrac14$: $2{\times}3$, $s{=}1$}\\[-2pt]
-  {\tiny high $\tfrac34$: $2{\times}5$, $s{=}(1,3)$}};
+% ======================= (a) overall structure (mirrors Fig.1a) =============
+\node[font=\scriptsize] (x) at (0,0) {$\boldsymbol{x}$};
+\node[fn, minimum height=6.5mm] (stft) at (0.95,0) {STFT};
+\node[font=\tiny] (ax) at (2.8,0.62) {$(\boldsymbol{A}_x)^c$};
+\node[font=\tiny] (px) at (2.8,-0.72) {$\Delta_f\boldsymbol{P}_x,\Delta_t\boldsymbol{P}_x$};
+\draw[flow] (x) -- (stft);
+\draw[flow] (stft.east) -- ++(0.14,0) |- node[lbl, above, pos=0.8]{$|\cdot|^{c}$} (ax.west);
+\draw[flow] (stft.east) -- ++(0.14,0) |- node[lbl, below, pos=0.8]{$\Delta_{f},\Delta_{t}(\angle\cdot)$} (px.west);
+\node[fn, minimum height=6.5mm] (cat) at (4.3,0) {concat};
+\draw[flow] (ax.east) -| ($(cat.west)+(-0.1,0.1)$) -- ($(cat.west)+(0,0.1)$);
+\draw[flow] (px.east) -| ($(cat.west)+(-0.1,-0.1)$) -- ($(cat.west)+(0,-0.1)$);
 
-% =========================== bottleneck (right, spans rows) =================
-\node[bneck, minimum width=21mm, minimum height=24mm, anchor=west]
-      (bn) at ($(d3.east)+(5.5mm,-1.05)$)
-      {\textbf{dual-path}\\\textbf{conv block}\\[1pt]
-            {\tiny intra-freq $\parallel$ inter-time}\\[1pt]
-            {\tiny $\times2$ blocks}\\[-1pt]{\tiny (deep: $\times3$, $+d{=}16$)}};
+% encoder (tall rotated blocks, as in the original)
+\node[keep, tall] (encA) at (5.7,0)  {Conv Block};
+\node[keep, tall] (encB) at (6.4,0) {Sub-band\\DS-Conv Block $\times3$};
+\begin{scope}[on background layer]
+\node[draw=black!40, densely dashed, fill=black!4, rounded corners=2pt, inner sep=1.5mm,
+      fit=(encA)(encB), label={[lbl]below:Encoder}] (encP) {};
+\end{scope}
+\draw[flow] (cat) -- (encP);
 
-% =========================== decoder row (bottom) ===========================
-\node[ds] (u1) at (d3 |- 0,-2.1) {\textbf{USConv} {\tiny $48{\to}18$}\\[-1pt]
-  {\tiny low $\tfrac12$: $1{\times}3$}\\[-2pt]
-  {\tiny high $\tfrac12$: ConvT $1{\times}3$, $s{=}3$}};
-\node[ds] (u2) at (d2 |- u1) {\textbf{USConv} {\tiny $36{\to}12$}\\[-1pt]
-  {\tiny low $\tfrac12$: $1{\times}3$}\\[-2pt]
-  {\tiny high $\tfrac12$: ConvT $1{\times}3$, $s{=}3$}};
-\node[ds] (u3) at (d1 |- u1) {\textbf{USConv} {\tiny $24{\to}6$}\\[-1pt]
-  {\tiny low $\tfrac12$: $1{\times}3$}\\[-2pt]
-  {\tiny high $\tfrac12$: ConvT $1{\times}3$, $s{=}3$}};
-\node[blk, minimum width=12mm] (mh) at (c1 |- u1)
-  {mask head\\[-1pt]{\tiny $2{\times}2$, $1{\times}1$, $\sigma$}};
+% bottleneck: DPC replaces DPR
+\node[new, minimum width=9.5mm, minimum height=11mm] (dpc) at (8.15,0)
+  {\textbf{DPC}\\[-1pt]{\tiny $\times2$}};
+\node[swap, anchor=south] at ($(dpc.north)+(0,0.32)$) (swdpr)
+  {was: \textbf{DPR} (GRU) $\times$N};
+\draw[hardorange, line width=0.5pt] (swdpr.south) -- ($(dpc.north)+(0,0.02)$);
+\node[fifo, anchor=north] at ($(dpc.south)+(0,-0.08)$) {FIFO $\times5$/blk};
+\draw[flow] (encP) -- (dpc);
 
-% concat circles at decoder inputs
-\node[cc, right=2.2mm of u1.east] (cat1) {C};
-\node[cc, right=2.2mm of u2.east] (cat2) {C};
-\node[cc, right=2.2mm of u3.east] (cat3) {C};
+% decoder (US-Conv | Conv Block | Sigmoid)
+\node[keep, tall] (decA) at (9.95,0)  {Sub-band\\US-Conv Block $\times3$};
+\node[keep, tall] (decB) at (10.65,0) {Conv Block};
+\node[new,  tall] (decC) at (11.35,0) {Sigmoid};
+\begin{scope}[on background layer]
+\node[draw=black!40, densely dashed, fill=black!4, rounded corners=2pt, inner sep=1.5mm,
+      fit=(decA)(decB)(decC), label={[lbl]below:Decoder}] (decP) {};
+\end{scope}
+\draw[flow] (dpc) -- (decP);
+\node[swap, anchor=north] at ($(decP.south)+(0.05,-0.42)$) (swdec)
+  {SP-Conv2d $\Rightarrow$ ConvTranspose2d\\[-1pt]LSigmoid $\Rightarrow$ Sigmoid};
+\draw[hardorange, line width=0.5pt] ($(swdec.north)+(-0.35,0)$) -- (decA.south);
+\draw[hardorange, line width=0.5pt] ($(swdec.north)+(1.05,0)$) -- (decC.south);
+% FIFO chips at the panel corners
+\node[fifo, anchor=north west] at ($(encP.south east)+(0.0,0.02)$) {F$\times2$/stage};
+\node[fifo, anchor=north east] at ($(decP.south west)+(0.0,0.02)$) {F};
 
-% =========================== main flow =======================================
-\node[font=\tiny, align=center, left=3mm of c1] (in)
-  {$[\,|X|^{0.3}\!,\Delta_f\varphi/\pi,\mathrm{IFD}/\pi\,]$};
-\node[lbl, anchor=south] at ($(in.north)+(0,0.2mm)$) {feat $3{\times}T{\times}257$};
-\draw[flow] (in) -- (c1);
-\draw[flow] (c1) -- node[lbl,above]{257} (d1);
-\draw[flow] (d1) -- node[lbl,above]{128} (d2);
-\draw[flow] (d2) -- node[lbl,above]{64} (d3);
-\draw[flow] (d3.east) -- node[lbl,above]{32} ++(4mm,0) |- ($(bn.west)+(0,9mm)$);
-\draw[flow] ($(bn.west)+(0,-9mm)$) -- ++(-2mm,0) |- (cat1);
-\draw[flow] (cat1) -- (u1);
-\draw[flow] (u1) -- node[lbl,above]{64} (cat2);
-\draw[flow] (cat2) -- (u2);
-\draw[flow] (u2) -- node[lbl,above]{128} (cat3);
-\draw[flow] (cat3) -- (u3);
-\draw[flow] (u3) -- node[lbl,above]{256} (mh);
-\node[font=\tiny, align=center, left=3mm of mh] (out)
-  {$\hat S=(m_0{+}m_1)\!\cdot\!|X|^{0.3}$};
-\node[lbl, anchor=north] at ($(out.south)+(0,-0.2mm)$) {$\hat M$: $2{\times}T{\times}257$};
-\draw[flow] (mh) -- (out);
+% mask apply + uncompress + iSTFT
+\node[oc] (mul) at (12.5,0) {$\otimes$};
+\draw[flow] (decP) -- (mul);
+\node[font=\tiny] (ayc) at (13.35,0) {$(\hat{\boldsymbol{A}}_y)^{c}$};
+\draw[flow] (mul) -- (ayc);
+\node[font=\tiny] (ay) at (14.7,0) {$\hat{\boldsymbol{A}}_y$};
+\draw[flow] (ayc) -- node[lbl, above]{$(\cdot)^{1/c}$} (ay);
+\node[fn, minimum height=6.5mm] (istft) at (15.85,0) {iSTFT};
+\draw[flow] (ay) -- (istft);
+\node[font=\scriptsize] (y) at (16.95,0) {$\hat{\boldsymbol{y}}$};
+\draw[flow] (istft) -- (y);
 
-% skip connections: drop, then run horizontally mid-gap, then into the concat
-\draw[skip] (d3.south) -- ++(0,-3.5mm) -| (cat1);
-\draw[skip] (d2.south) -- ++(0,-3.5mm) node[lbl, below left=0mm and -1mm]{skip} -| (cat2);
-\draw[skip] (d1.south) -- ++(0,-3.5mm) -| (cat3);
+% skips over the top (as in the original)
+\draw[skiparc] (ax.north) |- (7.0,1.72) -| (mul.north);
+\draw[skiparc] (encB.north) |- (8.15,1.28) -| (decA.north);
 
-% =========================== detail panel ===================================
-\node[draw=convblue!60, densely dashed, rounded corners=2pt, inner sep=3mm,
-      minimum width=166mm, minimum height=17mm, anchor=north west]
-      (panel) at ($(mh.south west)+(-13mm,-8.5mm)$) {};
+% phase path: Griffin-Lim ghosted, noisy phase reused at deployment
+\node[font=\tiny] (pxl) at (12.75,-1.7) {$\boldsymbol{P}_x$};
+\node[ghost, minimum height=6mm] (gl) at (14.25,-1.7) {Griffin-Lim\\[-2pt]Algorithm};
+\draw[hardorange!80, line width=0.6pt] (gl.south west) -- (gl.north east);
+\node[font=\tiny] (py) at (15.6,-1.7) {$\hat{\boldsymbol{P}}_y$};
+\draw[flow, black!40, densely dashed] (pxl) -- (gl);
+\draw[flow, black!40, densely dashed] (gl) -- (py);
+\draw[flow] (py.north) -- (istft.south);
+\node[swap, anchor=north] at ($(gl.south)+(0,-0.14)$) (swgl)
+  {deploy: $\hat{\boldsymbol{P}}_y{=}\boldsymbol{P}_x$ (noisy phase, GL off)};
+
+\node[font=\scriptsize\bfseries, anchor=west] at (-0.35,1.72) {(a)};
+
+% ======================= (b) DPC module (mirrors the DPR module fig) ========
+\coordinate (borg) at (0.1,-3.55);
+% input, no reshapes
+\node[swap, anchor=west, align=left] at ($(borg)+(-0.3,0.75)$) (swrs)
+  {no batch-merging \emph{Reshape}s ($BT{\times}F{\times}C$, $BF{\times}T{\times}C$) --- stays $B{\times}C{\times}T{\times}F$};
+
+% --- group 1: intra-frequency (was LN | Bi-GRU | Linear)
+\node[keep, minimum height=9mm, anchor=west] (g1n) at ($(borg)+(0.15,-0.1)$) {BN};
+\node[new, minimum height=9mm, right=1mm of g1n] (g1c)
+  {DW-Conv\\[-2pt]{\tiny $1{\times}11$ freq, sym.}};
+\node[new, minimum height=9mm, right=1mm of g1c] (g1p) {$1{\times}1$};
+\node[oc, right=1.8mm of g1p] (g1s) {$+$};
+\draw[flow] ($(g1n.west)+(-0.3,0)$) -- (g1n);
+\draw[flow] (g1n) -- (g1c); \draw[flow] (g1c) -- (g1p); \draw[flow] (g1p) -- (g1s);
+\draw[skiparc] ($(g1n.west)+(-0.18,0)$) |- ($(g1n.north)+(0.4,0.2)$) -| (g1s.north);
+\node[swap, anchor=north] at ($(g1c.south)+(0.35,-0.12)$)
+  {was: LN $\cdot$ \textbf{Bi-GRU} $\cdot$ Linear};
+
+% --- group 2: inter-time (was LN | GRU | Linear)
+\node[keep, minimum height=9mm, right=3mm of g1s] (g2n) {BN};
+\node[new, minimum height=9mm, right=1mm of g2n] (g2a)
+  {causal DW\\[-2pt]{\tiny $3{\times}1$, $d{=}1$, $+1{\times}1$}};
+\node[new, minimum height=9mm, right=1mm of g2a] (g2b) {\tiny $d{=}2$};
+\node[new, minimum height=9mm, right=1mm of g2b] (g2c) {\tiny $d{=}4$};
+\node[new, minimum height=9mm, right=1mm of g2c] (g2d) {\tiny $d{=}8$};
+\node[oc, right=1.8mm of g2d] (g2s) {$+$};
+\draw[flow] (g1s) -- (g2n);
+\draw[flow] (g2n) -- (g2a); \draw[flow] (g2a) -- (g2b);
+\draw[flow] (g2b) -- (g2c); \draw[flow] (g2c) -- (g2d); \draw[flow] (g2d) -- (g2s);
+\draw[skiparc] ($(g2n.west)+(-0.15,0)$) |- ($(g2n.north)+(0.4,0.2)$) -| (g2s.north);
+\node[fifo, anchor=south] at ($(g2a.north)+(0,0.04)$) {F};
+\node[fifo, anchor=south] at ($(g2b.north)+(0,0.04)$) {F};
+\node[fifo, anchor=south] at ($(g2c.north)+(0,0.04)$) {F};
+\node[fifo, anchor=south] at ($(g2d.north)+(0,0.04)$) {F};
+\node[swap, anchor=north] at ($(g2b.south)+(0.3,-0.12)$)
+  {was: LN $\cdot$ \textbf{GRU} $\cdot$ Linear};
+
+% --- group 3: ConvGLU (Mish -> ReLU6)
+\node[keep, minimum height=9mm, right=3mm of g2s] (g3n) {BN};
+\draw[flow] (g2s) -- (g3n);
+\node[new, anchor=west] (g3u1) at ($(g3n.east)+(0.14,0.31)$) {$1{\times}1{\uparrow}2\times$};
+\node[new, right=1mm of g3u1] (g3u2) {DW-Conv\\[-2pt]{\tiny $3{\times}3$ causal}};
+\node[new, right=1mm of g3u2] (g3u3) {ReLU6};
+\node[new, anchor=west] (g3l1) at ($(g3n.east)+(0.35,-0.34)$) {$1{\times}1$};
+\node[oc] (g3m) at ($(g3u3.east)+(0.32,-0.31)$) {$\otimes$};
+\node[new, right=1.8mm of g3m] (g3o) {$1{\times}1$};
+\node[oc, right=1.8mm of g3o] (g3s) {$+$};
+\draw[flow] ($(g3n.east)+(0,0.1)$) -- ++(0.07,0) |- (g3u1.west);
+\draw[flow] ($(g3n.east)+(0,-0.1)$) -- ++(0.07,0) |- (g3l1.west);
+\draw[flow] (g3u1) -- (g3u2); \draw[flow] (g3u2) -- (g3u3);
+\draw[flow] (g3u3.east) -| (g3m.north);
+\draw[flow] (g3l1.east) -| (g3m.south);
+\draw[flow] (g3m) -- (g3o); \draw[flow] (g3o) -- (g3s);
+\draw[skiparc] ($(g3n.west)+(-0.15,0)$) |- ($(g3u1.north)+(0.6,0.15)$) -| (g3s.north);
+\draw[flow] (g3s.east) -- ++(0.3,0);
+\node[fifo, anchor=south] at ($(g3u2.north)+(0,0.04)$) {F};
+\node[swap, anchor=north] at ($(g3o.south)+(-0.2,-0.36)$)
+  {Mish $\Rightarrow$ ReLU6};
+
+% panel around (b), on background
+\begin{scope}[on background layer]
+\node[draw=convblue!60, densely dashed, fill=convblue!4, rounded corners=2pt,
+      inner sep=2mm, fit=(swrs)(g1n)(g2s)(g3s)(g3u1)(g3l1)] (panel) {};
+\end{scope}
 \node[font=\scriptsize\bfseries, text=convblue, anchor=south west]
-      at ($(panel.north west)+(0.5mm,0.4mm)$) {one dual-path conv block (the GRU replacement)};
+      at ($(panel.north west)+(0.05,0.02)$)
+      {(b)\ \ DPC module --- the dual-path \emph{conv} replacement for the DPR module};
 
-% --- intra-frequency group
-\node[blk, anchor=west, minimum height=10mm] (bn1) at ($(panel.west)+(2mm,0)$) {BN};
-\node[bneck, right=2.5mm of bn1, minimum height=10mm]
-  (intra) {\textbf{intra-freq}\\[-1pt]{\tiny DW $1{\times}11$ sym.}\\[-2pt]{\tiny $+\,1{\times}1$, ReLU6}};
-% --- inter-time group
-\node[blk, right=5mm of intra, minimum height=10mm] (bn2) {BN};
-\node[bneck, right=2.5mm of bn2, minimum height=10mm] (it1)
-  {\textbf{inter-time}\\[-1pt]{\tiny causal DW $3{\times}1$, $d{=}1$}\\[-2pt]{\tiny $+\,1{\times}1$, ReLU6}};
-\node[bneck, right=2mm of it1, minimum height=10mm] (it2) {{\tiny $d{=}2$}};
-\node[bneck, right=2mm of it2, minimum height=10mm] (it3) {{\tiny $d{=}4$}};
-\node[bneck, right=2mm of it3, minimum height=10mm] (it4) {{\tiny $d{=}8$}};
-% --- GLU group
-\node[blk, right=5mm of it4, minimum height=10mm] (bn3) {BN};
-\node[bneck, right=2.5mm of bn3, minimum height=10mm] (glu)
-  {\textbf{ConvGLU}\\[-1pt]{\tiny $1{\times}1\,{\uparrow}2\times$, causal DW $3{\times}3$}\\[-2pt]{\tiny ReLU6 gate $\odot$, $1{\times}1$}};
-
-\draw[flow] (bn1) -- (intra);
-\draw[flow] (intra) -- node[cc, pos=0.5, inner sep=0.4pt]{+} (bn2);
-\draw[flow] (bn2) -- (it1);
-\draw[flow] (it1) -- (it2); \draw[flow] (it2) -- (it3); \draw[flow] (it3) -- (it4);
-\draw[flow] (it4) -- node[cc, pos=0.5, inner sep=0.4pt]{+} (bn3);
-\draw[flow] (bn3) -- (glu);
-\draw[flow] (glu.east) -- node[cc, pos=0.7, inner sep=0.4pt]{+} ++(6mm,0);
-
-% FIFO chips on causal convs (streaming state)
-\node[fifo, anchor=south] at ($(it1.north)+(0,0.6mm)$) {FIFO};
-\node[fifo, anchor=south] at ($(it2.north)+(0,0.6mm)$) {FIFO};
-\node[fifo, anchor=south] at ($(it3.north)+(0,0.6mm)$) {FIFO};
-\node[fifo, anchor=south] at ($(it4.north)+(0,0.6mm)$) {FIFO};
-\node[fifo, anchor=south] at ($(glu.north)+(0,0.6mm)$) {FIFO};
-% and on the encoder/decoder causal convs
-\node[fifo, anchor=south east] at ($(d1.north east)+(0,0.5mm)$) {FIFO $\times2$};
-\node[fifo, anchor=south east] at ($(d2.north east)+(0,0.5mm)$) {FIFO $\times2$};
-\node[fifo, anchor=south east] at ($(d3.north east)+(0,0.5mm)$) {FIFO $\times2$};
-\node[fifo, anchor=south east] at ($(mh.north east)+(0,0.5mm)$) {FIFO};
-
-% zoom bracket: bottleneck -> panel
-\draw[convblue!60, densely dashed, line width=0.6pt]
-  (bn.south west) -- ($(panel.north east)+(-25mm,0)$);
-\draw[convblue!60, densely dashed, line width=0.6pt]
-  (bn.south east) -- (panel.north east);
-
-% =========================== hardening callouts ==============================
-\node[swap, anchor=south west] at ($(d1.north west)+(-1mm,3.4mm)$) (sw1)
-  {\textbf{hardening:} 2-axis LayerNorm $\Rightarrow$ BatchNorm (folds into conv)};
-\node[swap, anchor=south east] at ($(bn.north east)+(1mm,1.5mm)$) (sw2)
-  {dual-path \textbf{GRU} $\Rightarrow$ \textbf{conv}};
-\node[swap, anchor=north east] at ($(u1.south east)+(0,-1.6mm)$) (sw3)
-  {sub-pixel shuffle $\Rightarrow$ ConvTranspose};
-\node[swap, anchor=north west] at ($(mh.south west)+(-13mm,-1.6mm)$) (sw4)
-  {PReLU / Mish $\Rightarrow$ ReLU6 (bounded $=$ NPU Clip)};
-
-% legend (violet)
-\node[font=\tiny, text=stviolet!50!black, anchor=north west]
-  at ($(panel.south west)+(0,-1.2mm)$)
-  {\tikz\node[fifo]{FIFO};\ \ causal ring buffer, exposed as state I/O by the
-   streaming export (17 tensors for the $\times2$-block model)};
+% ======================= legend ==============================================
+\node[anchor=north west, font=\tiny, text=black!70, align=left]
+  at ($(panel.south west)+(0,-0.14)$)
+  {\tikz\node[keep, inner sep=1.4pt]{\phantom{g}};\ unchanged from LiSenNet\quad
+   \tikz\node[new, inner sep=1.4pt]{\phantom{g}};\ NPU replacement\quad
+   \tikz\node[swap]{was: $\ldots$};\ what it replaces (also globally: LayerNorm $\Rightarrow$ BatchNorm, PReLU/Mish $\Rightarrow$ ReLU6)\quad
+   \tikz\node[fifo]{F};\ causal ring buffer $=$ state I/O of the streaming export (17 tensors)};
 
 \end{tikzpicture}
 \end{document}

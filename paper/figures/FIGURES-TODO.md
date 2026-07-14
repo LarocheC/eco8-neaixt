@@ -1,10 +1,14 @@
 # Planned figures
 
 1. **Fig. 1 — architecture + hardening** (`architecture.pdf`): ✅ DONE
-   (2026-07-14). Standalone TikZ (`architecture.tex`, `pdflatex` — or `make`
-   from `paper/`); two-row U-Net snake with the dual-path conv block expanded
-   in a detail panel, four hardening tags (orange), FIFO state chips (violet),
-   CVD-validated palette. Wired into `main.tex` as a full-width `figure*`.
+   (2026-07-14, v2). Standalone TikZ (`architecture.tex`; `make` from
+   `paper/`). Drawn as a **diff against the original paper's Fig. 1**
+   (arXiv:2409.13285 — same two-panel layout, same A/P/c notation): (a)
+   overall structure with green=unchanged, blue=NPU replacement (DPC, Sigmoid),
+   orange was-tags, ghosted Griffin-Lim (deploy uses noisy phase), violet FIFO
+   chips; (b) the DPC module mirroring the original's DPR module panel
+   (was: LN·Bi-GRU·Linear / LN·GRU·Linear, Mish→ReLU6, no batch-merging
+   reshapes). CVD-validated palette. Wired into `main.tex` as `figure*`.
 
 2. **Fig. 2 — quality vs. on-device latency** (`pesq_vs_latency.pdf`): scatter
    of every deployment measured on the N6 (Table 2 rows): x = ms/frame
