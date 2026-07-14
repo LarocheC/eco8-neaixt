@@ -313,6 +313,99 @@ The deploy artifact is the windowed signed-int8 graph
 verified QInt8-only) — published as `conv-hardened/g_best_windowed_int8_static.onnx`
 on the HF repo and deployed below.
 
+## Recurrence vs. conv + FIFO on the time axis — the hybrid bottleneck (2026-07-14)
+
+Everything above replaced *both* of LiSenNet's GRUs with convolutions, because the
+dual-path-RNN block as a whole was the Neural-ART blocker. But the two GRUs are not
+the same bet, and lumping them together left a question unasked:
+
+* the **intra** GRU runs over *frequency*, which is fully available at each frame.
+  Bidirectional context there needs no state, so a symmetric depthwise conv is the
+  strictly cheaper way to get it — replacing it is uncontroversial.
+* the **inter** GRU runs over *time*, and there the conv variant pays for its
+  finite receptive field: a stack of dilated causal convs whose FIFO buffers hold an
+  RF-frame history of activations. Recurrence gets *unbounded* lookback out of one
+  hidden state. Dropping it may have been a mistake.
+
+`bottleneck: "hybrid"` (`DualPathHybrid`) tests exactly that — conv over frequency,
+**GRU over time**. Against `bottleneck: "conv"` it is a single-variable swap: encoder,
+decoder, norms, activations, the intra-frequency mixer and `n_blocks` are identical,
+and `hidden_dim` sizes the GRU so the **parameter counts match** (36,384 vs 36,288;
+45,600 vs 46,248). Any quality difference is recurrence-vs-FIFO, not capacity.
+
+### Recurrence on an NPU — the GRU cell as 1×1 convolutions
+
+A recurrent bottleneck looks undeployable: a traced `nn.GRU` exports an ONNX `GRU`
+op (Neural-ART cannot map it) and needs the `(b,t,f,d) → (b·f,t,d)` reshape the
+compiler rejects outright. Both objections are artifacts of *how the recurrence is
+written*, not of recurrence itself. At `t == 1` — which is what streaming inference
+does anyway — a GRU step is just
+
+```
+r = σ(W_ir x + W_hr h)    z = σ(W_iz x + W_hz h)
+n = tanh(W_in x + r ⊙ W_hn h)          h' = z ⊙ (h − n) + n
+```
+
+and with the weights shared across frequency (exactly what `nn.GRU` does when it
+treats `f` as batch) every one of those matmuls is a **1×1 convolution** over
+`(b, d, 1, f)`, with `h` an explicit `(b, H, 1, f)` state tensor. So `TimeGRU` keeps
+one set of weights and two evaluation paths: the fused `nn.GRU` sequence kernel for
+training, and the unrolled conv cell for streaming/export. They agree to **1.2e-7**
+(`tests/test_lisennet_hybrid_bottleneck.py` pins this — if they ever diverge, the
+board runs a different model than the one that was trained).
+
+The exported streaming graph therefore has **0 GRU ops**: recurrence reaches the NPU
+as `Conv / Add / Sigmoid / Tanh / Mul` on 4-D tensors. It is the same `feat + state_i_in
+→ est_mag + state_i_out` contract as the conv variant, so it deploys through the same
+toolchain — the GRU hidden state is just another state tensor.
+
+### What it costs to stream (measured; PESQ pending)
+
+At matched parameters, on the deployable streaming graph:
+
+| variant | params | RF | state tensors | state | ONNX nodes | ms/frame (CPU, 1 thr) |
+| ------- | -----: | --: | ---: | ---: | ---: | ---: |
+| conv nc24            | 36,288 |  68 | 17 | 226.5 kB | 642 | 2.70 |
+| **hybrid nc24**      | 36,384 |  ∞  | **11** | **51.0 kB** | **476** | **1.79** |
+| conv relu6-deep      | 46,248 | 196 | 25 | 616.5 kB | 931 | 4.42 |
+| **hybrid relu6-deep**| 45,600 |  ∞  | **13** | **66.0 kB** | **577** | **2.51** |
+
+* **Recurrence streams cheaper than the FIFO it replaces — 4.4–9.3× less state.**
+  This inverts the usual intuition. A conv+FIFO carries an *activation history*
+  (RF × C × F floats, and it grows with every extension of the receptive field); a
+  GRU carries a *compressed summary* (H × F floats, fixed) and its lookback is
+  unbounded. Buying context with dilations means buying state; buying it with
+  recurrence does not.
+* **It also deletes the ops that actually cost time on this chip.** The N6 streaming
+  graph is launch/state-bound, not compute-bound (see above: NPU idle ~74%, "epoch
+  count, not compute, sets the frame cost"). The hybrid drops 26–38% of the nodes and
+  most of the Slice/Concat/Pad state plumbing (53→37 Slice, 46→30 Concat, 20→12 Pad
+  on nc24) — precisely the overhead that sets the floor. On host CPU it is already
+  **1.5–1.8× faster per frame**; the on-board prediction is a real latency win, and
+  it is falsifiable.
+* **The stateless windowed graph is not available to it, by construction.** A GRU has
+  no finite receptive field, so no window reproduces the offline model — the windowed
+  export raises rather than silently shipping a truncated model. That is the honest
+  statement of the trade, and it is the one axis where conv+FIFO strictly wins: only a
+  finite RF can be recomputed statelessly. (Per the section below, that mode loses by
+  12–26× anyway, so it costs the hybrid nothing in practice.)
+
+**Quality is not yet measured** — both configs are ready to train
+(`configs/lisennet_hybrid_nc24.json`, `configs/lisennet_hybrid_nc24_deep_relu6.json`)
+and the open question is whether unbounded recurrent context beats a 68- or 196-frame
+dilated FIFO at equal parameters, and how the GRU's `tanh`/`sigmoid` gates survive
+per-tensor int8 (the round-3 finding was that PTQ pain concentrates in *linear*
+paths, so a gated recurrence is not obviously worse — but it is not obviously better
+either, and the hidden state is a recursive quantization path with no ReLU to bound
+it). Until those runs land, the claims above are structural only.
+
+```bash
+python -m lisennet.train --config configs/lisennet_hybrid_nc24.json \
+    --checkpoint_path cp_lisennet_hybrid_nc24 --training_epochs 100
+python -m lisennet.export_onnx --checkpoint_file cp_lisennet_hybrid_nc24/g_best --streaming
+python -m lisennet.eval_deploy --checkpoint_file cp_lisennet_hybrid_nc24/g_best --n_utts 824
+```
+
 ### FIFO state vs. stateless recompute — measured at equal latency (2026-07-14)
 
 The windowed export's `emit_T` sets the algorithmic latency: **`emit_T=1` (window
