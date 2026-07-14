@@ -10,11 +10,13 @@ and would otherwise be reported backwards.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
+import subprocess
 from pathlib import Path
 
 from benchmarks.published import MODELS
-from common.quality import HIGHER_IS_BETTER
+from common.quality import HIGHER_IS_BETTER, backend_versions
 
 # The columns worth a headline table. The remaining NISQA sub-dimensions
 # (noisiness / discontinuity / coloration / loudness) and DNSMOS's P.808 stay in
@@ -128,17 +130,67 @@ def render(scores: dict, cols=None) -> str:
     return "\n".join(L)
 
 
-def summary(scores: dict) -> dict:
-    """Means only, keyed 'slug/condition' -- the compact, committable artefact.
+def _git_commit() -> str | None:
+    try:
+        return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    except Exception:
+        return None
 
-    The per-utterance arrays stay in <out>/scores/ (git-ignored); they are worth
-    keeping locally to answer "where did int8 actually lose?", but they are not
-    worth a few MB per sweep in the repo.
-    """
+
+def _provenance(scores: dict) -> dict:
+    # Prefer the versions captured at scoring time; fall back to the current env
+    # for score files written before provenance was recorded.
+    recorded = next((d["versions"] for d in scores.values() if d.get("versions")), None)
     return {
-        f"{slug}/{cond}": {"n_utts": d["n_utts"], "means": d["means"],
-                           "failures": d["failures"]}
-        for (slug, cond), d in sorted(scores.items())
+        "dataset": "JacobLinCool/VoiceBank-DEMAND-16k",
+        "split": "test",
+        "sampling_rate": 16000,
+        "git_commit": _git_commit(),
+        "versions": recorded or backend_versions(),
+        "versions_source": "scoring run" if recorded else "reporting env (not recorded at score time)",
+    }
+
+
+def summary(scores: dict) -> dict:
+    """Means + failures per condition, with provenance. The compact artefact."""
+    return {
+        "provenance": _provenance(scores),
+        "conditions": {
+            f"{slug}/{cond}": {"n_utts": d["n_utts"], "means": d["means"],
+                               "failures": d["failures"]}
+            for (slug, cond), d in sorted(scores.items())
+        },
+    }
+
+
+def audit_bundle(scores: dict) -> dict:
+    """Every per-utterance value, for auditing: recompute a mean, hunt an outlier,
+    run a paired test between two conditions.
+
+    The utterance IDs are stored once at the top rather than repeated in all 44
+    condition files, and every column is aligned to that order. `null` marks an
+    utterance a metric failed on (there are none in the committed run).
+    """
+    ids = next(iter(scores.values()))["utt_ids"]
+    for (slug, cond), d in scores.items():
+        if d["utt_ids"] != ids:
+            raise ValueError(
+                f"{slug}/{cond} was scored over a different utterance set; "
+                "the shared utt_ids index would silently misalign it"
+            )
+    return {
+        "provenance": _provenance(scores),
+        "n_utts": len(ids),
+        "utt_ids": ids,
+        "conditions": {
+            f"{slug}/{cond}": {
+                "means": d["means"],
+                "failures": d["failures"],
+                "per_utt": d["per_utt"],
+            }
+            for (slug, cond), d in sorted(scores.items())
+        },
     }
 
 
@@ -147,6 +199,9 @@ def main():
     p.add_argument("--out", default="benchmarks/out")
     p.add_argument("--md", default=None, help="Write markdown to this file instead of stdout")
     p.add_argument("--json", default=None, help="Write the means-only summary to this JSON path")
+    p.add_argument("--audit", default=None,
+                   help="Write every per-utterance value to this path; "
+                        "gzipped automatically if it ends in .gz")
     p.add_argument("--all_columns", action="store_true",
                    help="Include the NISQA sub-dimensions and DNSMOS P.808")
     a = p.parse_args()
@@ -165,6 +220,16 @@ def main():
     if a.json:
         Path(a.json).write_text(json.dumps(summary(scores), indent=2) + "\n")
         print(f"wrote {a.json}")
+
+    if a.audit:
+        blob = json.dumps(audit_bundle(scores), indent=1).encode()
+        dst = Path(a.audit)
+        if dst.suffix == ".gz":
+            dst.write_bytes(gzip.compress(blob, 9))
+        else:
+            dst.write_bytes(blob)
+        print(f"wrote {dst} ({dst.stat().st_size / 1e6:.1f} MB, "
+              f"{len(scores)} conditions x {next(iter(scores.values()))['n_utts']} utts)")
 
 
 if __name__ == "__main__":
