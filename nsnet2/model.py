@@ -15,8 +15,14 @@ class NSNet2(nn.Module):
 
     Config blocks (all optional, default to dense / cuDNN):
 
-        "linear": {"kind": "linear" | "butterfly" | "monarch", ...kwargs}
-        "gru":    {"kind": "gru"    | "butterfly" | "monarch", ...kwargs}
+        "linear": {"kind": "linear" | "butterfly" | "blockdiag" | "monarch", ...kwargs}
+        "gru":    {"kind": "gru"    | "butterfly" | "blockdiag" | "monarch"
+                            | "triton" | "triton_blockdiag" | "triton_monarch"
+                            | "triton_butterfly", ...kwargs}
+
+    Naming note: ``"blockdiag"`` is a single block-diagonal factor (what this
+    repo used to mislabel ``"monarch"``); ``"monarch"`` is now the genuine
+    two-factor Monarch (torch-structured >= 1.3.0).
 
     See ``models/layers.py`` for the per-backend kwargs.
     """

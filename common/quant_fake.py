@@ -136,6 +136,14 @@ def _is_blockdiag_linear(m: nn.Module) -> bool:
         return False
 
 
+def _is_monarch_linear(m: nn.Module) -> bool:
+    try:
+        from torch_structured.monarch.monarch_linear import MonarchLinear
+        return isinstance(m, MonarchLinear)
+    except ImportError:
+        return False
+
+
 def _is_butterfly(m: nn.Module) -> bool:
     try:
         from torch_structured.butterfly.butterfly import Butterfly
@@ -199,6 +207,13 @@ def _quantizable_weight_attrs(m: nn.Module):
         # per-output-channel within each block — closest analogue to
         # nn.Linear's axis=0.
         yield "weight", 1
+    elif _is_monarch_linear(m):
+        # Genuine two-factor Monarch: w1 (nblocks, in_blksz, in_blksz) and
+        # w2 (nblocks, out_blksz, in_blksz). Quantize each factor per
+        # output-row within its block (axis=1), the same per-output-channel
+        # analogue used for the single block-diagonal factor above.
+        yield "w1", 1
+        yield "w2", 1
     elif _is_gru_qat_cell(m):
         for name, axis in _GRU_QAT_CELL_WEIGHTS:
             w = getattr(m, name, None)
@@ -326,6 +341,7 @@ def install_activation_fake_quant(model: nn.Module, act_spec: QSpec) -> int:
         if (
             isinstance(m, (nn.Linear, nn.GRU, nn.Conv1d, nn.Conv2d, nn.ConvTranspose2d))
             or _is_blockdiag_linear(m)
+            or _is_monarch_linear(m)
             or _is_butterfly(m)
         ):
             targets.append(m)
@@ -458,7 +474,7 @@ def install_static_activation_fake_quant(model: nn.Module, bits: int) -> int:
     targets = [
         m for m in model.modules()
         if isinstance(m, (nn.Linear, nn.GRU, nn.Conv1d, nn.Conv2d, nn.ConvTranspose2d))
-        or _is_blockdiag_linear(m) or _is_butterfly(m)
+        or _is_blockdiag_linear(m) or _is_monarch_linear(m) or _is_butterfly(m)
     ]
     existing = getattr(model, "_act_fake_quant", None)
     if isinstance(existing, nn.ModuleList) and len(existing) == len(targets):
