@@ -4,9 +4,24 @@
 > `monarch_*` (`blockdiag_8`, `blockdiag_full`, `blockdiag_fc`,
 > `wide_blockdiag` — already renamed throughout below) is a **single
 > block-diagonal factor** (zero cross-block mixing), **not** a genuine two-factor
-> [Monarch](https://arxiv.org/abs/2204.00595). These results are therefore the
-> *block-diagonal* results. Genuine two-factor Monarch (`kind="monarch"`,
-> torch-structured ≥ 1.3.0) is a separate study — see `EXPERIMENT_MONARCH.md`.
+> [Monarch](https://arxiv.org/abs/2204.00595). Genuine two-factor Monarch
+> (`kind="monarch"`, torch-structured ≥ 1.3.0) has now been trained and measured
+> — see [Genuine two-factor Monarch](#genuine-two-factor-monarch) below, and
+> `EXPERIMENT_MONARCH.md` for the plan.
+>
+> **⚠️ int8 correction (Einsum weight-quant bug).** Every int8 PESQ published
+> before 2026-07-11 was measured on a model whose **structured weights were still
+> FP32**. The structure-preserving export lowers each block-diagonal / Monarch
+> matmul to an `Einsum`, and onnxruntime ships no QDQ handler for `Einsum` — so
+> `quantize_static` skipped those nodes entirely, quantizing only activations and
+> the residual dense MatMuls. Fixed in `nsnet2/qdq_einsum_quantizer.py` (registers
+> `QDQRegistry["Einsum"]`, per-channel axis=1) plus an audit in `nsnet2/quant.py`
+> that fails if any `Einsum` operand is still a raw FLOAT initializer. **All int8
+> numbers below have been re-measured with the structured weights genuinely
+> quantized.** Blast radius: the general-purpose streaming ONNX only — the
+> STM32N6 NPU export (`export_blockdiag_npu.py`) re-expresses the blocks as
+> per-block `MatMul`, which onnxruntime quantizes natively, so the deployment
+> results further down are unaffected.
 
 NSNet2 speech enhancement (Braun & Tashev, ICASSP 2021), with the FC and
 GRU layers swappable between dense, [Butterfly](https://arxiv.org/abs/1903.05895),
@@ -26,22 +41,97 @@ the FP32 ONNX and the static int8 ONNX (QDQ format, per-channel weights,
 MinMax calibration on 200 train utterances). RTF is for the int8 session
 under onnxruntime CPU; lower is faster.
 
-| run                 | params  | FP32 PESQ |  int8 PESQ |   Δ (FP32→int8) | int8 RTF | compression |
-| ------------------- | ------: | --------: | ---------: | --------------: | -------: | ----------: |
-| `wide_blockdiag`      |  2.36 M | **2.864** |      2.842 |         +0.021  |    0.166 |       1.2× |
-| `baseline`          |  2.78 M |     2.845 |      2.833 |         +0.012  |    0.452 |       1.0× |
-| `blockdiag_8`         |  0.36 M |     2.832 |      2.826 |         +0.006  | **0.025**|       7.7× |
-| `blockdiag_full`      |  0.70 M |     2.827 |  **2.848** |         −0.021  |    0.039 |       4.0× |
-| `blockdiag_fc`        |  2.14 M |     2.805 |      2.789 |         +0.016  |    0.448 |       1.3× |
-| `butterfly_2blocks` |  0.36 M |     2.805 |      2.202 |         +0.602  |    0.441 |       7.7× |
-| `butterfly_fc`      |  1.99 M |     2.799 |      2.494 |         +0.306  |    0.522 |       1.4× |
-| `butterfly_ortho`   |  0.19 M |     2.780 |      2.577 |         +0.203  |    0.232 |        15× |
-| `butterfly_full`    |  0.19 M |     2.772 |      2.128 |         +0.644  |    0.230 |        15× |
+int8 PESQ for the block-diagonal rows is **re-measured post-Einsum-fix** (see the
+int8 correction above); butterfly and dense are unaffected by that bug (their
+exports emit no `Einsum`) and carry their original figures.
 
-`wide_blockdiag` leads on FP32 PESQ; `blockdiag_full` leads on int8 PESQ
-(slightly above its own FP32, within noise — quantization is essentially
-loss-free). `blockdiag_8` runs at RTF 0.025 — over 18× faster than the
-dense baseline at the same int8 PESQ.
+| run                 | params  | FP32 PESQ |  int8 PESQ |   Δ (FP32→int8) | compression |
+| ------------------- | ------: | --------: | ---------: | --------------: | ----------: |
+| `wide_blockdiag`    |  2.36 M | **2.864** |  **2.847** |         +0.016  |       1.2× |
+| `baseline` (dense)  |  2.78 M |     2.845 |      2.833 |         +0.012  |       1.0× |
+| `blockdiag_8`       |  0.36 M |     2.832 |      2.825 |         +0.007  |       7.7× |
+| `blockdiag_full`    |  0.70 M |     2.827 |      2.843 |         −0.016  |       4.0× |
+| `blockdiag_fc`      |  2.14 M |     2.805 |      2.787 |         +0.018  |       1.3× |
+| `butterfly_2blocks` |  0.36 M |     2.805 |      2.202 |         +0.602  |       7.7× |
+| `butterfly_fc`      |  1.99 M |     2.799 |      2.494 |         +0.306  |       1.4× |
+| `butterfly_ortho`   |  0.19 M |     2.780 |      2.577 |         +0.203  |        15× |
+| `butterfly_full`    |  0.19 M |     2.772 |      2.128 |         +0.644  |        15× |
+
+`wide_blockdiag` leads on FP32 PESQ. Block-diagonal quantization is essentially
+loss-free (|Δ| ≤ 0.018) **even with the structured weights genuinely quantized** —
+the pre-fix "loss-free" claim happened to survive the correction, because these
+block weights quantize cleanly rather than because they were being skipped.
+Butterfly with randn init remains the outlier (Δ up to 0.64).
+
+RTF is omitted from this table: the block-diagonal rows were re-timed on a
+different machine/load than the original butterfly rows, so the columns are not
+comparable. Internally-consistent timings (all measured together) are in the
+Monarch table below.
+
+## Genuine two-factor Monarch
+
+The `monarch_*` runs below are the **real** [Monarch](https://arxiv.org/abs/2204.00595)
+construction — block-diagonal × permutation × block-diagonal (`MonarchLinear`,
+torch-structured ≥ 1.3.0), full cross-channel mixing — as opposed to the single
+block-diagonal factor the repo previously mislabeled "monarch". Trained with the
+same recipe as the block-diagonal sweep (200 epochs, batch 256, n\_fft 512), GRU
+recurrence through gru-qat ≥ 0.5.0's fused (shared-`w1`) Monarch Triton kernel.
+All rows here — PESQ **and** RTF — were measured together on one box, so they are
+internally comparable.
+
+| run             | params  | FP32 PESQ | int8 PESQ | Δ (FP32→int8) | int8 RTF |
+| --------------- | ------: | --------: | --------: | ------------: | -------: |
+| `wide_monarch`  | 3.635 M | **2.881** | **2.884** |        −0.003 |    0.051 |
+| `monarch_8`     | 0.553 M |     2.861 |     2.856 |        +0.005 |    0.027 |
+| `monarch_fc`    | 2.379 M |     2.843 |     2.831 |        +0.012 |    0.073 |
+| `monarch_full`  | 1.099 M |     2.838 |     2.846 |        −0.009 |    0.039 |
+
+Head-to-head vs the block-diagonal sibling at matched `nblocks` (FP32, the
+quantization-free comparison):
+
+| pair              | block-diagonal    | genuine Monarch   | Δ FP32 | Δ params |
+| ----------------- | ----------------- | ----------------- | -----: | -------: |
+| `*_8` (nblocks 8) | 2.832 (0.36 M)    | **2.861** (0.55 M) | +0.029 |  +0.19 M |
+| `*_full` (nb 4)   | 2.827 (0.70 M)    | **2.838** (1.10 M) | +0.011 |  +0.40 M |
+| `*_fc`            | 2.805 (2.14 M)    | **2.843** (2.38 M) | +0.038 |  +0.24 M |
+| `wide_*`          | 2.864 (2.36 M)    | **2.881** (3.64 M) | +0.017 |  +1.28 M |
+
+**Genuine Monarch is consistently but marginally better than block-diagonal**
+(+0.011…+0.038 FP32), and it costs parameters to get there — Monarch's second
+factor makes it larger at equal `nblocks`. It is also **genuinely int8-loss-free**
+(|Δ| ≤ 0.012 with the weights actually quantized), matching block-diagonal's
+quantization robustness.
+
+### Quality is capacity-bound? No — it saturates
+
+The most useful result here is a negative one. Across **three structure families
+and ~10× parameters**, every configuration lands in a narrow band:
+
+| family          | param range    | FP32 PESQ band |
+| --------------- | -------------- | -------------- |
+| dense           | 2.78 M         | 2.845          |
+| block-diagonal  | 0.36 – 2.36 M  | 2.81 – 2.86    |
+| genuine Monarch | 0.55 – 3.64 M  | 2.84 – 2.88    |
+
+It is not even monotonic in capacity: the 0.553 M `monarch_8` (2.861) beats both
+the 1.099 M `monarch_full` (2.838) and the 2.379 M `monarch_fc` (2.843). Going
+7× from `monarch_8` to `wide_monarch` buys +0.020 PESQ — barely above the
+run-to-run noise of the metric.
+
+**This model class is architecture/data-bound, not capacity-bound.** NSNet2
+predicts a magnitude gain mask and reuses the noisy phase, which caps achievable
+PESQ regardless of how expressive the mask predictor is (ConvFSENet reaches 2.911
+and LiSenNet ~3.0 in this same repo via different mechanisms); VoiceBank-DEMAND
+is also small enough to impose its own ceiling. Consequences:
+
+- **The dense model was already over-parameterized for this task**, which is
+  precisely why aggressive structuring costs ~nothing — the compression story
+  holds because capacity was never the binding constraint.
+- **For deployment take the smallest/fastest** (`blockdiag_8` / `monarch_8`): no
+  quality penalty, best RTF.
+- **To move PESQ you must change the architecture** (phase-aware / complex mask,
+  or lean harder on the GAN path) **or the data** — not scale the linear layers.
+  Chasing structure or width within this architecture is not where the gains are.
 
 ## STM32N6 on-board deployment
 
@@ -108,9 +198,12 @@ MAX_UTTERANCES=100 ./run_eval_sweep.sh       # quick directional read
 
 Three findings worth flagging:
 
-* **Block-diagonal variants quantize loss-free** (|Δ| ≤ 0.021 across all four).
-  A single `Einsum` per FC layer plus per-channel int8 is genuinely
-  friendly to QDQ calibration.
+* **Block-diagonal and Monarch variants quantize loss-free** — |Δ| ≤ 0.018
+  (block-diagonal) and ≤ 0.012 (Monarch), **re-measured with the structured
+  weights genuinely quantized** (see the int8 correction at the top; the earlier
+  figures were taken on models whose `Einsum` weights were still FP32). The block
+  factors survive per-channel int8 on their own merits: the claim happens to hold
+  after the fix, but it was not *tested* before it.
 * **Butterfly with `init=ortho` is the right choice for int8 deployment**.
   The cumulative log\_n-stage transform's stage-by-stage activation
   magnitude stays bounded when twiddles are spectrally constrained; randn
