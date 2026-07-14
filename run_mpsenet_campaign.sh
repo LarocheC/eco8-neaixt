@@ -313,6 +313,51 @@ sys.exit(1 if bad else 0)
 PYEOF
 log "preflight: all $(echo $RUNS | wc -w) runs parse and build"
 
+# GPU preflight. The check above builds the models on the CPU, so it happily
+# passes on a box whose torch cannot execute a single kernel on the actual card —
+# which is exactly what happened on an RTX 6000 Pro (Blackwell, sm_120) against a
+# cu118 build whose kernels stop at sm_90: every run died on its first CUDA op with
+#   RuntimeError: CUDA error: no kernel image is available for execution on the device
+# after the campaign had been "running" for a while. So: actually launch a kernel,
+# on the device we are going to use, before committing anything to it.
+CUDA_VISIBLE_DEVICES="${GPU_LIST[0]:-${CUDA_VISIBLE_DEVICES:-}}" PYTHONPATH=. "$PY" - <<'PYEOF' || die "the GPU cannot run this torch build (see above)"
+import sys
+import torch
+
+if not torch.cuda.is_available():
+    print("  WARNING: no CUDA device visible — the campaign would train on the CPU,")
+    print("           which for 28 runs is not a viable amount of time.")
+    sys.exit(1)
+
+name = torch.cuda.get_device_name(0)
+major, minor = torch.cuda.get_device_capability(0)
+archs = torch.cuda.get_arch_list()
+
+try:
+    # The exact op that failed on Blackwell, plus a conv and a GRU so the check
+    # covers cuDNN too (the hybrid LiSenNet and the structured NSNet2 runs are
+    # the ones with recurrent layers).
+    x = torch.randn(1, 3, 32, 32, device="cuda")
+    torch.nn.functional.pad(x, (1, 1, 1, 1), mode="reflect")
+    torch.nn.Conv2d(3, 4, 3).cuda()(x)
+    torch.nn.GRU(8, 8, batch_first=True).cuda()(torch.randn(1, 4, 8, device="cuda"))
+    torch.cuda.synchronize()
+except RuntimeError as e:
+    print(f"  !! {name} (sm_{major}{minor}) cannot run torch {torch.__version__}")
+    print(f"     {str(e).splitlines()[0]}")
+    print(f"     this build only has kernels for: {' '.join(archs)}")
+    print()
+    print("     The torch wheel has no kernels for this card's architecture.")
+    print("     Fix: install a CUDA build that covers it, then re-run. For Blackwell")
+    print("     (sm_120) that means the cu128 wheels — pyproject already points at")
+    print("     them, so `uv sync` should be enough; if it is not, force it with:")
+    print("       uv pip install --index-url https://download.pytorch.org/whl/cu128 \\")
+    print("           'torch==2.7.1+cu128' 'torchaudio==2.7.1+cu128'")
+    sys.exit(1)
+
+print(f"  preflight: {name} (sm_{major}{minor}) runs kernels from torch {torch.__version__}")
+PYEOF
+
 # A GPU index that doesn't exist would otherwise surface as a confusing CUDA
 # error hours in, or (worse) as a silent fall back to CPU.
 if (( ${#GPU_LIST[@]} > 0 )); then

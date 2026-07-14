@@ -38,12 +38,23 @@ dependencies = [
 package = false
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu118" }
-torchaudio = { index = "pytorch-cu118" }
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
 
+# CUDA 12.8, not 11.8. The cu118 wheels only ship kernels up to sm_90, so on a
+# Blackwell card (RTX 6000 Pro / RTX 50-series, sm_120) EVERY cuda op dies with
+#   RuntimeError: CUDA error: no kernel image is available for execution on the device
+# on the first launch. Same torch version (2.7.1), different CUDA build.
+#
+# Safe on the older cards too: the cu128 arch list is
+#   sm_75 sm_80 sm_86 sm_90 sm_100 sm_120 compute_120
+# which has no explicit sm_89 — but neither did cu118, and the RTX 4090 (sm_89)
+# runs fine on it, because cubins are forward-compatible across minor versions
+# within a major arch (sm_86 -> sm_89). Verified by running conv/pad/GRU on a
+# 4090 under this exact build.
 [[tool.uv.index]]
-name = "pytorch-cu118"
-url = "https://download.pytorch.org/whl/cu118"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [dependency-groups]
