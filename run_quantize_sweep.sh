@@ -7,15 +7,15 @@
 #
 # Idempotent: re-exports/re-quantizes on every invocation (silent overwrite).
 # Override the run set or calibration count via env:
-#   RUNS="baseline monarch_fc"  ./run_quantize_sweep.sh
+#   RUNS="baseline blockdiag_fc"  ./run_quantize_sweep.sh
 #   N_CALIB_UTTS=400            ./run_quantize_sweep.sh
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-ALL_RUNS="baseline monarch_fc butterfly_fc monarch_full butterfly_full \
-          monarch_8 butterfly_ortho butterfly_2blocks wide_monarch"
+ALL_RUNS="baseline blockdiag_fc butterfly_fc blockdiag_full butterfly_full \
+          blockdiag_8 butterfly_ortho butterfly_2blocks wide_blockdiag"
 
 RUNS="${RUNS:-$ALL_RUNS}"
 N_CALIB_UTTS="${N_CALIB_UTTS:-200}"

@@ -216,7 +216,7 @@ block-diagonal projection the same way: **per-block `Slice` + `MatMul` +
 int8 elementwise HW lowering. This is exactly the op set the compiler already
 maps to HW.
 
-`deploy/stm32n6/host/export_monarch_npu.py` does this end-to-end: builds the
+`deploy/stm32n6/host/export_blockdiag_npu.py` does this end-to-end: builds the
 rank-2 model from the trained `cp_monarch_8` weights (parity ~5e-7 vs the
 trained streaming model), exports FP32, then int8-quantizes with the same VBD
 recipe + `skip_optimization=True`.
@@ -251,7 +251,7 @@ works but is slow over serial for a 100+-node graph.
   2.89 ms / RTF 0.18, both weights-on-chip, vs ConvFSENet 4.40 ms and dense
   22.94 ms (RTF 1.43, memory-bound). *Structured sparsity is what lets a
   recurrent model hit real-time on this NPU* — it fits the weights in fast RAM.
-- **Reproducible & general:** `host/export_monarch_npu.py` deploys any
+- **Reproducible & general:** `host/export_blockdiag_npu.py` deploys any
   fully-monarch config (dims read from the checkpoint; `monarch_8` and
   `monarch_full` both verified end-to-end on the board). `wide_monarch` holds
   int8 PESQ but at 9.5 MB int8 it would not fit on-chip; `monarch_fc` has a

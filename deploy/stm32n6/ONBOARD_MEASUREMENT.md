@@ -132,7 +132,7 @@ noisy phase) vs ConvFSENet 2.91 and monarch_full 2.85. Dense overflows on-chip R
 ## Caveats
 - **All four models above now deploy** on the Neural-ART. NSNet2 dense needs a
   `skip_optimization` re-quant to compile; the sparse monarch variants need the conv-native
-  rank-2 re-export (`host/export_monarch_npu.py`). **Butterfly is NPU-hostile** (6-D
+  rank-2 re-export (`host/export_blockdiag_npu.py`). **Butterfly is NPU-hostile** (6-D
   reshape/reduce — doesn't compile). Full root-cause analysis:
   [NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md).
 - `stedgeai validate --mode target` works for ConvFSENet and the monarch models, but **crashes
