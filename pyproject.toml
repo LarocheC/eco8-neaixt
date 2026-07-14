@@ -23,6 +23,14 @@ dependencies = [
     "matplotlib>=3.7",
     "onnx>=1.21,<1.22",          # DET-01
     "onnxruntime>=1.25,<1.26",   # DET-01
+    # Perceptual-quality metrics (common/quality.py).
+    # torchmetrics carries both DNSMOS (official MS P.835 ONNX) and NISQA v2
+    # (weights from the author's repo); the standalone `nisqa` PyPI package is
+    # unusable here because it hard-pins torch==2.2.1.
+    "torchmetrics>=1.9",
+    "requests>=2.31",            # DNSMOS/NISQA gate their imports on this
+    "torchaudio>=2.7,<2.8",      # SCOREQ resampling; must track torch
+    "scoreq>=1.0.1",             # ONNX backend by default (the `pytorch` extra needs fairseq)
 ]
 
 [tool.uv]
@@ -30,6 +38,7 @@ package = false
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu118" }
+torchaudio = { index = "pytorch-cu118" }
 
 [[tool.uv.index]]
 name = "pytorch-cu118"
@@ -43,3 +52,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `slow` gates the tests that download model weights / read the real VBD split.
+# Deselected by default; run them with `-m slow`.
+addopts = "-m 'not slow'"
+markers = [
+    "slow: needs network + cached model weights (DNSMOS/NISQA/SCOREQ, VBD split)",
+]

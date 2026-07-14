@@ -23,6 +23,12 @@ logs/
 *.log
 # Windowed-rework eval outputs (regenerable: deploy/stm32n6/scripts/run_windowed_eval.sh)
 deploy/stm32n6/windowed_eval/
+# Benchmark working dirs: HF snapshots, ~10 GB of cached enhanced audio, and the
+# per-utterance score dumps. Regenerable:
+#   python -m benchmarks.enhance && python -m benchmarks.score
+# The durable outputs are committed: RESULTS_METRICS.md + benchmarks/summary.json.
+benchmarks/out/
+benchmarks/smoke/
 # Gate-0 probe ONNX (regenerable: deploy/stm32n6/scripts/build_gate0d_probe.py)
 deploy/stm32n6/gate0_artifacts/
 # Stray deployment ONNX at the repo root (real artifacts live under cp_*/)

@@ -31,6 +31,54 @@ Detailed results are kept in separate files:
 * [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
 * [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
 * [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/static-int8 ONNX, and the real-time (noisy-phase) deployment eval.
+* [RESULTS_METRICS.md](RESULTS_METRICS.md): every published model scored on DNSMOS, NISQA and SCOREQ as well as PESQ — a cross-family comparison under one metric harness.
+
+
+## Perceptual metrics
+
+PESQ is the primary number throughout this repo, but it is an intrusive ITU-P.862
+measure designed for codec and telephony degradations, and it under-reflects the
+artefacts neural enhancers actually produce. `common/quality.py` adds three
+learned MOS estimators trained on human listening tests:
+
+| metric     | reference    | predicts                                    | direction |
+| ---------- | ------------ | ------------------------------------------- | --------- |
+| **DNSMOS** | no-reference | ITU P.835 SIG / BAK / OVRL, plus P.808      | higher better |
+| **NISQA**  | no-reference | overall MOS + noisiness / discontinuity / coloration / loudness | higher better |
+| **SCOREQ** | both         | no-reference MOS, and a full-reference embedding distance | MOS higher better; **distance lower better** |
+
+DNSMOS and NISQA come through `torchmetrics`, which wraps the official Microsoft
+DNS-Challenge and NISQA weights. SCOREQ uses its own ONNX backend. Weights are
+downloaded on first use (~380 MB for SCOREQ) and cached.
+
+The `benchmarks/` package scores the published models with all four:
+
+```bash
+python -m benchmarks.enhance                     # published checkpoints -> enhanced audio
+python -m benchmarks.score                       # enhanced audio -> metric JSON (resumable)
+python -m benchmarks.report --md RESULTS_METRICS.md \
+    --json benchmarks/summary.json --audit benchmarks/per_utterance.json.gz
+```
+
+Enhancement and scoring are decoupled through a float32 audio cache, so adding a
+metric later costs a re-score rather than a re-inference.
+
+Two result artefacts are committed so the numbers are auditable rather than
+merely asserted: `benchmarks/summary.json` (all 12 metric columns, means and
+failure counts per condition) and `benchmarks/per_utterance.json.gz` (every
+individual score — 44 conditions × 824 utterances × 12 metrics — which is what
+lets you recompute a mean, chase an outlier, or run a paired test between two
+conditions). Both carry a provenance block: dataset, git commit, and the versions
+of every package that can move a score.
+
+The everyday eval CLIs also take an opt-in `--metrics`:
+
+```bash
+python -m nsnet2.inference_onnx --checkpoint_file cp_<run>/g_best.onnx --metrics all
+python -m convfsenet.inference_onnx --checkpoint_file cp_<run>/g_best.onnx --metrics dnsmos,nisqa
+```
+
+It defaults to `none`: DNSMOS alone costs ~4 minutes on the full test split.
 
 
 ## Setup
@@ -62,8 +110,15 @@ common/                  Shared infrastructure
   env.py                 Config loader
   utils.py               Checkpoint and utility helpers
   metrics.py             PESQ helpers
+  quality.py             DNSMOS / NISQA / SCOREQ metric suite
   discriminator.py       PESQ-based metric discriminator
   quant_fake.py          Eager fake-quantization scaffold for PTQ/QAT
+
+benchmarks/              Cross-family scoring of the published models
+  published.py           Inventory of the HuggingFace-published checkpoints
+  enhance.py             Published checkpoint -> enhanced audio (reuses each family's own path)
+  score.py               Enhanced audio -> metric JSON (resumable)
+  report.py              Metric JSON -> markdown tables
 
 nsnet2/                  GRU recurrent enhancer
   model.py               NSNet2 model wiring
