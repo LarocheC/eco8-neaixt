@@ -1,5 +1,10 @@
 # NSNet2 — results
 
+> **Loss refactor (branch `mpsenet-loss`).** The loss moved into the shared
+> `common/losses.py`, but this model was already training on the MP-SENet
+> objective at the same weights — the refactor is numerically a no-op, so the
+> numbers below still stand.
+
 NSNet2 speech enhancement (Braun & Tashev, ICASSP 2021), with the FC and
 GRU layers swappable between dense, [Butterfly](https://arxiv.org/abs/1903.05895)
 and [Monarch](https://arxiv.org/abs/2204.00595) structured factorizations

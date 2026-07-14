@@ -1,5 +1,12 @@
 # ConvFSENet — results
 
+> **Loss change (branch `mpsenet-loss`).** Every number below was trained with
+> this model's *previous* loss and corresponds to commit `0b43d14` or earlier.
+> The repo now trains all four models on the MP-SENet objective
+> (`common/losses.py`); for this model that is a **real change to the
+> objective**, so these numbers are not directly comparable to anything trained
+> after it. Retrain to compare.
+
 A fully-convolutional, causal speech enhancer. ConvFSENet is a
 ConvTasNet-derived magnitude-mask predictor built from stacked Temporal
 Conv Module (TCM) blocks (1×1 conv + depthwise dilated conv, BatchNorm,

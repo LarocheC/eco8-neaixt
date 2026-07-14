@@ -1,5 +1,10 @@
 # BASENet — results
 
+> **Loss refactor (branch `mpsenet-loss`).** The loss moved into the shared
+> `common/losses.py`, but this model was already training on the MP-SENet
+> objective at the same weights — the refactor is numerically a no-op, so the
+> numbers below still stand.
+
 A frequency-adaptive, causal-capable speech enhancer. BASENet partitions the
 spectrum into Bark-scale bands and allocates each a scaled-capacity encoder
 derived from critical-band density (perceptually dense low frequencies get

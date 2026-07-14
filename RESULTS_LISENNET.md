@@ -1,5 +1,12 @@
 # LiSenNet — results
 
+> **Loss change (branch `mpsenet-loss`).** Every number below was trained with
+> this model's *previous* loss and corresponds to commit `0b43d14` or earlier.
+> The repo now trains all four models on the MP-SENet objective
+> (`common/losses.py`); for this model that is a **real change to the
+> objective**, so these numbers are not directly comparable to anything trained
+> after it. Retrain to compare.
+
 A lightweight, causal speech enhancer. LiSenNet is a ~37 K-parameter
 sub-band U-Net with a dual-path-recurrent (DPR) bottleneck that predicts a
 **magnitude-only** mask and recovers phase with a 2-iteration Griffin-Lim
