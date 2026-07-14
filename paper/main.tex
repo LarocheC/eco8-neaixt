@@ -102,6 +102,20 @@ contribute:
   memory placement, and a per-epoch latency breakdown.
 \end{itemize}
 
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{architecture}
+  \caption{The NPU-hardened LiSenNet. The sub-band U-Net macro-structure is
+  unchanged; the dual-path GRU bottleneck is re-expressed with NPU-mappable
+  convolutions (blue; one block expanded below: a symmetric depthwise
+  frequency convolution and a stack of causal dilated depthwise time
+  convolutions with a convolutional GLU). Orange tags mark the four hardening
+  swaps (Sec.~\ref{ssec:hardening}); violet chips mark the causal ring
+  buffers that the streaming export exposes as explicit state I/O
+  (Sec.~\ref{ssec:deploy}). Arrow labels give the frequency-axis size.}
+  \label{fig:arch}
+\end{figure*}
+
 % ===========================================================================
 \section{LiSenNet and the NPU gap}
 \label{sec:background}
@@ -142,17 +156,6 @@ bit-exact.}
 \section{NPU-friendly redesign}
 \label{sec:redesign}
 
-\begin{figure}[t]
-  \centering
-  % \includegraphics[width=\columnwidth]{architecture}
-  \fbox{\parbox[c][11em][c]{0.92\columnwidth}{\centering
-  \todo{Fig.~1: block diagram --- sub-band encoder / dual-path conv
-  bottleneck (intra-frequency depthwise conv $\;\|\;$ causal dilated time
-  stack) / mask decoder, annotated with the four hardening swaps and the
-  FIFO state tensors of the streaming export.}}}
-  \caption{NPU-hardened LiSenNet. \todo{final caption}}
-  \label{fig:arch}
-\end{figure}
 
 \subsection{Dual-path convolutions replace the DPR}
 \label{ssec:dpc}
@@ -291,7 +294,7 @@ $\pm0.004$.
 \subsection{On-device results}
 \label{ssec:silicon}
 
-\begin{table}[t]
+\begin{table*}[t]
   \centering
   \caption{Measured on the STM32N6570-DK (Neural-ART @ 1\,GHz, Cortex-M55 @
   800\,MHz), int8. Latency per 16\,ms frame; ``block'' = algorithmic latency.
@@ -299,10 +302,9 @@ $\pm0.004$.
   same flow.}
   \label{tab:silicon}
   \small
-  \setlength{\tabcolsep}{3.5pt}
   \begin{tabular}{@{}lrrrrcc@{}}
     \toprule
-    deployment & weights & \begin{tabular}[c]{@{}r@{}}MAC/\\frame\end{tabular} & \begin{tabular}[c]{@{}r@{}}ms/\\frame\end{tabular} & RTF & block & PESQ \\
+    deployment & weights & MAC/frame & ms/frame & RTF & block & PESQ \\
     \midrule
     \textbf{LiSenNet stream.\ (24 ch)} & 47\,KiB & 1.30\,M & 2.79 & 0.17 & 16\,ms & 2.963 \\
     LiSenNet windowed (24 ch)          & 492\,KiB & 2.78\,M & \textbf{1.15} & \textbf{0.07} & 1.02\,s & 2.998 \\
@@ -317,7 +319,7 @@ $\pm0.004$.
     \multicolumn{7}{@{}l@{}}{\footnotesize $^\dagger$exceeds the 16\,ms
     budget (weights overflow on-chip RAM; memory-bound): not real-time.}
   \end{tabular}
-\end{table}
+\end{table*}
 
 Table~\ref{tab:silicon} places both LiSenNet graphs among all models deployed
 on this board. The streaming graph runs at 2.79\,ms per frame (74 of 131

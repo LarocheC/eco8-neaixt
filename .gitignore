@@ -61,3 +61,5 @@ paper/*.blg
 paper/*.log
 paper/*.out
 paper/main.pdf
+paper/figures/*.aux
+paper/figures/*.log
