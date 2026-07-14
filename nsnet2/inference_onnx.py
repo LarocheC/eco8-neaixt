@@ -37,6 +37,7 @@ from rich.progress import track
 from common.env import AttrDict
 from common.dataset import mag_pha_stft, mag_pha_istft, load_voicebank_demand
 from common.metrics import eval_pesq
+from common.quality import QualitySuite, resolve_metrics
 
 
 def _make_session(onnx_path):
@@ -200,7 +201,14 @@ def main():
                         help="TB log directory; if unset, no TB writes (D-01)")
     parser.add_argument("--max_utterances", type=int, default=None,
                         help="Optional slice for fast smoke iteration. None = all.")
+    parser.add_argument("--metrics", default="none",
+                        help="Extra perceptual metrics on top of PESQ: "
+                             "'all' | 'none' | e.g. 'dnsmos,nisqa,scoreq'. "
+                             "Off by default -- DNSMOS alone costs ~4 min on the full split.")
+    parser.add_argument("--metrics_json", default=None,
+                        help="Write the extra metrics' means to this JSON path")
     a = parser.parse_args()
+    extra_metrics = resolve_metrics(a.metrics)
 
     # --- 1. Sibling config.json (D-13 defensive fail-fast) -----------------
     parent_dir = os.path.split(a.checkpoint_file)[0]
@@ -229,6 +237,9 @@ def main():
 
     # --- 4. State accumulators for after-loop aggregate --------------------
     pesq_fp32_scores, pesq_int8_scores, deltas, rtfs = [], [], [], []
+    # Only retained when --metrics is on: the learned MOS metrics are far cheaper
+    # scored in one batched pass at the end than per-utterance inside this loop.
+    refs, ests_fp32, ests_int8 = [], [], []
 
     # --- 5. Mode dispatch --------------------------------------------------
     if a.input_noisy_wavs_dir:                                             # D-16: WAV-dir mode (no PESQ)
@@ -276,6 +287,10 @@ def main():
             pesq_int8_scores.append(pesq_int8)
             deltas.append(delta)
             rtfs.append(rtf_int8)
+            if extra_metrics:
+                refs.append(clean_wav)
+                ests_fp32.append(fp32_audio)
+                ests_int8.append(int8_audio)
             sf.write(                                                      # D-21
                 os.path.join(a.output_dir, item["id"] + ".wav"),
                 int8_audio, h.sampling_rate, "PCM_16",
@@ -296,6 +311,21 @@ def main():
         f"Mean: PESQ FP32={fp32_mean:.3f}, int8={int8_mean:.3f}, "
         f"delta={delta_mean:.3f}; RTF int8={rtf_mean:.3f}; PESQ failures={n_failures}"
     )
+
+    # --- 6b. Extra perceptual metrics (opt-in; PESQ above is unchanged) -----
+    if extra_metrics and refs:
+        suite = QualitySuite(metrics=extra_metrics, sr=h.sampling_rate)
+        summary = {}
+        for cond, ests in (("fp32", ests_fp32), ("int8", ests_int8)):
+            means = QualitySuite.summarize(suite.score(ests, refs))
+            summary[cond] = means
+            print(f"Mean [{cond}]: "
+                  + ", ".join(f"{k}={v:.3f}" for k, v in means.items()))
+        if a.metrics_json:
+            with open(a.metrics_json, "w") as f:
+                json.dump({"n_utts": len(refs), "metrics": list(extra_metrics),
+                           "means": summary}, f, indent=2)
+            print(f"wrote {a.metrics_json}")
 
     # --- 7. TB scalars (D-04 + D-01: only when --log_dir set) --------------
     if a.log_dir:                                                          # D-01
