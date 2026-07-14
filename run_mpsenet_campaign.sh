@@ -110,6 +110,16 @@ BEST_START="${BEST_START:-1}"
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# PESQ is the campaign's hidden CPU cost, and it does NOT scale with the GPU.
+# `common.discriminator.batch_pesq` runs on EVERY training step with n_jobs=-1,
+# i.e. a worker pool the size of the whole machine; `common.metrics.pesq_score`
+# uses n_jobs=30 at every validation. Left alone, JOBS concurrent trainers each
+# grab all cores — 5 jobs on a 32-core box is a 5x oversubscription that starves
+# every trainer and can make the campaign SLOWER than running it sequentially.
+# joblib's loky backend honours LOKY_MAX_CPU_COUNT, so give each job a fair share.
+NCORES="$(nproc 2>/dev/null || echo 8)"
+CORES_PER_JOB="${CORES_PER_JOB:-$(( NCORES / JOBS > 0 ? NCORES / JOBS : 1 ))}"
+
 model_of() {   # run name -> trainer module
     case "$1" in
         lisennet*)   echo lisennet   ;;
@@ -228,6 +238,7 @@ n_runs=$(echo $RUNS | wc -w)
 log "MP-SENet retraining campaign"
 log "  models : $MODELS"
 log "  runs   : $n_runs, $JOBS at a time"
+log "  cpu    : $NCORES cores -> $CORES_PER_JOB per job (caps joblib's per-step PESQ pool)"
 log "  ckpts  : ${CKPT_PREFIX}<name>/   (fresh dirs — the old cp_<name>/ are left untouched)"
 echo
 printf '  %-42s %-11s %7s  %s\n' RUN TRAINER EPOCHS CKPT
@@ -259,6 +270,7 @@ train_one() {
     # Append, don't truncate: a resumed run must not lose the earlier PESQ history
     # that --summary reads back.
     if PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONUNBUFFERED=1 \
+       LOKY_MAX_CPU_COUNT="$CORES_PER_JOB" OMP_NUM_THREADS="$CORES_PER_JOB" \
        "$PY" -u -m "${model}.train" \
             --config "configs/${name}.json" \
             --checkpoint_path "$cp_dir" \
