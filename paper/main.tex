@@ -51,10 +51,14 @@ on VoiceBank-DEMAND) and surpasses it after quantization (3.014 all-int8
 vs.\ 2.930). On silicon, the deployed model streams \emph{frame-by-frame} at
 4.83\,ms per 16\,ms frame (real-time factor 0.30) with one-hop algorithmic
 latency and PESQ 3.013 --- the highest-quality real-time streaming enhancer
-we measure on this NPU class. Deploying all six hardened variants shows the
-design space costs 2.6--4.9\,ms/frame, all real-time, while the float-decoder
-recipe that scores highest offline (3.052) is \emph{not} deployable
-(34\,ms/frame).
+we measure on this NPU class. Deploying all six hardened variants also settles
+two design questions empirically: the float-decoder recipe that scores highest
+offline (3.052) is \emph{not} deployable (34\,ms/frame), and a stateless graph
+that recomputes the receptive field every frame --- although it uses the
+accelerator $6\text{--}8\times$ more efficiently than the stateful one --- is
+$12\text{--}26\times$ slower, because it pays a $70\text{--}200\times$
+recompute. Explicit streaming state, not recompute, is what makes this class
+of model real-time.
 \end{abstract}
 
 \begin{keywords}
@@ -101,10 +105,10 @@ contribute:
   fits the latency budget, where the higher-scoring float-decoder recipe
   (3.052 offline) costs 34\,ms/frame and does not;
 \item \textbf{on-device measurements of every variant} in both deployment
-  graphs --- a stateless windowed graph for latency-tolerant use and an
-  explicit-state streaming graph with true 16\,ms hop latency --- including
-  compiler epoch mappings, memory placement, and the latency cost of each
-  quality knob.
+  graphs at \emph{equal} 16\,ms latency --- explicit FIFO state vs.\ a
+  stateless receptive-field window --- quantifying a trade that is easy to get
+  backwards: the window maps to the accelerator far better yet loses by
+  $12\text{--}26\times$, so the state plumbing is worth its awkwardness.
 \end{itemize}
 
 \begin{figure*}[t]
@@ -203,18 +207,28 @@ clipping even helps training in the deep configuration.
 \subsection{Two deployment graphs}
 \label{ssec:deploy}
 
-The streaming model carries one FIFO ring buffer per causal time convolution.
-We export it two ways. The \textbf{windowed} graph is stateless: the host
-keeps a rolling context of $\mathrm{RF}+T$ frames and the graph re-emits $T$
-frames per call --- trading recompute
-($\times(\mathrm{RF}+T)/T$) and block latency ($T$ frames) for the simplest
-possible deployment. The \textbf{streaming} graph exposes every ring buffer
-as an explicit graph input/output (17 state tensors for the base model), runs
-one frame per call with no recompute, and achieves true one-hop (16\,ms)
-algorithmic latency. Both compile after the \texttt{Pad} normalization of
-Sec.~\ref{sec:background}; the streaming states quantize with a calibration
-loader that propagates \emph{real} state trajectories through the trained
-model rather than zeros.
+The model is causal, so frame $n$ needs only the previous $\mathrm{RF}$
+frames. That admits two exports at the \emph{same} one-hop latency, and which
+one is cheaper on an NPU is not obvious \emph{a priori}.
+
+The \textbf{FIFO streaming} graph exposes every causal ring buffer as an
+explicit graph input/output (17 state tensors for the base model, 25 for the
+deep one) and runs one frame per call with no recompute. It compiles only
+after the \texttt{Pad} normalization of Sec.~\ref{sec:background}; its states
+quantize with a calibration loader that propagates \emph{real} state
+trajectories through the trained model rather than zeros.
+
+The \textbf{stateless RF-window} graph deletes the state machinery entirely:
+the host keeps a rolling $(\mathrm{RF}{+}T)$-frame input window, the graph
+runs the offline causal model over it and emits the last $T$ mask frames. At
+$T{=}1$ it has the same 16\,ms latency as streaming and is \emph{bit-exact} to
+the offline model once the window holds real history (FP32 cosine
+$1.0000001$, max deviation $7\cdot10^{-7}$; the first $\mathrm{RF}$ frames run
+on zero history --- the same warm-up a FIFO has). It trades
+$\mathrm{RF}$-fold recompute for zero state plumbing, which is tempting on an
+accelerator whose Slice/Concat state ops never map to pure hardware. Larger
+$T$ amortizes that recompute but re-introduces $T$ frames of block latency.
+Sec.~\ref{ssec:silicon} settles the trade on silicon.
 
 \subsection{Quantization: finding and fixing the int8 loss}
 \label{ssec:quant}
@@ -312,22 +326,23 @@ $\pm0.004$.
   \caption{\textbf{On-device cost of every LiSenNet variant}, measured on the
   STM32N6570-DK (Neural-ART @ 1\,GHz, Cortex-M55 @ 800\,MHz), int8, one
   toolchain pass per row (stedgeai 4.0.1 $\to$ RAM firmware $\to$ on-target
-  validation). ms/frame is per \emph{emitted} 16\,ms frame, so the windowed
-  block amortizes its recompute over its 64-frame emit block; RTF = ms/frame
-  $\div$ 16\,ms. RF (receptive field) and PESQ in frames and wideband PESQ on
-  the full 824-utterance test split, as in Table~\ref{tab:quality}.}
+  validation). Blocks (a) and (b) are the \emph{same} 16\,ms algorithmic
+  latency and differ only in how the causal context is carried --- explicit
+  FIFO state vs.\ recomputing the receptive-field window; (c) amortizes that
+  window over a 64-frame emit block and is a throughput mode. ms/frame is per
+  \emph{emitted} frame; RTF = ms/frame $\div$ 16\,ms. RF in frames; PESQ is
+  wideband on the full 824-utterance split, as in Table~\ref{tab:quality}.}
   \label{tab:silicon}
   \small
   \setlength{\tabcolsep}{4.5pt}
   % table2_body.tex is GENERATED from the measured sweep (compile reports +
   % on-target validate); regenerate rather than hand-edit.
   \input{table2_body}\\[2pt]
-  {\footnotesize $^\ddagger$latency measured on the compiled graph of that
-  architecture with re-initialized weights (no trained checkpoint at hand);
-  the graph --- and hence the latency --- is identical, and PESQ is the
-  host-measured value from Table~\ref{tab:quality}.\quad
-  $^\dagger$exceeds the 16\,ms budget (weights overflow on-chip RAM;
-  memory-bound): not real-time.}
+  {\footnotesize $^\dagger$exceeds the 16\,ms budget: not real-time.\quad
+  $^\ddagger$latency measured on the compiled graph of that architecture with
+  re-initialized weights (no trained checkpoint at hand); the graph --- and
+  hence the latency --- is identical, and PESQ is the host-measured value from
+  Table~\ref{tab:quality}.}
 \end{table*}
 
 We deployed \emph{every} hardened variant, in both graph forms, through one
@@ -346,17 +361,27 @@ best-quality real-time streaming enhancer on this board, ahead of ConvFSENet
 true one-hop latency. On-target outputs track the host int8 reference at
 cosine 0.998.
 
-\textbf{Windowing buys throughput, but only while it fits on-chip.} At a
-64-frame emit block the small variants amortize to 0.93--1.82\,ms per emitted
-frame (RTF as low as 0.058) --- $2.8\times$ cheaper than streaming for the
-same weights, because a $T{=}1$ graph cannot fill the accelerator's
-convolution pipeline. That advantage evaporates when the window overflows
-on-chip memory: the RF-196 windows need $>$5\,MB of activations, spill
-$\approx$2.5\,MB into external hyper-RAM, and become memory-bound and
-allocation-sensitive --- two topologies that differ only in their activation
-function land 5.72 and 3.09\,ms/frame apart purely on how the allocator
-splits that spill. The streaming graph, at 304\,KB, never leaves on-chip RAM
-and is the predictable deployment.
+\textbf{Deleting the FIFO is a trap --- and the numbers say why.} At the same
+16\,ms latency, the stateless RF-window (block~b) is \textbf{11.6--26$\times$
+slower} than streaming and misses real time for \emph{every} variant
+(RTF 1.9--8.0). This is not because the window maps badly --- the opposite. It
+uses the accelerator far \emph{better}: with no Slice/Concat state ops and a
+69--197-frame convolution extent, it sustains 2.2--3.1\,GMAC/s against
+streaming's 0.34--0.56, a $6\text{--}8\times$ higher utilization, confirming
+that the $T{=}1$ streaming graph is launch- and state-bound rather than
+compute-bound. But it must recompute the whole receptive field every frame:
+$70\times$ the MACs at RF~68, $200\times$ at RF~196. A $6\text{--}8\times$
+efficiency gain cannot pay a $70\text{--}200\times$ compute bill. Amortizing
+over an emit block restores real time only by re-introducing latency
+($T{\geq}3$, 48\,ms for 24\,ch; $T{\geq}9$, 144\,ms for relu6-deep) and even
+then runs at 11--15\,ms/frame --- still $3\text{--}5\times$ costlier than
+streaming, which needs no block at all. \emph{The FIFO graph dominates on both
+axes}, which is what makes the \texttt{Pad} export fix of
+Sec.~\ref{sec:background} the load-bearing step of this deployment: without
+it, the only NPU-mappable graph was the window, and this model would not be
+real-time on this chip. (Block~c is reported for completeness: at a 64-frame
+block the window amortizes to 1.15\,ms/frame, but 1.02\,s of algorithmic
+latency makes that a throughput mode, not a real-time one.)
 
 \textbf{The best offline recipe does not ship.} The hybrid decoder-FP32 graph
 (PESQ 3.052) compiles and runs, but its float decoder pulls 19 epochs onto the
@@ -386,10 +411,15 @@ hardware demands is precisely what makes int8 quantization nearly free, and
 the one place quantization still hurts --- the linear decoder --- can be
 diagnosed with a seeded selective-quantization scan and repaired by
 activation clipping --- the one repair that stays inside the latency budget,
-where a float decoder does not. The deployed model streams frame-by-frame with
-16\,ms algorithmic latency at real-time factor 0.30 on a microcontroller NPU
-while \emph{exceeding} the quality of the CPU-oriented original's deployable
-configuration by $+0.083$ PESQ. We believe the recipe
+where a float decoder does not. Measuring both causal-context strategies at
+equal latency also overturns an intuition: deleting the FIFO state buys a
+$6\text{--}8\times$ better-utilized accelerator and still loses by
+$12\text{--}26\times$, because recomputing a 68--196-frame receptive field
+every frame is simply a bigger bill than the state plumbing it removes. The
+deployed model streams frame-by-frame with 16\,ms algorithmic latency at
+real-time factor 0.30 on a microcontroller NPU while \emph{exceeding} the
+quality of the CPU-oriented original's deployable configuration by $+0.083$
+PESQ. We believe the recipe
 --- re-express recurrence as bounded-context convolution, harden primitives
 for the int8 vocabulary, and treat quantization robustness as an
 architecture-design criterion rather than an afterthought --- transfers

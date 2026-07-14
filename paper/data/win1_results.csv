@@ -1,0 +1,7 @@
+name,profile,ms_per_frame,ms_min,ms_max,ms_std,cos,status
+nc20,n6-noextmem,29.928,29.717,30.088,0.126,1.000000,OK
+nc24,n6-noextmem,32.815,32.710,32.928,0.057,0.997493,OK
+nc28,n6-noextmem,40.009,39.889,40.120,0.075,0.999999,OK
+dil16,n6-noextmem,74.720,74.583,74.889,0.104,1.000000,OK
+deep,n6-allmems-O3,127.155,126.774,127.443,0.219,0.999999,OK
+r6,n6-allmems-O3,119.863,119.235,120.274,0.279,0.998021,OK
