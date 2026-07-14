@@ -62,12 +62,12 @@ df -h .
 - [ ] **VRAM.** Peak per concurrent run at the shipped batch sizes:
   LiSenNet ~2 GB · ConvFSENet ~6 GB · NSNet2 ~10 GB · BASENet ~13 GB.
   On 96 GB, `JOBS=5` is comfortable; `JOBS=8` fits if BASENet stays out.
-- [ ] **CPU — the non-obvious one.** PESQ is the campaign's hidden cost and it
-  does *not* scale with the GPU: `batch_pesq` runs on **every training step**
-  with `n_jobs=-1`. The script caps each job's joblib pool to `nproc / JOBS`
-  (`CORES_PER_JOB` overrides). Confirm the header prints a sane split — if
-  `nproc` is small relative to `JOBS`, lower `JOBS` rather than starving every
-  trainer.
+- [ ] **CPU.** The per-step MetricGAN target now runs on the GPU (torch-pesq),
+  so PESQ is no longer what limits concurrency — see
+  [The PESQ target](#the-pesq-target). The CPU still runs the *reported* PESQ at
+  each validation (`n_jobs=30`), so the script caps each job's joblib pool to
+  `nproc / JOBS` (`CORES_PER_JOB` overrides). Confirm the header prints a sane
+  split.
 - [ ] **Disk:** budget ~50 GB. Rolling checkpoints are kept (not pruned), and
   ConvFSENet at 200 epochs is the bulk of it.
 - [ ] **Network:** first run downloads VoiceBank-DEMAND (~2.2 GB) and caches it.
@@ -108,18 +108,27 @@ tensorboard --logdir_spec=...                         # printed when the campaig
 
 ## 7. Expect
 
-Extrapolated from real 1-epoch runs on a **4090**, so treat as ±50%, and the RTX
-6000 Pro is meaningfully faster:
+Extrapolated from real 1-epoch runs on a **4090** with the torch-pesq target, so
+treat as ±50%; the RTX 6000 Pro is meaningfully faster.
 
 | family | epochs | steps/epoch | ≈ per run | runs | ≈ GPU-hours |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| LiSenNet | 100 | 723 | ~8.5 h | 12 | ~100 |
-| ConvFSENet | 200 | 723 | ~23 h | 3 | ~70 |
-| NSNet2 | 200 | 45 | ~3 h | 13 | ~40 |
-| | | | | **28** | **~210** |
+| LiSenNet | 100 | 723 | ~2.4 h | 12 | ~28 |
+| ConvFSENet | 200 | 723 | ~11 h | 3 | ~33 |
+| NSNet2 | 200 | 45 | ~2 h | 13 | ~26 |
+| | | | | **28** | **~90** |
 
-At `JOBS=5` that is roughly **1.5–2 days** wall-clock. ConvFSENet at 200 epochs
+At `JOBS=5`, roughly **half a day to a day** wall-clock. ConvFSENet at 200 epochs
 dominates per-run cost; NSNet2 is cheap (batch 256 → only 45 steps/epoch).
+
+Measured, 1 LiSenNet epoch on the 4090 — note the CPU target is what *punished*
+concurrency, and the GPU one barely notices it:
+
+| | JOBS=1 | JOBS=3 |
+| --- | ---: | ---: |
+| ITU PESQ target (CPU) | 104 s | 175 s |
+| torch-pesq target (GPU) | 77 s | 85 s |
+| speedup | 1.35x | **2.05x** |
 
 ## 8. Interrupted?
 
@@ -164,6 +173,28 @@ to compare against. Do not "tidy" this.
 
 **Published numbers in RESULTS_*.md predate the loss change** for LiSenNet and
 ConvFSENet (banners in those files say so). They are the A/B baseline.
+
+## The PESQ target
+
+PESQ appears in the campaign in two completely different roles, and they use two
+different implementations on purpose.
+
+| | implementation | why |
+| --- | --- | --- |
+| **MetricGAN target**, every training step | `torch-pesq` on the GPU (`common.discriminator.batch_pesq_torch`) | It is only a regression target for the discriminator, which needs a signal that *orders* quality correctly. Measured against ITU on 200 real VBD pairs: Pearson 0.999, Spearman 0.997, mean err 0.043. |
+| **Reported PESQ**, at each validation | `pesq` — the ITU-T P.862 reference (`common.metrics.pesq_score`) | This is the number of record. It gates `g_best` and is what RESULTS_*.md compares against published baselines and the MP-SENet paper. Swapping it would silently redefine the metric. **Do not "optimise" this one.** |
+
+torch-pesq is *not* the reference implementation — it skips time alignment and
+does level alignment with IIR filtering. That is acceptable for a training
+target and unacceptable for a reported score, which is exactly the split above.
+
+To fall back to the reference target (bit-identical to what the published
+checkpoints were trained against — use it to reproduce them exactly, or to rule
+the approximation out if a run looks off):
+
+```json
+"gan": { "enabled": true, "metric_loss_lambda": 0.05, "pesq_backend": "itu" }
+```
 
 ## Scoring beyond PESQ
 

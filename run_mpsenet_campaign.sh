@@ -121,11 +121,20 @@ NCORES="$(nproc 2>/dev/null || echo 8)"
 CORES_PER_JOB="${CORES_PER_JOB:-$(( NCORES / JOBS > 0 ? NCORES / JOBS : 1 ))}"
 
 model_of() {   # run name -> trainer module
+    # The NSNet2 names carry no shared prefix, so they are listed explicitly.
+    # An unknown name is an ERROR, not an NSNet2 run: this used to fall through
+    # to `nsnet2` via a `*)` catch-all, which meant a typo'd or ad-hoc run name
+    # silently trained the WRONG MODEL against the right config — it "works",
+    # burns hours, and the numbers are meaningless.
     case "$1" in
         lisennet*)   echo lisennet   ;;
         convfsenet*) echo convfsenet ;;
         basenet*)    echo basenet    ;;
-        *)           echo nsnet2     ;;   # baseline / blockdiag_* / monarch_* / butterfly_*
+        baseline|blockdiag_*|monarch_*|butterfly_*|wide_blockdiag|wide_monarch)
+                     echo nsnet2     ;;
+        *) die "run '$1' matches no trainer. Expected a name starting with
+       lisennet/convfsenet/basenet, or one of the NSNet2 runs:
+       $NSNET2_RUNS" ;;
     esac
 }
 

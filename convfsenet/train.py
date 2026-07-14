@@ -53,7 +53,7 @@ from common.dataset import (
     Dataset, data_generator, load_voicebank_demand, mag_pha_stft, seed_worker,
 )
 from common.env import AttrDict, build_env
-from common.discriminator import MetricDiscriminator, batch_pesq
+from common.discriminator import MetricDiscriminator, pesq_target_from_config
 from common.losses import (
     discriminator_loss, generator_loss, generator_terms, loss_weights,
     mag_pha_from_complex,
@@ -169,6 +169,7 @@ def train(a, h):
     # ----- loss + optional metric-GAN discriminator --------------------------
     weights = loss_weights(h)
     weights.pop("phase", None)              # mask-only model — no phase to train
+    pesq_fn = pesq_target_from_config(h)
 
     gan_cfg = h.get("gan", {}) or {}
     use_gan = bool(gan_cfg.get("enabled", False))
@@ -257,7 +258,7 @@ def train(a, h):
             if use_gan:
                 metrics = _gan_step(
                     model, discriminator, optim, optim_d,
-                    noisy_audio, clean_audio, h, weights, device,
+                    noisy_audio, clean_audio, h, weights, device, pesq_fn,
                 )
             else:
                 optim.zero_grad()
@@ -332,11 +333,11 @@ def train(a, h):
 
 
 def _gan_step(model, discriminator, optim, optim_d,
-              noisy_audio, clean_audio, h, weights, device):
+              noisy_audio, clean_audio, h, weights, device, pesq_fn=None):
     """One MetricGAN training step against the MP-SENet objective.
 
     The discriminator is trained to predict normalized PESQ: 1 for clean-vs-clean,
-    batch_pesq() for pred-vs-clean. The generator's metric term pulls
+    the PESQ target for pred-vs-clean. The generator's metric term pulls
     disc(clean_mag, mag_g_hat) toward 1 (i.e. "sound like perfect PESQ").
 
     Both the discriminator and the metric term are shown the *round-tripped*
@@ -344,13 +345,11 @@ def _gan_step(model, discriminator, optim, optim_d,
 
     Returns a dict of scalar metrics for logging.
     """
+    pesq_fn = pesq_fn or pesq_target_from_config(h)
     s = forward_spectra(model, noisy_audio, clean_audio, h)
 
     # ----- discriminator step ----------------------------------------------
-    pesq_target = batch_pesq(
-        list(s["audio_r"].detach().cpu().numpy()),
-        list(s["audio_g"].detach().cpu().numpy()),
-    )
+    pesq_target = pesq_fn(s["audio_r"].detach(), s["audio_g"].detach())
     optim_d.zero_grad()
     loss_disc = discriminator_loss(discriminator, s["mag_r"], s["mag_g_hat"],
                                    pesq_target, device)

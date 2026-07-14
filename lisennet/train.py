@@ -38,7 +38,7 @@ from torch.utils.tensorboard import SummaryWriter
 from lisennet.model import build_lisennet
 from common.dataset import Dataset, data_generator, load_voicebank_demand, seed_worker
 from common.env import AttrDict, build_env
-from common.discriminator import MetricDiscriminator, batch_pesq
+from common.discriminator import MetricDiscriminator, pesq_target_from_config
 from common.losses import (
     discriminator_loss, generator_loss, generator_terms, loss_weights,
     mag_pha_from_complex,
@@ -100,7 +100,7 @@ def forward_spectra(model, noisy, clean):
 
 
 def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, clip,
-             teacher=None, distill_weight=0.0):
+             teacher=None, distill_weight=0.0, pesq_fn=None):
     """One MetricGAN step: discriminator then generator (one shared forward).
 
     With ``teacher`` set, adds ``distill_weight * MSE(est_mag, teacher_est_mag)``
@@ -110,13 +110,11 @@ def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, c
     ``--distill_from`` is passed.
     """
     device = clean.device
+    pesq_fn = pesq_fn or pesq_target_from_config(h)
     s = forward_spectra(model, noisy, clean)
 
     # ----- discriminator -----
-    pesq_target = batch_pesq(
-        list(s["audio_r"].detach().cpu().numpy()),
-        list(s["audio_g"].detach().cpu().numpy()),
-    )
+    pesq_target = pesq_fn(s["audio_r"].detach(), s["audio_g"].detach())
     optim_d.zero_grad()
     d_loss = discriminator_loss(discriminator, s["mag_r"], s["mag_g_hat"],
                                 pesq_target, device)
@@ -169,6 +167,7 @@ def train(a, h):
     weights = loss_weights(h)
     weights.pop("phase", None)                 # no phase decoder — see module docstring
     clip = float(h.get("gradient_clip", 5.0))
+    pesq_fn = pesq_target_from_config(h)
 
     # ----- distillation teacher (optional, frozen) ---------------------------
     teacher = None
@@ -233,7 +232,8 @@ def train(a, h):
             noisy_audio = _to_dev(noisy_audio, device)
             metrics = gan_step(model, discriminator, optim_g, optim_d,
                                noisy_audio, clean_audio, h, weights, clip,
-                               teacher=teacher, distill_weight=a.distill_weight)
+                               teacher=teacher, distill_weight=a.distill_weight,
+                               pesq_fn=pesq_fn)
 
             if steps % a.stdout_interval == 0:
                 print(f"Steps : {steps:d}, G: {metrics['loss']:.4f}, D: {metrics['d_loss']:.4f}, "

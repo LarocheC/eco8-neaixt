@@ -35,7 +35,7 @@ from common.dataset import (
     mag_pha_stft, mag_pha_istft, seed_worker,
 )
 from common.env import AttrDict, build_env
-from common.discriminator import MetricDiscriminator, batch_pesq
+from common.discriminator import MetricDiscriminator, pesq_target_from_config
 from common.losses import (
     discriminator_loss, generator_loss as mpsenet_loss, generator_terms, loss_weights,
 )
@@ -115,7 +115,7 @@ def generator_loss(model, noisy_audio, clean_audio, h, weights=None):
 
 def gan_step(model, discriminator, optim, optim_d, noisy_audio, clean_audio,
              h, device, weights, accum=1, is_first=True, do_step=True,
-             grad_clip=5.0):
+             grad_clip=5.0, pesq_fn=None):
     """One MetricGAN micro-step (generator + discriminator), accumulation-aware.
 
     The discriminator learns to map (clean_mag, x_mag) -> normalised PESQ: 1 for
@@ -131,13 +131,11 @@ def gan_step(model, discriminator, optim, optim_d, noisy_audio, clean_audio,
     numerically equal to one batch of size B. ``accum=1`` reproduces the original
     per-batch step exactly.
     """
+    pesq_fn = pesq_fn or pesq_target_from_config(h)
     s = forward_spectra(model, noisy_audio, clean_audio, h)
 
     # ----- discriminator step ----------------------------------------------
-    pesq_target = batch_pesq(
-        list(s["audio_r"].detach().cpu().numpy()),
-        list(s["audio_g"].detach().cpu().numpy()),
-    )
+    pesq_target = pesq_fn(s["audio_r"].detach(), s["audio_g"].detach())
     if is_first:
         optim_d.zero_grad()
     loss_disc = discriminator_loss(discriminator, s["mag_r"], s["mag_g_hat"],

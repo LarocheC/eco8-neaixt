@@ -15,7 +15,7 @@ from common.env import AttrDict, build_env
 from common.dataset import Dataset, mag_pha_stft, mag_pha_istft, load_voicebank_demand
 from nsnet2.model import NSNet2
 from common.metrics import pesq_score
-from common.discriminator import MetricDiscriminator, batch_pesq
+from common.discriminator import MetricDiscriminator, pesq_target_from_config
 from common.losses import (
     discriminator_loss, generator_loss, generator_terms, loss_weights,
 )
@@ -128,6 +128,7 @@ def train(rank, a, h):
     # MP-SENet's generator weights; a config's `loss` block can override any of
     # them. `phase` is unused here — NSNet2 has no phase decoder.
     weights = loss_weights(h)
+    pesq_fn = pesq_target_from_config(h)
 
     # Restore best_pesq on resume so a resumed run can't overwrite g_best with
     # an inferior model (the checkpoint persists it; default 0 for fresh runs).
@@ -158,9 +159,7 @@ def train(rank, a, h):
             audio_g = mag_pha_istft(mag_g, pha_g, h.n_fft, h.hop_size, h.win_size, h.compress_factor)
             mag_g_hat, pha_g_hat, com_g_hat = mag_pha_stft(audio_g, h.n_fft, h.hop_size, h.win_size, h.compress_factor)
 
-            audio_list_r = list(clean_audio.cpu().numpy())
-            audio_list_g = list(audio_g.detach().cpu().numpy())
-            batch_pesq_score = batch_pesq(audio_list_r, audio_list_g)
+            batch_pesq_score = pesq_fn(clean_audio.detach(), audio_g.detach())
 
             # Discriminator (MetricGAN: predict normalised PESQ; clean-vs-clean = 1)
             optim_d.zero_grad()
