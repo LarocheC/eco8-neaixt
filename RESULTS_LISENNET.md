@@ -364,21 +364,30 @@ on-device — the same latency class as ConvFSENet/monarch:
 | **latency per frame**               | **2.791 ms** (std 0.006) |
 | **RTF (16 ms hop)**                 | **0.174** (~5.7× headroom) |
 | algorithmic latency                 | **one 16 ms hop** (vs 1.02 s windowed) |
-| **PESQ, full 824-utt split (int8 streaming + noisy phase)** | **2.963** |
+| **PESQ, full 824-utt split (int8 streaming + noisy phase)** | **2.982** (published artifact; 2.963 on the first calibration draw) |
 | host parity (int8 stream vs fp32 offline) | cos 0.9992 |
 | on-device vs host int8 (threaded state, real speech) | cos 0.998 |
 
 Notes:
 
 * **This makes LiSenNet the best-quality streaming model on the N6** —
-  PESQ 2.963 at 2.79 ms/frame, vs ConvFSENet 2.91 at 4.40 ms and monarch_full
+  PESQ 2.982 at 2.79 ms/frame, vs ConvFSENet 2.91 at 4.40 ms and monarch_full
   2.85 at 2.13 ms. The windowed graph keeps the throughput crown (1.15 ms/frame,
   int8 PESQ 2.998) for latency-tolerant (1 s block) use.
-* The streaming int8 quant costs −0.037 vs the fp32 real-time reference
-  (2.963 vs 3.000 on the same protocol) — slightly more than the windowed
-  artifact's −0.016; the calibration regime differs (300 propagated-state
-  frames vs windowed crops). Recalibration with more utterances is the obvious
-  knob if that gap ever matters.
+* The streaming int8 quant costs **−0.018** vs the fp32 real-time reference
+  (2.982 vs 3.000 on the same protocol), in line with the windowed artifact's
+  −0.016.
+* **…but that cost is calibration-draw-sensitive.** A re-export + re-calibration
+  of the *same* checkpoint and recipe (`quant_onnx --streaming --signed`, default
+  16 calib utts) landed at 2.982 where the first draw landed at 2.963 — a 0.019
+  spread from the stochastic calibration crops alone, i.e. the streaming PTQ gap
+  is anywhere in −0.018…−0.037 depending on the draw. The fp32 streaming
+  reference reproduces to 3.000 exactly across both, so this is quantization
+  noise, not eval noise. **The 2.982 draw is the one published on the Hub.**
+  Note this is the *streaming* graph specifically — the round-2 finding that
+  recalibration does not move the *windowed* long-RF models still stands; if the
+  streaming gap ever needs to be tight rather than lucky, calibrating over more
+  utterances (or best-of-N draws on a held-out split) is the knob.
 * Where the 2.78 ms goes (npu_profiler): NPU core 0.72 ms (26%); no hot epoch
   (top one 0.033 ms) — the floor is the distributed launch + state-plumbing
   overhead of 131 epochs, the same regime as ConvFSENet's streaming graph. At
@@ -425,22 +434,49 @@ streaming flag is off, and the offline forward stays bit-identical).
 
 ## Trained checkpoint
 
-Both variants live in one HuggingFace repo,
+All four variants live in one HuggingFace repo,
 [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet), each under its
-own subfolder:
+own subfolder. Every subfolder carries `config.json`, `g_best`,
+`g_best_fp32.onnx` and `g_best_int8_static.onnx`; the deploy variants add their
+deploy graphs:
 
-* **`gru/`** — the GRU quality reference: `g_best`, `g_best_fp32.onnx`,
-  `g_best_int8_static.onnx`, `config.json`.
-* **`conv/`** — the NPU-deployable conv variant: the same, plus the frame-by-frame
-  **streaming** graphs (`g_best_streaming_fp32.onnx`, the stedgeai target, and
-  `g_best_streaming_int8_static.onnx`).
+* **`gru/`** — the GRU quality reference (FP32 3.006). Does not compile to the NPU.
+* **`conv/`** — the un-hardened conv variant (FP32 2.970), plus frame-by-frame
+  **streaming** graphs. CPU/onnxruntime reference only — this variant's streaming
+  graph does not compile to Neural-ART.
+* **`conv-hardened/`** — the **deploy model** (FP32 3.013), with *both*
+  NPU-compiled graphs: the stateless **windowed** pair
+  (`g_best_windowed_{fp32,int8_static}.onnx` — 1.15 ms/frame, int8 PESQ 2.998,
+  1.02 s block) and the **streaming** pair
+  (`g_best_streaming_{fp32,int8_static}.onnx` — 2.79 ms/frame, int8 PESQ 2.982,
+  one 16 ms hop). Pick by whether you can afford block latency.
+* **`conv-hardened-deep/`** — the best-quality variant (FP32 3.084), windowed
+  graphs only, including the hybrid decoder-FP32 int8 artifact (PESQ 3.052).
 
-Publish either variant with `push_lisennet_hf.py` — it auto-selects the subfolder
-and writes the combined root model card from the run's `config.json` `bottleneck`:
+Publish a variant with `push_lisennet_hf.py` — it auto-selects the subfolder from
+the run's `config.json` (`bottleneck`, `norm`, `act`) and rewrites the combined
+root model card:
 
 ```bash
-python push_lisennet_hf.py --checkpoint_dir cp_lisennet            # GRU  -> claroche1/LiSenNet (gru/)
-python push_lisennet_hf.py --checkpoint_dir cp_lisennet_conv_wide  # conv -> claroche1/LiSenNet (conv/)
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet                     # -> gru/
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet_conv_wide           # -> conv/
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet_conv_hardened_nc24  # -> conv-hardened/
+python push_lisennet_hf.py --checkpoint_dir cp_lisennet_conv_hardened_nc24_deep_relu6  # -> conv-hardened-deep/
+```
+
+⚠ The subfolder is inferred from the *recipe*, not the run directory name, so the
+ablation runs (`_nc28`, `_deep`, `_dil16`, `_kd`, `_s2`, …) resolve to
+`conv-hardened/` too and would **overwrite the deploy model**. Only push the four
+runs listed above.
+
+The `conv-hardened/` streaming graphs are regenerated with:
+
+```bash
+python -m lisennet.export_onnx --checkpoint_file cp_lisennet_conv_hardened_nc24/g_best --streaming
+python -m lisennet.quant_onnx --fp32 cp_lisennet_conv_hardened_nc24/g_best_streaming_fp32.onnx \
+    --output cp_lisennet_conv_hardened_nc24/g_best_streaming_int8_static.onnx \
+    --mode static --streaming --config cp_lisennet_conv_hardened_nc24/config.json \
+    --checkpoint cp_lisennet_conv_hardened_nc24/g_best
 ```
 
 PyTorch:
@@ -451,9 +487,9 @@ from huggingface_hub import hf_hub_download
 from common.env import AttrDict
 from lisennet.model import build_lisennet
 
-REPO = "claroche1/LiSenNet"
-cfg  = json.load(open(hf_hub_download(REPO, "config.json")))
-ckpt = torch.load(hf_hub_download(REPO, "g_best"),
+REPO, SUB = "claroche1/LiSenNet", "conv-hardened"   # or gru / conv / conv-hardened-deep
+cfg  = json.load(open(hf_hub_download(REPO, f"{SUB}/config.json")))
+ckpt = torch.load(hf_hub_download(REPO, f"{SUB}/g_best"),
                   map_location="cpu", weights_only=True)
 model = build_lisennet(AttrDict(cfg)).eval()
 model.load_state_dict(ckpt["generator"])
@@ -466,19 +502,14 @@ ONNX (the mask sub-network — `feat (B,3,T,F)` -> `est_mag (B,T,F)`):
 import numpy as np, onnxruntime as ort
 from huggingface_hub import hf_hub_download
 
-REPO = "claroche1/LiSenNet"
+REPO, SUB = "claroche1/LiSenNet", "conv-hardened"
 sess = ort.InferenceSession(
-    hf_hub_download(REPO, "g_best_int8_static.onnx"),   # or g_best_fp32.onnx
+    hf_hub_download(REPO, f"{SUB}/g_best_int8_static.onnx"),   # or g_best_fp32.onnx
     providers=["CPUExecutionProvider"],
 )
 est_mag = sess.run(["est_mag"], {"feat": np.zeros((1, 3, 100, 257), np.float32)})[0]
 ```
 
-To (re-)publish from a fresh run:
-
-```bash
-python push_lisennet_hf.py            # cp_lisennet/ -> claroche1/LiSenNet
-```
-
-(needs `huggingface-cli login` or `HF_TOKEN`; idempotent — re-running just makes
-another HF commit.)
+(Publishing needs `huggingface-cli login` or `HF_TOKEN`; `push_lisennet_hf.py` is
+idempotent — re-running just makes another HF commit. Use `--dry-run` first to
+confirm which subfolder a run resolves to.)

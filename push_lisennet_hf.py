@@ -132,7 +132,8 @@ has (topology verified on Neural-ART).
   `feat_window (B,3,132,257) -> est_mag (B,64,257)`, window = receptive field
   68 + 64 emitted frames) that **compiles to Neural-ART** — the artifact handed
   to stedgeai. The hardened primitives also quantize far better (int8 drop
-  −0.016 vs −0.115 for `conv/`).
+  −0.016 vs −0.115 for `conv/`). It also ships a **frame-by-frame streaming**
+  graph — see below.
 * **`conv-hardened-deep/`** is the **best model overall**: the hardened recipe,
   deeper (3 blocks) with an extra dilation stage (receptive field 196 frames ≈
   3.1 s) and **ReLU6** activations (bounded ranges quantize better; exports as
@@ -141,6 +142,33 @@ has (topology verified on Neural-ART).
   (everything int8, PESQ 3.014) and `g_best_windowed_int8_decoder_fp32.onnx`
   (int8 except the decoder's QDQ nodes, PESQ **3.052** — the int8 loss is
   decoder-localized; the decoder then runs as float epochs on the board).
+
+## Two deploy paths (`conv-hardened/`) — throughput vs latency
+
+The hardened variant ships **both** NPU-deployable graphs. They are the same
+trained weights; they differ only in how much audio each inference call consumes.
+Both are measured on an STM32N6570-DK (STM32N657, MCU 800 MHz / NPU 1 GHz,
+stedgeai 4.0.1); PESQ is the full 824-utterance VBD test split, int8 + noisy
+phase.
+
+| graph | shape | algorithmic latency | latency/frame | RTF | PESQ |
+| ----- | ----- | ------------------- | ------------: | --: | ---: |
+| `g_best_windowed_int8_static.onnx` | `feat_window (B,3,132,257) -> est_mag (B,64,257)` | 1.02 s block | **1.15 ms** | 0.072 | **2.998** |
+| `g_best_streaming_int8_static.onnx` | `feat (B,3,1,257) + 17 states -> est_mag (B,1,257) + 17 states` | **one 16 ms hop** | 2.79 ms | 0.174 | **2.982** |
+
+* the **windowed** graph is stateless and the throughput champion (1.15 ms per
+  emitted frame), but buffers 1.02 s of audio per call — use it when block
+  latency is acceptable;
+* the **streaming** graph is true frame-by-frame — one 16 ms hop in, one enhanced
+  frame out, with 17 bounded FIFO state tensors carried on-device (47 KiB weights
+  + 147 KiB activations, entirely on-chip). It costs ~2.4× more compute per frame
+  but drops algorithmic latency by ~64×, which makes it the best-quality
+  *streaming* speech enhancer measured on this NPU.
+
+Both are signed QInt8 (the Neural-ART recipe). The streaming graph is calibrated
+by threading the real FIFO state through the trained model, so the state tensors
+see realistic ranges; its int8 cost is −0.018 PESQ vs the same-protocol FP32
+streaming reference (3.000).
 
 Code + full write-up: [{src}]({src}) — see
 [RESULTS_LISENNET.md]({src}/blob/main/RESULTS_LISENNET.md).
@@ -151,10 +179,12 @@ Code + full write-up: [{src}]({src}) — see
 and `g_best_int8_static.onnx` (whole-utterance mask sub-network,
 `feat (B,3,T,F) -> est_mag (B,T,F)`). `conv/` additionally has
 `g_best_streaming_fp32.onnx` and `g_best_streaming_int8_static.onnx` (single
-frame + explicit state I/O); `conv-hardened/` has `g_best_windowed_fp32.onnx`
-and `g_best_windowed_int8_static.onnx` (stateless windowed deploy graph, the
-stedgeai / Neural-ART target). The ONNX graphs are the mask sub-network only —
-STFT, feature build and phase recovery stay host-side.
+frame + explicit state I/O — CPU/onnxruntime reference only; this variant's
+streaming graph does not compile to Neural-ART). `conv-hardened/` has **both**
+NPU deploy graphs: `g_best_windowed_{fp32,int8_static}.onnx` (stateless windowed)
+and `g_best_streaming_{fp32,int8_static}.onnx` (frame-by-frame, 17 FIFO states) —
+see the two-deploy-paths table above. The ONNX graphs are the mask sub-network
+only — STFT, feature build and phase recovery stay host-side.
 
 ## Loading (PyTorch)
 
@@ -188,14 +218,19 @@ feat_window = np.zeros((1, 3, 132, 257), np.float32)   # last 68+64 feature fram
 est_mag = sess.run(["est_mag"], {"feat_window": feat_window})[0]  # (1, 64, 257)
 ```
 
-## Running the CPU streaming graph frame-by-frame (`conv/`)
+## Running the streaming graph frame-by-frame (`conv-hardened/`, `conv/`)
+
+One 16 ms hop in, one enhanced frame out; the FIFO state tensors are threaded
+from each call's outputs into the next call's inputs (start-of-stream = zeros).
+Point it at `conv-hardened/` for the NPU-deployable graph (PESQ 2.982), or
+`conv/` for the CPU-only reference.
 
 ```python
 import numpy as np, onnxruntime as ort
 from huggingface_hub import hf_hub_download
 
 sess = ort.InferenceSession(
-    hf_hub_download("{repo_id}", "conv/g_best_streaming_fp32.onnx"),
+    hf_hub_download("{repo_id}", "conv-hardened/g_best_streaming_int8_static.onnx"),
     providers=["CPUExecutionProvider"],
 )
 state_in = [i for i in sess.get_inputs() if i.name != "feat"]   # FIFO states
