@@ -1,0 +1,14 @@
+name,profile,ms_per_inference,ms_min,ms_max,ms_std,cos,status
+r6str,n6-noextmem,4.825,4.816,4.846,0.007,0.998018,OK
+r6win,n6-allmems-O3,197.994,197.695,198.214,0.163,0.999594,OK
+r6hyb,n6-allmems-O3,2175.560,2161.557,2181.754,6.648,0.966398,OK
+nc20str,n6-noextmem,2.588,2.584,2.608,0.007,1.000000,OK
+nc20win,n6-allmems-O3,59.791,59.461,59.959,0.164,1.000000,OK
+nc28str,n6-noextmem,3.147,3.142,3.163,0.006,0.999999,OK
+nc28win,n6-allmems-O3,92.926,92.777,93.079,0.104,0.999999,OK
+dil16str,n6-noextmem,3.633,3.623,3.645,0.007,1.000000,OK
+dil16win,n6-allmems-O3,116.784,115.697,117.377,0.478,1.000000,OK
+deepstr,n6-noextmem,4.877,4.871,4.894,0.006,0.999999,OK
+deepwin,n6-allmems-O3,366.253,365.981,366.400,0.127,1.000000,OK
+nc24str,n6-noextmem,2.789,2.784,2.807,0.006,0.994097,OK
+nc24win,n6-allmems-O3,73.643,73.361,73.968,0.181,0.998285,OK

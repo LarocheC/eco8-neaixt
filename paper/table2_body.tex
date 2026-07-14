@@ -1,0 +1,28 @@
+  \begin{tabular}{@{}lrrrrrrr@{}}
+    \toprule
+    deployment & params & RF & MAC/frame & weights & ms/frame & RTF & PESQ \\
+    \midrule
+    \multicolumn{8}{@{}l}{\emph{streaming} --- one frame in, one out; \textbf{16\,ms} algorithmic latency} \\
+    hardened, 20\,ch$^\ddagger$ & 25.7\,k & 68 & 0.92\,M & 35\,KB & 2.59 & 0.162 & --- \\
+    hardened, 24\,ch & 36.3\,k & 68 & 1.30\,M & 47\,KB & 2.79 & 0.174 & 2.963 \\
+    hardened, 28\,ch$^\ddagger$ & 48.7\,k & 68 & 1.75\,M & 62\,KB & 3.15 & 0.197 & --- \\
+    \quad+ dilation 16$^\ddagger$ & 37.7\,k & 132 & 1.38\,M & 50\,KB & 3.63 & 0.227 & --- \\
+    \quad+ 3 blocks (deep)$^\ddagger$ & 46.2\,k & 196 & 1.69\,M & 62\,KB & 4.88 & 0.305 & --- \\
+    \textbf{relu6-deep} & 46.2\,k & 196 & 1.66\,M & 61\,KB & \textbf{4.83} & \textbf{0.302} & 3.013 \\
+    \midrule
+    \multicolumn{8}{@{}l}{\emph{windowed} --- 64-frame emit block; \textbf{1.02\,s} algorithmic latency} \\
+    hardened, 20\,ch$^\ddagger$ & 25.7\,k & 68 & 1.99\,M & 406\,KB & 0.93 & 0.058 & 2.853 \\
+    hardened, 24\,ch & 36.3\,k & 68 & 2.78\,M & 492\,KB & 1.15 & 0.072 & 2.998 \\
+    hardened, 28\,ch$^\ddagger$ & 48.7\,k & 68 & 3.70\,M & 580\,KB & 1.45 & 0.091 & 2.867 \\
+    \quad+ dilation 16$^\ddagger$ & 37.7\,k & 132 & 4.26\,M & 710\,KB & 1.82 & 0.114 & 2.954 \\
+    \quad+ 3 blocks (deep)$^\ddagger$ & 46.2\,k & 196 & 6.93\,M & 938\,KB & 5.72 & 0.358 & 2.985 \\
+    \textbf{relu6-deep} & 46.2\,k & 196 & 6.92\,M & 938\,KB & \textbf{3.09} & \textbf{0.193} & 3.014 \\
+    relu6-deep, hybrid dec.$^\dagger$ & 46.2\,k & 196 & 6.91\,M & 3.51\,MB & 33.99 & 2.125 & 3.052 \\
+    \midrule
+    \multicolumn{8}{@{}l}{\emph{other model families --- same board, same flow, streaming}} \\
+    ConvFSENet~\cite{luo2019convtasnet} & 1.45\,M & --- & 1.47\,M & 1.40\,MB & 4.40 & 0.275 & 2.911 \\
+    NSNet2 monarch\_full~\cite{dao2022monarch} & 0.36\,M & --- & --- & 0.72\,MB & 2.13 & 0.133 & 2.848 \\
+    NSNet2 monarch\_8~\cite{dao2022monarch} & 0.36\,M & --- & 0.39\,M & 0.37\,MB & 2.89 & 0.181 & 2.826 \\
+    NSNet2 dense~\cite{braun2020nsnet2}$^\dagger$ & 2.78\,M & --- & --- & 2.70\,MB & 22.94 & 1.434 & 2.833 \\
+    \bottomrule
+  \end{tabular}

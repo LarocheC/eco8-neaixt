@@ -47,11 +47,14 @@ ReLU6 activations, transposed-convolution upsampling), and (iii) show that
 post-training-quantization loss concentrates in the model's \emph{decoder},
 which activation clipping and a two-recipe quantization scheme largely
 recover. The result matches the GRU reference in FP32 (PESQ 3.084 vs.\ 3.006
-on VoiceBank-DEMAND) and surpasses it after quantization (3.052 hybrid /
-3.014 all-int8 vs.\ 2.930). On silicon, the model streams frame-by-frame with
-16\,ms algorithmic latency at 2.79\,ms/frame (real-time factor 0.17)
-\todo{update with relu6-deep on-board numbers}, making it the
-highest-quality real-time enhancer measured on this NPU class.
+on VoiceBank-DEMAND) and surpasses it after quantization (3.014 all-int8
+vs.\ 2.930). On silicon, the deployed model streams \emph{frame-by-frame} at
+4.83\,ms per 16\,ms frame (real-time factor 0.30) with one-hop algorithmic
+latency and PESQ 3.013 --- the highest-quality real-time streaming enhancer
+we measure on this NPU class. Deploying all six hardened variants shows the
+design space costs 2.6--4.9\,ms/frame, all real-time, while the float-decoder
+recipe that scores highest offline (3.052) is \emph{not} deployable
+(34\,ms/frame).
 \end{abstract}
 
 \begin{keywords}
@@ -93,13 +96,15 @@ contribute:
   to $-0.016$ PESQ);
 \item a \textbf{quantization study} that localizes the residual int8 loss of
   long-receptive-field variants to the decoder's linear upsampling path via a
-  seeded selective-quantization scan, and recovers it with activation
-  clipping and an optional hybrid recipe that keeps the decoder in float
-  (PESQ 3.052 real-time, $+0.122$ over the GRU reference);
-\item \textbf{on-device measurements} of two deployment graphs --- a
-  stateless windowed graph for latency-tolerant use and a 17-state streaming
-  graph with true 16\,ms hop latency --- including compiler epoch mappings,
-  memory placement, and a per-epoch latency breakdown.
+  seeded selective-quantization scan, and repairs it with bounded activations
+  (PESQ 3.014 real-time, $+0.084$ over the GRU reference) --- the repair that
+  fits the latency budget, where the higher-scoring float-decoder recipe
+  (3.052 offline) costs 34\,ms/frame and does not;
+\item \textbf{on-device measurements of every variant} in both deployment
+  graphs --- a stateless windowed graph for latency-tolerant use and an
+  explicit-state streaming graph with true 16\,ms hop latency --- including
+  compiler epoch mappings, memory placement, and the latency cost of each
+  quality knob.
 \end{itemize}
 
 \begin{figure*}[t]
@@ -230,10 +235,14 @@ included, contributes $\leq+0.010$. The decoder's upsampling path is linear
 range grows unchecked as features enrich with receptive field. Two remedies
 compose: ReLU6 bounds every clipped tensor (all-int8 PESQ 3.014), and a
 \textbf{hybrid} recipe leaves the decoder's nodes ($\sim$36\% of MACs)
-unquantized in the QDQ graph for PESQ 3.052 at the cost of float epochs on
-the device \todo{verify hybrid on-board compile + latency}. Mask-level
-knowledge distillation~\cite{hinton2015kd} from the deep teacher into the
-small base architecture is a third option (3.004 all-int8 at 36\,k params).
+unquantized in the QDQ graph for PESQ 3.052 --- but the float decoder costs
+19 software epochs instead of 6, 3.5\,MB of weights and 12.3\,MB of
+activations, and measures 34\,ms per frame on the board: \emph{the best
+offline recipe is not deployable} (Sec.~\ref{ssec:silicon}). ReLU6, which
+reaches 3.014 well inside the real-time budget, is the one that ships.
+Mask-level knowledge distillation~\cite{hinton2015kd} from the deep teacher
+into the small base architecture is a third option (3.004 all-int8 at
+36\,k params).
 
 % ===========================================================================
 \section{Experiments}
@@ -300,49 +309,71 @@ $\pm0.004$.
 
 \begin{table*}[t]
   \centering
-  \caption{Measured on the STM32N6570-DK (Neural-ART @ 1\,GHz, Cortex-M55 @
-  800\,MHz), int8. Latency per 16\,ms frame; ``block'' = algorithmic latency.
-  Baselines are the other model families deployed on the same board with the
-  same flow.}
+  \caption{\textbf{On-device cost of every LiSenNet variant}, measured on the
+  STM32N6570-DK (Neural-ART @ 1\,GHz, Cortex-M55 @ 800\,MHz), int8, one
+  toolchain pass per row (stedgeai 4.0.1 $\to$ RAM firmware $\to$ on-target
+  validation). ms/frame is per \emph{emitted} 16\,ms frame, so the windowed
+  block amortizes its recompute over its 64-frame emit block; RTF = ms/frame
+  $\div$ 16\,ms. RF (receptive field) and PESQ in frames and wideband PESQ on
+  the full 824-utterance test split, as in Table~\ref{tab:quality}.}
   \label{tab:silicon}
   \small
-  \begin{tabular}{@{}lrrrrcc@{}}
-    \toprule
-    deployment & weights & MAC/frame & ms/frame & RTF & block & PESQ \\
-    \midrule
-    \textbf{LiSenNet stream.\ (24 ch)} & 47\,KiB & 1.30\,M & 2.79 & 0.17 & 16\,ms & 2.963 \\
-    LiSenNet windowed (24 ch)          & 492\,KiB & 2.78\,M & \textbf{1.15} & \textbf{0.07} & 1.02\,s & 2.998 \\
-    LiSenNet stream.\ (relu6-deep)     & \todo{~} & \todo{~} & \todo{~} & \todo{~} & 16\,ms & \todo{~} \\
-    LiSenNet wind.\ (relu6-deep)       & \todo{~} & \todo{~} & \todo{~} & \todo{~} & 1.02\,s & \todo{~} \\
-    \midrule
-    ConvFSENet (streaming)             & 1.40\,MB & 1.47\,M & 4.40 & 0.28 & 16\,ms & 2.91 \\
-    NSNet2 monarch\_full~\cite{dao2022monarch} & 0.72\,MB & --- & 2.13 & 0.13 & 16\,ms & 2.85 \\
-    NSNet2 monarch\_8                  & 0.37\,MB & 0.39\,M & 2.89 & 0.18 & 16\,ms & 2.83 \\
-    NSNet2 dense~\cite{braun2020nsnet2}$^\dagger$ & 2.70\,MB & --- & 22.94 & 1.43 & 16\,ms & 2.84 \\
-    \bottomrule
-    \multicolumn{7}{@{}l@{}}{\footnotesize $^\dagger$exceeds the 16\,ms
-    budget (weights overflow on-chip RAM; memory-bound): not real-time.}
-  \end{tabular}
+  \setlength{\tabcolsep}{4.5pt}
+  % table2_body.tex is GENERATED from the measured sweep (compile reports +
+  % on-target validate); regenerate rather than hand-edit.
+  \input{table2_body}\\[2pt]
+  {\footnotesize $^\ddagger$latency measured on the compiled graph of that
+  architecture with re-initialized weights (no trained checkpoint at hand);
+  the graph --- and hence the latency --- is identical, and PESQ is the
+  host-measured value from Table~\ref{tab:quality}.\quad
+  $^\dagger$exceeds the 16\,ms budget (weights overflow on-chip RAM;
+  memory-bound): not real-time.}
 \end{table*}
 
-Table~\ref{tab:silicon} places both LiSenNet graphs among all models deployed
-on this board. The streaming graph runs at 2.79\,ms per frame (74 of 131
-compiler epochs pure-hardware; 47\,KiB weights and 147\,KiB activations
-entirely in on-chip NPU RAM) --- the \textbf{best-quality real-time
-streaming enhancer on this silicon}, at 16\,ms algorithmic latency. The
-windowed graph trades latency for throughput: at a 64-frame emit block it
-amortizes to 1.15\,ms per frame ($14\times$ real-time headroom), with all
-2.72\,MiB of window activations on-chip and only the 492\,KiB weight stream
-in external flash. Per-epoch profiling shows the streaming frame cost is
-\emph{not} compute-bound: the NPU core is busy only 0.72\,ms (26\%); the
-floor is the distributed launch and state-plumbing overhead of 131 epochs
---- the same regime we measure for the ConvFSENet baseline, and the reason
-sub-band conv models with fewer, fatter epochs amortize better in windowed
-mode. On-target accuracy tracks the host int8 reference at cosine 0.998
-under threaded state on real speech.
+We deployed \emph{every} hardened variant, in both graph forms, through one
+toolchain pass each (Table~\ref{tab:silicon}). Four observations.
 
-\todo{Deploy relu6-deep (windowed window 260 and streaming) with the same
-flow and fill the two rows; expected: same-class latency, PESQ 3.014.}
+\textbf{The design space is real-time, streaming, end to end.} Every variant
+runs frame-by-frame within the 16\,ms budget: 2.59\,ms (20\,ch) to 4.88\,ms
+(3 blocks, RF 196), i.e.\ RTF 0.16--0.31, with weights (35--62\,KB) and
+activations ($\leq$304\,KB) entirely in on-chip NPU RAM. Latency grows
+sub-linearly with capacity and receptive field --- doubling RF from 68 to 196
+frames costs $1.7\times$ the frame time --- so the quality knobs of
+Sec.~\ref{ssec:quant} are affordable on this silicon. The deployed model,
+\textbf{relu6-deep, streams at 4.83\,ms/frame (RTF 0.30) at PESQ 3.013}: the
+best-quality real-time streaming enhancer on this board, ahead of ConvFSENet
+(2.911 at 4.40\,ms) and the sparse NSNet2 variants (2.85 at 2.13\,ms), and at
+true one-hop latency. On-target outputs track the host int8 reference at
+cosine 0.998.
+
+\textbf{Windowing buys throughput, but only while it fits on-chip.} At a
+64-frame emit block the small variants amortize to 0.93--1.82\,ms per emitted
+frame (RTF as low as 0.058) --- $2.8\times$ cheaper than streaming for the
+same weights, because a $T{=}1$ graph cannot fill the accelerator's
+convolution pipeline. That advantage evaporates when the window overflows
+on-chip memory: the RF-196 windows need $>$5\,MB of activations, spill
+$\approx$2.5\,MB into external hyper-RAM, and become memory-bound and
+allocation-sensitive --- two topologies that differ only in their activation
+function land 5.72 and 3.09\,ms/frame apart purely on how the allocator
+splits that spill. The streaming graph, at 304\,KB, never leaves on-chip RAM
+and is the predictable deployment.
+
+\textbf{The best offline recipe does not ship.} The hybrid decoder-FP32 graph
+(PESQ 3.052) compiles and runs, but its float decoder pulls 19 epochs onto the
+Cortex-M55 and needs 3.5\,MB of weights plus 12.3\,MB of activations: it
+measures \textbf{34\,ms per frame, RTF 2.1} --- $11\times$ the all-int8
+windowed graph and past the real-time budget. Sec.~\ref{ssec:quant}'s
+activation clipping recovers most of the same quality (3.014) \emph{inside}
+the budget; that, not the hybrid, is the deployable answer.
+
+\textbf{The frame cost is launch-bound, not compute-bound.} Per-epoch
+profiling of the 24-channel streaming graph shows the NPU core busy for only
+0.72\,ms of 2.79\,ms (26\%); the floor is the distributed launch and
+state-plumbing overhead of its 131 epochs --- the same regime as the
+ConvFSENet baseline, and the reason the windowed graphs, with fewer and fatter
+epochs, amortize so much better. Re-measuring the 24-channel rows eleven days
+apart reproduced 2.789 vs.\ 2.791\,ms and 73.64 vs.\ 73.63\,ms, so the
+comparisons above are well inside run-to-run noise.
 
 % ===========================================================================
 \section{Conclusion}
@@ -354,10 +385,11 @@ bottleneck matches the recurrent original in FP32, the hardening that the
 hardware demands is precisely what makes int8 quantization nearly free, and
 the one place quantization still hurts --- the linear decoder --- can be
 diagnosed with a seeded selective-quantization scan and repaired by
-activation clipping, a hybrid float decoder, or distillation. The deployed
-model streams with 16\,ms algorithmic latency at real-time factor 0.17 on a
-microcontroller NPU while \emph{exceeding} the quality of the CPU-oriented
-original's deployable configuration by $+0.122$ PESQ. We believe the recipe
+activation clipping --- the one repair that stays inside the latency budget,
+where a float decoder does not. The deployed model streams frame-by-frame with
+16\,ms algorithmic latency at real-time factor 0.30 on a microcontroller NPU
+while \emph{exceeding} the quality of the CPU-oriented original's deployable
+configuration by $+0.083$ PESQ. We believe the recipe
 --- re-express recurrence as bounded-context convolution, harden primitives
 for the int8 vocabulary, and treat quantization robustness as an
 architecture-design criterion rather than an afterthought --- transfers
