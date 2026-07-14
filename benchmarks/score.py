@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from common.quality import QualitySuite, resolve_metrics
+from common.quality import QualitySuite, backend_versions, resolve_metrics
 
 
 def _load_dir(d: Path, ids: list[str]) -> list[np.ndarray]:
@@ -118,6 +118,7 @@ def main():
             "means": means,
             "failures": fails,
             "seconds": round(el, 1),
+            "versions": backend_versions(),
             "per_utt": {k: [None if np.isnan(x) else round(float(x), 6) for x in v]
                         for k, v in per_utt.items()},
             "utt_ids": ids,

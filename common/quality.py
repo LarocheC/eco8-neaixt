@@ -92,6 +92,26 @@ def columns_for(metrics) -> list[str]:
     return out
 
 
+def backend_versions() -> dict:
+    """Versions of everything that can move a score. Recorded alongside results.
+
+    A MOS number is only auditable against the code that produced it: torchmetrics
+    ships the DNSMOS/NISQA graphs and has changed their preprocessing between
+    releases, and ORT's kernels decide the last decimal. Without this block a
+    future re-run that disagrees is unattributable.
+    """
+    import importlib.metadata as md
+
+    out = {}
+    for pkg in ("torchmetrics", "scoreq", "onnxruntime", "torch", "torchaudio",
+                "librosa", "pesq", "numpy"):
+        try:
+            out[pkg] = md.version(pkg)
+        except md.PackageNotFoundError:
+            out[pkg] = None
+    return out
+
+
 def resolve_metrics(spec) -> tuple[str, ...]:
     """Parse a CLI --metrics value ('all', 'none', or 'dnsmos,nisqa') into a tuple."""
     if spec is None or spec.strip().lower() in ("", "none"):

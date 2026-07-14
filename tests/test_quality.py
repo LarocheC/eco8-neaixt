@@ -140,6 +140,31 @@ def test_gross_length_mismatch_raises():
 # real backends
 # ---------------------------------------------------------------------------
 
+def test_backend_versions_covers_everything_that_moves_a_score():
+    from common.quality import backend_versions
+
+    v = backend_versions()
+    # torchmetrics ships the DNSMOS/NISQA graphs and scoreq the SCOREQ graph;
+    # onnxruntime decides the last decimal. An audit trail without these is not one.
+    for pkg in ("torchmetrics", "scoreq", "onnxruntime", "torch"):
+        assert v.get(pkg), f"{pkg} version missing from the provenance block"
+
+
+def test_audit_bundle_refuses_to_misalign_conditions():
+    """The bundle stores utt_ids once and indexes every condition against them.
+
+    A condition scored over a different utterance set would silently line up with
+    the wrong utterances -- the one bug that would make the audit trail lie.
+    """
+    from benchmarks.report import audit_bundle
+
+    good = {"utt_ids": ["a", "b"], "n_utts": 2, "means": {}, "failures": {},
+            "per_utt": {"pesq": [1.0, 2.0]}}
+    bad = {**good, "utt_ids": ["a", "c"]}
+    with pytest.raises(ValueError, match="different utterance set"):
+        audit_bundle({("m1", "fp32"): good, ("m2", "fp32"): bad})
+
+
 @pytest.mark.slow
 def test_clean_outscores_noisy_on_every_metric():
     """The sanity gate: a metric that cannot rank clean above noisy is mis-wired.

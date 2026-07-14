@@ -56,12 +56,22 @@ The `benchmarks/` package scores the published models with all four:
 ```bash
 python -m benchmarks.enhance                     # published checkpoints -> enhanced audio
 python -m benchmarks.score                       # enhanced audio -> metric JSON (resumable)
-python -m benchmarks.report --md RESULTS_METRICS.md --json benchmarks/summary.json
+python -m benchmarks.report --md RESULTS_METRICS.md \
+    --json benchmarks/summary.json --audit benchmarks/per_utterance.json.gz
 ```
 
 Enhancement and scoring are decoupled through a float32 audio cache, so adding a
-metric later costs a re-score rather than a re-inference. The everyday eval CLIs
-also take an opt-in `--metrics`:
+metric later costs a re-score rather than a re-inference.
+
+Two result artefacts are committed so the numbers are auditable rather than
+merely asserted: `benchmarks/summary.json` (all 12 metric columns, means and
+failure counts per condition) and `benchmarks/per_utterance.json.gz` (every
+individual score — 44 conditions × 824 utterances × 12 metrics — which is what
+lets you recompute a mean, chase an outlier, or run a paired test between two
+conditions). Both carry a provenance block: dataset, git commit, and the versions
+of every package that can move a score.
+
+The everyday eval CLIs also take an opt-in `--metrics`:
 
 ```bash
 python -m nsnet2.inference_onnx --checkpoint_file cp_<run>/g_best.onnx --metrics all

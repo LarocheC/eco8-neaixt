@@ -8,7 +8,37 @@ Reproduce with:
 ```bash
 python -m benchmarks.enhance     # published checkpoints -> enhanced audio (~1 h, 5.5 GB)
 python -m benchmarks.score       # enhanced audio -> metric JSON (~2.5 h, resumable)
-python -m benchmarks.report --md RESULTS_METRICS.md --json benchmarks/summary.json
+python -m benchmarks.report --md RESULTS_METRICS.md \
+    --json benchmarks/summary.json --audit benchmarks/per_utterance.json.gz
+```
+
+## The numbers, for auditing
+
+Two committed artefacts back every figure below, so none of it has to be taken on
+trust:
+
+| file | what |
+| --- | --- |
+| `benchmarks/summary.json` | 40 KB. All 12 metric columns (not just the 7 headline ones), means + failure counts, for each of the 44 conditions. |
+| `benchmarks/per_utterance.json.gz` | 1.7 MB. **Every individual score**: 44 conditions × 824 utterances × 12 metrics. Utterance IDs stored once and every column aligned to them, so conditions are directly comparable per-utterance. |
+
+Both carry a `provenance` block — dataset, split, git commit, and the versions of
+everything that can move a score (`torchmetrics` 1.9.0 and `scoreq` 1.0.1 ship the
+model graphs; `onnxruntime` 1.25.1 decides the last decimal). A future re-run that
+disagrees is then attributable rather than mysterious.
+
+The per-utterance file is what makes the claims below checkable. Recomputing the
+means from it reproduces the tables to 5e-7 (the 6-decimal rounding), and it
+supports paired tests the means alone cannot — e.g. ConvFSENet's NISQA lead over
+LiSenNet `gru` is **+0.167 ± 0.028** (95 % CI, n=824, paired), so the ranking flip
+in finding 2 is not noise:
+
+```python
+import gzip, json, numpy as np
+d = json.loads(gzip.open("benchmarks/per_utterance.json.gz").read())
+a = np.array(d["conditions"]["convfsenet__convfsenet/fp32"]["per_utt"]["nisqa_mos"])
+b = np.array(d["conditions"]["lisennet__gru/fp32"]["per_utt"]["nisqa_mos"])
+print((a - b).mean(), 1.96 * (a - b).std(ddof=1) / np.sqrt(len(a)))
 ```
 
 ## Why
