@@ -424,6 +424,72 @@ python -m lisennet.export_onnx --checkpoint_file cp_lisennet_hybrid_nc24/g_best 
 python -m lisennet.eval_deploy --checkpoint_file cp_lisennet_hybrid_nc24/g_best --n_utts 824
 ```
 
+### What the TCM buys that the GRU cannot: bounded-time forgetting (2026-07-14)
+
+The GRU wins on latency, state and (unbounded) context. The FIFO keeps exactly one
+advantage, and it is not the obvious one.
+
+**It is not that the GRU can diverge — it provably cannot.** With
+`h' = (1-z)⊙n + z⊙h`, `z = σ(·) ∈ (0,1)`, `n = tanh(·) ∈ (-1,1)` and `h₀ = 0`, each `h'`
+is a convex combination of `h` and something in `(-1,1)`, so **`|h| ≤ 1` for all time by
+induction** — independent of weights, input or quantization. The state cannot blow up and
+neither can the mask. An "out-of-domain sample makes it explode" claim is false and would
+not survive review.
+
+**What the FIFO has is a *dead-beat* recovery guarantee.** Its memory *is* the last `RF`
+input frames, so two streams fed identical input from *any* two different states hold
+identical FIFOs after `RF` frames — and from there compute **bit-identical** outputs.
+Corruption is not damped, it is **evicted, in bounded time**, and the bound is a property
+of the architecture, not of the trained weights. The GRU's forgetting is asymptotic and
+data-dependent: an update gate driven toward 1 holds a stale state, and nothing bounds
+for how long.
+
+Measured (`python -m lisennet.state_recovery`, 6 VBD test utterances; the whole streaming
+state is overwritten at frame 0 and the output compared per-frame against the clean-state
+run; three corruptions — a state **carried over from another utterance** (in-distribution,
+the realistic worst case), a mid-stream **reset to zeros**, and **random noise** at the
+state's own scale):
+
+| model | bit-exact recovery | to <1% error | to <0.1% |
+| ----- | -----------------: | -----------: | -------: |
+| conv+FIFO nc24 (RF 68)        | **68 frames** (1.1 s), all 3 corruptions | 52–56 | 59–60 |
+| conv+FIFO relu6-deep (RF 196) | **196 frames** (3.1 s), all 3            | 104–119 | 144–159 |
+| GRU (faithful LiSenNet, trained) | **never** | 297–504 (4.8–8.1 s) | **never** (>8.8 s) |
+
+* **The conv models recover bit-exactly at exactly RF frames — 68 and 196, to the frame,
+  for every corruption type.** The error is *identically zero*, not merely small, because
+  past `RF` the two streams are the same computation. Theory and measurement agree with
+  nothing left over.
+* **The trained GRU never becomes exact** (it is IIR — it cannot), needs **4.8–8.1 s** to
+  fall below 1%, and is **still above 0.1% after 8.8 s**. A wrong state is audible for
+  seconds.
+* Note the FIFO models cross the 1% line *before* their RF (52 and 104 frames): they decay
+  first and then snap to zero. The guarantee is the RF bound; the typical case is faster.
+
+So the honest trade for the paper is **efficiency vs. certifiability**, not efficiency vs.
+safety:
+
+| | conv + FIFO (TCM) | GRU |
+| --- | --- | --- |
+| latency / state | 2.79 ms, 147 KiB | **1.82 ms, 40 KiB** |
+| context | bounded (RF) | **unbounded** |
+| state bounded? | yes (it is an activation copy) | yes (`\|h\| ≤ 1`, provable) |
+| **recovery from a bad state** | **exact, ≤ RF frames, guaranteed a priori** | asymptotic, seconds, weight-dependent |
+
+If the deployment can tolerate seconds of degraded output after a glitch — a dropped
+frame, a re-sync, a scene change, an int8 state that saturates — the GRU is strictly
+better on every other axis. If it must *certify* recovery (a safety-adjacent product, a
+watchdog that resets state, anything where a stuck enhancer is unacceptable), the FIFO's
+`RF`-frame bound is a property the GRU cannot offer at any width. **That is the case for
+the TCM, and it is the only one.**
+
+Caveat: the GRU row is the *faithful* LiSenNet (`cp_lisennet`, trained, hidden 24) —
+a trained time-GRU in this architecture, but not the hybrid. The hybrid's own recovery
+curve needs the trained hybrid checkpoint; the mechanism (IIR, no dead-beat) is
+architectural and will not change, but the time constants will.
+
+Figure: `paper/figures/recovery.tex` (data `paper/data/state_recovery.{json,dat}`).
+
 ### FIFO state vs. stateless recompute — measured at equal latency (2026-07-14)
 
 The windowed export's `emit_T` sets the algorithmic latency: **`emit_T=1` (window

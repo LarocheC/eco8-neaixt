@@ -1,0 +1,81 @@
+% Fig. 3 — state-recovery: how long a streaming model remembers a *wrong* state.
+% Identical input, corrupted state at frame 0; y = max|Δ est_mag| vs the clean-state run.
+% Built by paper/Makefile (figures/%.tex -> %.pdf). Data: paper/data/state_recovery.dat,
+% produced by `python -m lisennet.state_recovery` (6 VBD test utts, 3 corruption types).
+%
+% NOTE ON THE LOG AXIS: the conv models' error is *identically zero* past their receptive
+% field — a log axis cannot draw 0, so it is clamped to the axis floor (1e-8). The drop to
+% the floor IS the exact-recovery event, not an artifact. Stated in the caption.
+\documentclass[tikz,border=2pt]{standalone}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepgfplotslibrary{fillbetween}
+\usepackage{amsmath}
+
+% Categorical slots 6/1/2 of the validated palette (CVD-checked: worst adjacent
+% ΔE 21.6 tritan / 73.6 deutan). Each series also carries a distinct dash pattern,
+% so identity survives grayscale printing and colour-blind readers.
+\definecolor{cGRU} {HTML}{E34948}   % red    — GRU (recurrent)
+\definecolor{cNC24}{HTML}{2A78D6}   % blue   — conv+FIFO, RF 68
+\definecolor{cDEEP}{HTML}{1BAF7A}   % aqua   — conv+FIFO, RF 196
+
+\begin{document}
+\begin{tikzpicture}
+\begin{axis}[
+  width=8.4cm, height=5.6cm,
+  ymode=log,
+  xmin=0, xmax=548,
+  ymin=1e-8, ymax=3,
+  xlabel={frames since state corruption \quad (16\,ms hop)},
+  ylabel={output error \ $\max|\Delta\,\text{est\_mag}|$},
+  xlabel near ticks, ylabel near ticks,
+  label style={font=\small}, tick label style={font=\footnotesize},
+  ytick={1e-8,1e-6,1e-4,1e-2,1},
+  yticklabels={$0$ (exact),$10^{-6}$,$10^{-4}$,$10^{-2}$,$1$},
+  xtick={0,68,196,300,400,548},
+  grid=major,
+  grid style={line width=0.3pt, draw=black!12},
+  axis line style={draw=black!45},
+  legend style={font=\footnotesize, at={(0.98,0.98)}, anchor=north east,
+                draw=black!25, fill=white, fill opacity=0.9, text opacity=1,
+                row sep=1pt, inner sep=3pt},
+  legend cell align=left,
+]
+
+% --- min/max bands across the three corruption types (foreign / zeros / noise) ---
+\addplot[draw=none, forget plot, name path=gl] table[x=n,y=grulo]  {../data/state_recovery.dat};
+\addplot[draw=none, forget plot, name path=gh] table[x=n,y=gruhi]  {../data/state_recovery.dat};
+\addplot[cGRU, opacity=0.12, forget plot] fill between[of=gl and gh];
+
+\addplot[draw=none, forget plot, name path=dl] table[x=n,y=deeplo] {../data/state_recovery.dat};
+\addplot[draw=none, forget plot, name path=dh] table[x=n,y=deephi] {../data/state_recovery.dat};
+\addplot[cDEEP, opacity=0.12, forget plot] fill between[of=dl and dh];
+
+\addplot[draw=none, forget plot, name path=nl] table[x=n,y=nc24lo] {../data/state_recovery.dat};
+\addplot[draw=none, forget plot, name path=nh] table[x=n,y=nc24hi] {../data/state_recovery.dat};
+\addplot[cNC24, opacity=0.12, forget plot] fill between[of=nl and nh];
+
+% --- the receptive-field bounds: where the FIFO models are *guaranteed* to have recovered
+\draw[cNC24, dashed, line width=0.6pt] (axis cs:68,1e-8)  -- (axis cs:68,3);
+\draw[cDEEP, dashed, line width=0.6pt] (axis cs:196,1e-8) -- (axis cs:196,3);
+
+% --- the three models (the 'foreign' corruption: a state from another utterance) ---
+\addplot[cGRU,  line width=1.6pt] table[x=n, y=gru]  {../data/state_recovery.dat};
+\addlegendentry{GRU (recurrent), RF $=\infty$}
+\addplot[cNC24, line width=1.6pt, dash pattern=on 5pt off 2pt]
+  table[x=n, y=nc24] {../data/state_recovery.dat};
+\addlegendentry{conv+FIFO, RF $=68$}
+\addplot[cDEEP, line width=1.6pt, dash pattern=on 1.6pt off 1.6pt]
+  table[x=n, y=deep] {../data/state_recovery.dat};
+\addlegendentry{conv+FIFO, RF $=196$}
+
+% --- direct labels (the palette's aqua is below 3:1 on white -> labels are mandatory,
+%     and they carry identity without relying on colour) ---
+\node[cNC24, font=\scriptsize\bfseries, anchor=west] at (axis cs:74,5.0e-4)  {exact at 68};
+\node[cDEEP, font=\scriptsize\bfseries, anchor=west] at (axis cs:202,2.0e-5) {exact at 196};
+\node[cGRU,  font=\scriptsize\bfseries, anchor=south east] at (axis cs:545,6.0e-5)
+  {still $>10^{-3}$ after 8.8\,s};
+
+\end{axis}
+\end{tikzpicture}
+\end{document}

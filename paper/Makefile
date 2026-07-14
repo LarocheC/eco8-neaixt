@@ -1,5 +1,5 @@
 # Build the ICASSP paper. `make` -> main.pdf
-main.pdf: main.tex refs.bib spconf.sty IEEEbib.bst figures/architecture.pdf
+main.pdf: main.tex refs.bib spconf.sty IEEEbib.bst figures/architecture.pdf figures/recovery.pdf
 	pdflatex -interaction=nonstopmode main
 	bibtex main
 	pdflatex -interaction=nonstopmode main
