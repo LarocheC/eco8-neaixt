@@ -17,9 +17,10 @@ import torch
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 
 from lisennet.model import LiSenNet, build_lisennet
-from lisennet.train import gan_step, generator_loss, discriminator_loss, _loss_weights
+from lisennet.train import _LOGGED_TERMS, forward_spectra, gan_step
 from common.discriminator import MetricDiscriminator
 from common.env import AttrDict
+from common.losses import generator_loss, generator_terms, loss_weights
 
 
 class _SyntheticAudioDataset(TorchDataset):
@@ -46,8 +47,15 @@ def cfg():
         "num_channels": 16, "n_blocks": 2, "n_fft": 512, "hop_size": 256,
         "compress_factor": 0.3, "gradient_clip": 5.0, "learning_rate": 5e-4,
         "adam_b1": 0.8, "adam_b2": 0.99, "seed": 0,
-        "loss": {"complex": 0.1, "mag": 0.9, "adv": 0.05},
+        "loss": {"magnitude": 0.9, "complex": 0.1, "consistency": 0.1,
+                 "time": 0.2, "metric": 0.05},
     })
+
+
+def _weights(cfg):
+    w = loss_weights(cfg)
+    w.pop("phase", None)                # no phase decoder
+    return w
 
 
 def test_model_params_and_forward():
@@ -68,12 +76,53 @@ def test_losses_finite(cfg):
     model = LiSenNet(num_channels=16, n_blocks=2).eval()
     disc = MetricDiscriminator(dim=16).eval()
     x = torch.randn(2, 32000)
-    results = model(x, x)
-    g_loss, parts = generator_loss(results, disc, _loss_weights(cfg))
-    d_loss = discriminator_loss(results, disc, torch.device("cpu"))
-    assert torch.isfinite(g_loss) and torch.isfinite(d_loss)
-    for k in ("complex", "mag", "adv"):
-        assert np.isfinite(parts[k])
+
+    s = forward_spectra(model, x, x)
+    metric_g = disc(s["mag_r"], s["mag_g_hat"])
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+        metric_g=metric_g,
+    )
+    g_loss = generator_loss(terms, _weights(cfg))
+    assert torch.isfinite(g_loss)
+    for k in _LOGGED_TERMS:
+        assert np.isfinite(float(terms[k])), k
+    # Griffin-Lim phase is derived from a *detached* magnitude, so no phase term.
+    assert "phase" not in terms
+
+
+def test_consistency_term_is_live(cfg):
+    """LiSenNet's spectrum is (est_mag, Griffin-Lim phase) — not the STFT of any
+    real waveform — so the round trip must actually move it. If this is zero the
+    consistency term is doing nothing and the port is wrong."""
+    torch.manual_seed(0)
+    model = LiSenNet(num_channels=16, n_blocks=2).eval()
+    s = forward_spectra(model, torch.randn(2, 32000), torch.randn(2, 32000))
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+    )
+    assert float(terms["consistency"]) > 1e-6, "consistency term is inert"
+
+
+def test_time_and_consistency_reach_the_weights(cfg):
+    """Both terms must produce gradient at the mask sub-network — they are what
+    LiSenNet gained from MP-SENet, and a detach in the wrong place would silence
+    them without failing anything else."""
+    torch.manual_seed(0)
+    model = LiSenNet(num_channels=16, n_blocks=2)
+    s = forward_spectra(model, torch.randn(2, 32000), torch.randn(2, 32000))
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+    )
+    for name in ("time", "consistency"):
+        model.zero_grad(set_to_none=True)
+        terms[name].backward(retain_graph=True)
+        total = sum(p.grad.abs().sum().item()
+                    for p in model.parameters() if p.grad is not None)
+        assert total > 0, f"{name} term produces no gradient"
 
 
 def test_gan_step_trends_down(cfg):
@@ -86,7 +135,7 @@ def test_gan_step_trends_down(cfg):
 
     losses = []
     for clean, noisy in loader:
-        m = gan_step(model, disc, optim_g, optim_d, noisy, clean, cfg, _loss_weights(cfg), 5.0)
+        m = gan_step(model, disc, optim_g, optim_d, noisy, clean, cfg, _weights(cfg), 5.0)
         assert np.isfinite(m["loss"]) and np.isfinite(m["d_loss"])
         losses.append(m["loss"])
     assert np.mean(losses[-2:]) <= np.mean(losses[:2]) * 1.5, f"loss not trending down: {losses}"

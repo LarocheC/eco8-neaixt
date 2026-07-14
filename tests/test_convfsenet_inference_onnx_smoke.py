@@ -43,7 +43,7 @@ def _fresh_offline() -> ConvFSENet_QuantFriendly:
         n_channels_res=128, n_channels_conv=256, kernel_size=3,
         n_blocks=3, n_stacks=3,
         extractor_type="mag", compress_factor=None, causal=True,
-        loss=None, preproc=None, postproc=None,
+        preproc=None, postproc=None,
     )
 
 

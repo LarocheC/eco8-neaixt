@@ -30,9 +30,11 @@
         16
     ],
     "loss": {
+        "magnitude": 0.9,
         "complex": 0.1,
-        "mag": 0.9,
-        "adv": 0.05
+        "consistency": 0.1,
+        "time": 0.2,
+        "metric": 0.05
     },
     "num_workers": 4,
     "dist_config": {

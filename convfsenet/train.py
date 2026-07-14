@@ -6,15 +6,25 @@ existing run_sweep.sh / utils.scan_checkpoint plumbing works untouched —
 this script can be slotted into the same sweep pattern.
 
 Training is end-to-end time-domain: audio -> Spectrogram -> ConvFSENet
-mask + complex multiply -> InverseSpectrogram -> audio_pred. The base loss
-is the model's PreProcLoss(DynCompMSE) computed on the time-domain pair.
+mask + complex multiply -> InverseSpectrogram -> audio_pred.
 
-Optional metric-GAN (config block `gan.enabled`): a MetricDiscriminator
-(common/discriminator.py) is trained to predict normalized PESQ, and a
-metric loss MSE(disc(clean, pred), 1) is added to the generator objective
-with weight `gan.metric_loss_lambda`. This mirrors the MP-SENet / NSNet2
-recipe. The discriminator is TRAINING-ONLY — it never touches the
-streaming / ONNX / int8 inference path.
+Loss: the MP-SENet objective (common/losses.py), shared with every other model
+in this repo — magnitude + complex + STFT-consistency + time + MetricGAN. It
+replaces the model's own PreProcLoss(DynCompMSE), which used a different
+formulation (active-speech-level normalisation, an alpha=0.3 mag/complex split,
+and no time or consistency term).
+
+The magnitude and complex terms are taken from the network's *pre-iSTFT* complex
+spectrum (`mask * noisy_stft`), not from a re-STFT of the output waveform — that
+is what makes the consistency term meaningful rather than identically zero.
+
+The anti-wrapping phase loss is omitted: ConvFSENet is mask-only and reuses the
+noisy phase, so it has no phase to train. See common/losses.py.
+
+The MetricDiscriminator (common/discriminator.py) is trained to predict
+normalized PESQ, and the generator's metric term pulls disc(clean, pred) toward
+1. It is TRAINING-ONLY — it never touches the streaming / ONNX / int8 inference
+path. Set `gan.enabled` false to drop the metric term.
 
 Validation:
   - Offline causal forward (ConvFSENet.forward, with chomp) on the VBD test
@@ -44,14 +54,59 @@ from common.dataset import (
 )
 from common.env import AttrDict, build_env
 from common.discriminator import MetricDiscriminator, batch_pesq
+from common.losses import (
+    discriminator_loss, generator_loss, generator_terms, loss_weights,
+    mag_pha_from_complex,
+)
 from common.metrics import pesq_score
 from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
+# No `phase`: ConvFSENet is mask-only and reuses the noisy phase.
+_LOGGED_TERMS = ("magnitude", "complex", "consistency", "time", "metric")
+
 
 def _to_dev(t, device):
     return t.to(device, non_blocking=True)
+
+
+def forward_spectra(model, noisy_audio, clean_audio, h):
+    """Forward ConvFSENet and produce every tensor the MP-SENet loss needs.
+
+    The model is time-domain end-to-end, but the loss needs its *spectral* output
+    before the iSTFT — otherwise `com_g` would be the STFT of `audio_g` and the
+    consistency term would be identically zero by construction. So we drive the
+    three stages by hand rather than going through `model.train_step`.
+    """
+    cf = float(h.get("compress_factor", 0.3) or 0.3)
+    n_fft, hop, win = h.n_fft, h.hop_size, h.win_size
+
+    stft_noisy = model.preproc(noisy_audio)                  # (B, 1, F, T) complex
+    stft_pred = model(stft_noisy)                            # (B, 1, F, T) complex
+    audio_g = model.postproc(stft_pred)                      # (B, 1, samples)
+
+    audio_g, clean = model._crop_signals_if_needed(audio_g, clean_audio)
+    audio_g, clean = audio_g.squeeze(1), clean.squeeze(1)
+
+    # The network's direct spectral output.
+    mag_g, _, com_g = mag_pha_from_complex(stft_pred.squeeze(1), cf)
+    # The clean target, and the iSTFT -> STFT round trip of our own waveform.
+    mag_r, _, com_r = mag_pha_stft(clean, n_fft, hop, win, cf)
+    mag_g_hat, _, com_g_hat = mag_pha_stft(audio_g, n_fft, hop, win, cf)
+
+    # A frame or two can differ when the segment length isn't a whole number of
+    # hops; the terms are elementwise, so trim rather than let broadcasting lie.
+    t = min(com_g.shape[-2], com_g_hat.shape[-2], com_r.shape[-2])
+    mag_g, com_g = mag_g[..., :t], com_g[..., :t, :]
+    mag_r, com_r = mag_r[..., :t], com_r[..., :t, :]
+    mag_g_hat, com_g_hat = mag_g_hat[..., :t], com_g_hat[..., :t, :]
+
+    return dict(
+        mag_r=mag_r, com_r=com_r, mag_g=mag_g, com_g=com_g,
+        mag_g_hat=mag_g_hat, com_g_hat=com_g_hat,
+        audio_g=audio_g, audio_r=clean,
+    )
 
 
 def train(a, h):
@@ -111,14 +166,20 @@ def train(a, h):
     else:
         raise ValueError(f"unknown scheduler {sched_kind!r}; use 'exponential' or 'cosine'")
 
-    # ----- optional metric-GAN discriminator --------------------------------
+    # ----- loss + optional metric-GAN discriminator --------------------------
+    weights = loss_weights(h)
+    weights.pop("phase", None)              # mask-only model — no phase to train
+
     gan_cfg = h.get("gan", {}) or {}
     use_gan = bool(gan_cfg.get("enabled", False))
-    metric_lambda = float(gan_cfg.get("metric_loss_lambda", 0.05))
-    # Discriminator sees compressed magnitudes (power 0.3) — matches the
-    # MP-SENet / NSNet2 recipe; squashes dynamic range for a stabler
-    # discriminator regardless of the generator's own compress_factor.
-    disc_compress = float(gan_cfg.get("disc_compress_factor", 0.3))
+    if use_gan:
+        # `gan.metric_loss_lambda` stays the knob for the metric term's weight;
+        # it is just MP-SENet's 0.05 under another name.
+        weights["metric"] = float(gan_cfg.get("metric_loss_lambda", weights["metric"]))
+    else:
+        weights.pop("metric", None)
+    # The discriminator now sees the same compressed magnitude the loss uses
+    # (h.compress_factor), so the old `gan.disc_compress_factor` override is gone.
     discriminator = optim_d = scheduler_d = None
     if use_gan:
         discriminator = MetricDiscriminator().to(device)
@@ -138,8 +199,7 @@ def train(a, h):
             scheduler_d = torch.optim.lr_scheduler.ExponentialLR(
                 optim_d, gamma=h.lr_decay, last_epoch=last_epoch
             )
-        print(f"metric-GAN enabled: lambda={metric_lambda}, "
-              f"disc_compress_factor={disc_compress}")
+        print(f"metric-GAN enabled: lambda={weights['metric']}")
 
     # Resume the LR schedule exactly. Reconstructing with last_epoch advances
     # the schedule one step past the saved position (and clobbers the lr that
@@ -197,32 +257,40 @@ def train(a, h):
             if use_gan:
                 metrics = _gan_step(
                     model, discriminator, optim, optim_d,
-                    noisy_audio, clean_audio, h, metric_lambda,
-                    disc_compress, device,
+                    noisy_audio, clean_audio, h, weights, device,
                 )
             else:
                 optim.zero_grad()
-                loss_dict = model.train_step(noisy_audio, clean_audio)
-                loss = loss_dict["loss"]
+                s = forward_spectra(model, noisy_audio, clean_audio, h)
+                terms = generator_terms(
+                    mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"],
+                    com_r=s["com_r"], com_g_hat=s["com_g_hat"],
+                    audio_g=s["audio_g"], audio_r=s["audio_r"],
+                )
+                loss = generator_loss(terms, weights)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optim.step()
-                metrics = {"loss": float(loss.item())}
+                metrics = {"loss": float(loss.item()), **{
+                    k: float(terms[k].item()) for k in _LOGGED_TERMS if k in terms
+                }}
 
             if steps % a.stdout_interval == 0:
                 extra = ""
                 if use_gan:
-                    extra = (f", Metric: {metrics['loss_metric']:.4f}"
+                    extra = (f", Metric: {metrics['metric']:.4f}"
                              f", Disc: {metrics['loss_disc']:.4f}")
                 print(
                     f"Steps : {steps:d}, Loss: {metrics['loss']:.4f}{extra}, "
+                    f"Mag: {metrics['magnitude']:.4f}, "
                     f"s/b : {time.time() - start_b:.3f}"
                 )
             if steps % a.summary_interval == 0:
                 sw.add_scalar("Training/Loss", metrics["loss"], steps)
+                for k in _LOGGED_TERMS:
+                    if k in metrics:
+                        sw.add_scalar(f"Training/{k}", metrics[k], steps)
                 if use_gan:
-                    sw.add_scalar("Training/Base Loss", metrics["base_loss"], steps)
-                    sw.add_scalar("Training/Metric Loss", metrics["loss_metric"], steps)
                     sw.add_scalar("Training/Discriminator Loss", metrics["loss_disc"], steps)
 
             # rolling checkpoint
@@ -264,71 +332,62 @@ def train(a, h):
 
 
 def _gan_step(model, discriminator, optim, optim_d,
-              noisy_audio, clean_audio, h,
-              metric_lambda, disc_compress, device):
-    """One metric-GAN training step.
+              noisy_audio, clean_audio, h, weights, device):
+    """One MetricGAN training step against the MP-SENet objective.
 
-    Generator forward is end-to-end (audio -> audio_pred). The discriminator
-    is trained to predict normalized PESQ: score 1 for clean-vs-clean, score
-    batch_pesq() for pred-vs-clean. The generator gets a metric loss pulling
-    disc(clean, pred) toward 1 (i.e. "sound like perfect PESQ").
+    The discriminator is trained to predict normalized PESQ: 1 for clean-vs-clean,
+    batch_pesq() for pred-vs-clean. The generator's metric term pulls
+    disc(clean_mag, mag_g_hat) toward 1 (i.e. "sound like perfect PESQ").
+
+    Both the discriminator and the metric term are shown the *round-tripped*
+    magnitude, per upstream.
 
     Returns a dict of scalar metrics for logging.
     """
-    # ----- generator forward (shared by both phases) ------------------------
-    x_pred, loss_dict = model.process_data(noisy_audio, clean_audio, crop_signals=True)
-    base_loss = loss_dict["loss"]
-    min_len = x_pred.shape[-1]
-    clean_c = clean_audio[..., :min_len]                          # crop to match x_pred
-
-    # Compressed magnitudes for the discriminator — (B, F, T).
-    clean_mag, _, _ = mag_pha_stft(
-        clean_c.squeeze(1), h.n_fft, h.hop_size, h.win_size, disc_compress)
-    pred_mag, _, _ = mag_pha_stft(
-        x_pred.squeeze(1), h.n_fft, h.hop_size, h.win_size, disc_compress)
-    one_labels = torch.ones(x_pred.shape[0], device=device)
+    s = forward_spectra(model, noisy_audio, clean_audio, h)
 
     # ----- discriminator step ----------------------------------------------
-    # Ground-truth normalized PESQ targets for the pred-vs-clean branch.
     pesq_target = batch_pesq(
-        list(clean_c.squeeze(1).detach().cpu().numpy()),
-        list(x_pred.squeeze(1).detach().cpu().numpy()),
+        list(s["audio_r"].detach().cpu().numpy()),
+        list(s["audio_g"].detach().cpu().numpy()),
     )
     optim_d.zero_grad()
-    metric_r = discriminator(clean_mag, clean_mag)
-    metric_g = discriminator(clean_mag, pred_mag.detach())
-    loss_disc_r = F.mse_loss(one_labels, metric_r.flatten())
-    if pesq_target is not None:
-        loss_disc_g = F.mse_loss(pesq_target.to(device), metric_g.flatten())
-    else:
-        # batch_pesq returns None when any utterance's PESQ failed (silent
-        # segment etc.) — skip the fake branch for this batch.
-        loss_disc_g = torch.zeros((), device=device)
-    loss_disc = loss_disc_r + loss_disc_g
+    loss_disc = discriminator_loss(discriminator, s["mag_r"], s["mag_g_hat"],
+                                   pesq_target, device)
     loss_disc.backward()
     optim_d.step()
 
     # ----- generator step ---------------------------------------------------
     optim.zero_grad()
-    metric_g = discriminator(clean_mag, pred_mag)                  # pred_mag keeps grad
-    loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
-    loss_gen = base_loss + metric_lambda * loss_metric
+    metric_g = discriminator(s["mag_r"], s["mag_g_hat"])       # keeps generator grad
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+        metric_g=metric_g,
+    )
+    loss_gen = generator_loss(terms, weights)
     loss_gen.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
     optim.step()
 
-    return {
-        "loss": float(loss_gen.item()),
-        "base_loss": float(base_loss.item()),
-        "loss_metric": float(loss_metric.item()),
-        "loss_disc": float(loss_disc.item()),
-    }
+    metrics = {"loss": float(loss_gen.item()), "loss_disc": float(loss_disc.item())}
+    metrics.update({k: float(terms[k].item()) for k in _LOGGED_TERMS if k in terms})
+    return metrics
 
 
 @torch.no_grad()
 def _validate(model, validation_loader, device, h) -> float:
-    """Run model.valid_step on the validation split and return mean PESQ."""
+    """Enhance the validation split; report the MP-SENet loss and return mean PESQ.
+
+    The reported loss is the GAN-free objective (no discriminator at validation),
+    so it is comparable across runs but not to the training loss, which includes
+    the metric term.
+    """
     model.eval()
+    weights = loss_weights(h)
+    for k in ("phase", "metric"):
+        weights.pop(k, None)
+
     audios_r, audios_g = [], []
     val_loss_sum = 0.0
     n = 0
@@ -336,10 +395,15 @@ def _validate(model, validation_loader, device, h) -> float:
         clean_audio, noisy_audio = batch
         clean_audio = _to_dev(clean_audio, device).unsqueeze(1)
         noisy_audio = _to_dev(noisy_audio, device).unsqueeze(1)
-        x_pred, x_clean_p, x_noisy_p, loss_dict = model.valid_step(noisy_audio, clean_audio)
-        audios_r.append(x_clean_p)
-        audios_g.append(x_pred)
-        val_loss_sum += float(loss_dict["loss"].item())
+        noisy_p, clean_p = model._pad_signals_if_needed(noisy_audio, clean_audio)
+        s = forward_spectra(model, noisy_p, clean_p, h)
+        terms = generator_terms(
+            mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+            com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+        )
+        audios_r.append(s["audio_r"].unsqueeze(1))
+        audios_g.append(s["audio_g"].unsqueeze(1))
+        val_loss_sum += float(generator_loss(terms, weights).item())
         n += 1
     val_loss = val_loss_sum / max(n, 1)
     val_pesq = pesq_score(audios_r, audios_g, h).item()

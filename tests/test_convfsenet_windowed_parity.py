@@ -41,7 +41,7 @@ def _fresh_offline(causal=True, extractor_type="mag", res=128, conv=256):
         n_blocks=3, n_stacks=3,
         extractor_type=extractor_type,
         compress_factor=0.3 if extractor_type == "mag_compressed" else None,
-        causal=causal, loss=None, preproc=None, postproc=None,
+        causal=causal, preproc=None, postproc=None,
     )
 
 

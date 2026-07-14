@@ -256,7 +256,7 @@ def _load_offline_from_checkpoint(checkpoint_file: Path) -> tuple[ConvFSENet_Qua
         kernel_size=h.kernel_size, n_blocks=h.n_blocks, n_stacks=h.n_stacks,
         extractor_type=h.extractor_type, compress_factor=h.compress_factor,
         causal=h.causal,
-        loss=None, preproc=None, postproc=None,
+        preproc=None, postproc=None,
     )
     ckpt = torch.load(str(checkpoint_file), weights_only=True, map_location="cpu")
     model.load_state_dict(ckpt["generator"], strict=True)

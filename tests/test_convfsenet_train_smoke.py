@@ -21,8 +21,22 @@ import torch
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 
 from convfsenet.model import build_causal_model
+from convfsenet.train import _LOGGED_TERMS, forward_spectra
 from common.env import AttrDict
+from common.losses import generator_loss, generator_terms, loss_weights
 from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
+
+
+def _enhance(model, x):
+    """The model's end-to-end forward, without any loss plumbing."""
+    return model.postproc(model(model.preproc(x)))
+
+
+def _weights(cfg):
+    w = loss_weights(cfg)
+    for k in ("phase", "metric"):        # mask-only model; no discriminator here
+        w.pop(k, None)
+    return w
 
 
 # ---- synthetic dataset ------------------------------------------------------
@@ -30,8 +44,7 @@ from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
 
 class _SyntheticAudioDataset(TorchDataset):
     """Yields (clean, noisy) pairs of shape (samples,) — matches dataset.Dataset
-    output. Both signals are smooth-ish (sinusoids + low-amp noise) so the
-    DynCompMSE active-speech threshold (0.025) isn't degenerate."""
+    output. Both signals are smooth-ish (sinusoids + low-amp noise)."""
 
     def __init__(self, n=8, samples=8000, sr=16000, seed=0):
         rng = np.random.default_rng(seed)
@@ -103,12 +116,18 @@ def test_train_step_runs_and_loss_decreases(cfg, tmp_path):
         clean = clean.unsqueeze(1)        # (B, 1, samples)
         noisy = noisy.unsqueeze(1)
         optim.zero_grad()
-        loss_dict = model.train_step(noisy, clean)
-        loss = loss_dict["loss"]
+        s = forward_spectra(model, noisy, clean, cfg)
+        terms = generator_terms(
+            mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+            com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+        )
+        loss = generator_loss(terms, _weights(cfg))
         loss.backward()
         optim.step()
         l = float(loss.item())
         assert np.isfinite(l), f"step {i}: non-finite loss {l}"
+        for k in ("magnitude", "complex", "consistency", "time"):
+            assert np.isfinite(float(terms[k])), f"step {i}: {k} not finite"
         losses.append(l)
 
     # 4 steps from 8 samples / batch=2. Use first 2 vs last 2.
@@ -120,8 +139,8 @@ def test_train_step_runs_and_loss_decreases(cfg, tmp_path):
     )
 
 
-def test_valid_step_runs(cfg):
-    """valid_step (no crop, autograd off) on a single full utterance."""
+def test_forward_on_full_utterance(cfg):
+    """End-to-end forward (autograd off) on a single full utterance."""
     torch.manual_seed(0)
     model = build_causal_model(cfg).eval()
     ds = _SyntheticAudioDataset(n=2, samples=16000)
@@ -129,9 +148,26 @@ def test_valid_step_runs(cfg):
     clean = clean.unsqueeze(0).unsqueeze(0)    # (1, 1, samples)
     noisy = noisy.unsqueeze(0).unsqueeze(0)
     with torch.no_grad():
-        x_pred, x_clean_p, x_noisy_p, loss_dict = model.valid_step(noisy, clean)
-    assert x_pred.shape == x_clean_p.shape
-    assert np.isfinite(float(loss_dict["loss"].item()))
+        noisy_p, clean_p = model._pad_signals_if_needed(noisy, clean)
+        s = forward_spectra(model, noisy_p, clean_p, cfg)
+    assert s["audio_g"].shape == s["audio_r"].shape
+    assert torch.isfinite(s["audio_g"]).all()
+
+
+def test_consistency_term_is_live(cfg):
+    """The consistency term must be computed from the network's *pre-iSTFT*
+    spectrum. If `com_g` were taken from a re-STFT of the output waveform it
+    would be identically zero and the term would silently do nothing."""
+    torch.manual_seed(0)
+    model = build_causal_model(cfg).eval()
+    x = torch.randn(2, 1, 8000)
+    with torch.no_grad():
+        s = forward_spectra(model, x, x, cfg)
+        terms = generator_terms(
+            mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+            com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+        )
+    assert float(terms["consistency"]) > 1e-9, "consistency term is inert"
 
 
 def test_checkpoint_roundtrip(cfg, tmp_path):
@@ -141,7 +177,7 @@ def test_checkpoint_roundtrip(cfg, tmp_path):
     # Capture a deterministic forward output to compare.
     x = torch.randn(1, 1, 8000)
     with torch.no_grad():
-        out_before = model.valid_step(x, x)[0]
+        out_before = _enhance(model, x)
 
     cp = tmp_path / "g_00000100"
     save_checkpoint(str(cp), {"generator": model.state_dict(), "steps": 100, "epoch": 0})
@@ -156,7 +192,7 @@ def test_checkpoint_roundtrip(cfg, tmp_path):
     model.load_state_dict(state["generator"])
     model.eval()
     with torch.no_grad():
-        out_after = model.valid_step(x, x)[0]
+        out_after = _enhance(model, x)
 
     assert torch.allclose(out_before, out_after), (
         "checkpoint reload did not restore the original output"

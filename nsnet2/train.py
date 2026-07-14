@@ -16,6 +16,9 @@ from common.dataset import Dataset, mag_pha_stft, mag_pha_istft, load_voicebank_
 from nsnet2.model import NSNet2
 from common.metrics import pesq_score
 from common.discriminator import MetricDiscriminator, batch_pesq
+from common.losses import (
+    discriminator_loss, generator_loss, generator_terms, loss_weights,
+)
 from nsnet2.layers import butterfly_ortho_penalty
 from common.utils import scan_checkpoint, load_checkpoint, save_checkpoint
 
@@ -122,6 +125,10 @@ def train(rank, a, h):
     generator.train()
     discriminator.train()
 
+    # MP-SENet's generator weights; a config's `loss` block can override any of
+    # them. `phase` is unused here — NSNet2 has no phase decoder.
+    weights = loss_weights(h)
+
     # Restore best_pesq on resume so a resumed run can't overwrite g_best with
     # an inferior model (the checkpoint persists it; default 0 for fresh runs).
     best_pesq = state_dict_do.get('best_pesq', 0) if state_dict_do is not None else 0
@@ -142,7 +149,6 @@ def train(rank, a, h):
             clean_audio, noisy_audio = batch
             clean_audio = clean_audio.to(device, non_blocking=True)
             noisy_audio = noisy_audio.to(device, non_blocking=True)
-            one_labels = torch.ones(h.batch_size).to(device, non_blocking=True)
 
             clean_mag, clean_pha, clean_com = mag_pha_stft(clean_audio, h.n_fft, h.hop_size, h.win_size, h.compress_factor)
             noisy_mag, noisy_pha, noisy_com = mag_pha_stft(noisy_audio, h.n_fft, h.hop_size, h.win_size, h.compress_factor)
@@ -156,42 +162,25 @@ def train(rank, a, h):
             audio_list_g = list(audio_g.detach().cpu().numpy())
             batch_pesq_score = batch_pesq(audio_list_r, audio_list_g)
 
-            # Discriminator
+            # Discriminator (MetricGAN: predict normalised PESQ; clean-vs-clean = 1)
             optim_d.zero_grad()
-            metric_r = discriminator(clean_mag, clean_mag)
-            metric_g = discriminator(clean_mag, mag_g_hat.detach())
-            loss_disc_r = F.mse_loss(one_labels, metric_r.flatten())
-
-            if batch_pesq_score is not None:
-                loss_disc_g = F.mse_loss(batch_pesq_score.to(device), metric_g.flatten())
-            else:
+            if batch_pesq_score is None:
                 print('pesq is None!')
-                loss_disc_g = 0
-
-            loss_disc_all = loss_disc_r + loss_disc_g
+            loss_disc_all = discriminator_loss(
+                discriminator, clean_mag, mag_g_hat, batch_pesq_score, device)
             loss_disc_all.backward()
             optim_d.step()
 
-            # Generator
+            # Generator — the MP-SENet objective. NSNet2 reuses the noisy phase
+            # (no phase decoder), so pha_g=None drops the anti-wrapping phase term.
             optim_g.zero_grad()
-
-            # L2 Magnitude Loss
-            loss_mag = F.mse_loss(clean_mag, mag_g)
-            # L2 Complex Loss (mag-only model: equivalent to mag loss weighted by phase coherence)
-            loss_com = F.mse_loss(clean_com, com_g) * 2
-            # L2 Consistency Loss
-            loss_stft = F.mse_loss(com_g, com_g_hat) * 2
-            # Time Loss
-            loss_time = F.l1_loss(clean_audio, audio_g)
-            # Metric Loss
             metric_g = discriminator(clean_mag, mag_g_hat)
-            loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
-
-            loss_gen_all = (loss_mag * 0.9
-                            + loss_com * 0.1
-                            + loss_stft * 0.1
-                            + loss_metric * 0.05
-                            + loss_time * 0.2)
+            terms = generator_terms(
+                mag_g=mag_g, com_g=com_g, mag_r=clean_mag, com_r=clean_com,
+                com_g_hat=com_g_hat, audio_g=audio_g, audio_r=clean_audio,
+                metric_g=metric_g,
+            )
+            loss_gen_all = generator_loss(terms, weights)
 
             # Butterfly orthogonality penalty (gated by h.butterfly_ortho_lambda).
             # Pulls each 2x2 twiddle factor toward orthogonality so the cumulative
@@ -215,11 +204,11 @@ def train(rank, a, h):
             if rank == 0:
                 if steps % a.stdout_interval == 0:
                     with torch.no_grad():
-                        metric_error = F.mse_loss(metric_g.flatten(), one_labels).item()
-                        mag_error = F.mse_loss(clean_mag, mag_g).item()
-                        com_error = F.mse_loss(clean_com, com_g).item()
-                        time_error = F.l1_loss(clean_audio, audio_g).item()
-                        stft_error = F.mse_loss(com_g, com_g_hat).item()
+                        metric_error = float(terms['metric'])
+                        mag_error = float(terms['magnitude'])
+                        com_error = float(terms['complex'])
+                        time_error = float(terms['time'])
+                        stft_error = float(terms['consistency'])
                     print('Steps : {:d}, Gen Loss: {:4.3f}, Disc Loss: {:4.3f}, Metric loss: {:4.3f}, Magnitude Loss : {:4.3f}, Complex Loss : {:4.3f}, Time Loss : {:4.3f}, STFT Loss : {:4.3f}, s/b : {:4.3f}'.
                           format(steps, loss_gen_all, loss_disc_all, metric_error, mag_error, com_error, time_error, stft_error, time.time() - start_b))
 

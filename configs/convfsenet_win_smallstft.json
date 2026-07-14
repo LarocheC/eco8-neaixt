@@ -2,22 +2,19 @@
     "num_gpus": 0,
     "batch_size": 16,
     "learning_rate": 0.0008,
-    "lr_min": 0.00001,
+    "lr_min": 1e-05,
     "scheduler": "cosine",
     "adam_b1": 0.9,
     "adam_b2": 0.999,
     "lr_decay": 0.9985,
     "seed": 1234,
-
     "sampling_rate": 16000,
     "segment_size": 32000,
-
     "n_fft": 256,
     "win_length": 256,
     "hop_size": 128,
     "win_size": 256,
     "n_features": 129,
-
     "n_channels_res": 192,
     "n_channels_conv": 384,
     "kernel_size": 3,
@@ -26,30 +23,32 @@
     "extractor_type": "mag_compressed",
     "compress_factor": 0.3,
     "causal": true,
-
     "gan": {
         "enabled": true,
-        "metric_loss_lambda": 0.05,
-        "disc_compress_factor": 0.3
+        "metric_loss_lambda": 0.05
     },
-
     "windowed": {
         "_comment": "Track 2 (STRETCH, deploy/stm32n6/EFFICIENCY_REWORK_PLAN.md): smaller STFT (256/128 = 16ms/8ms framing, 129 bins) for ~24-32ms algorithmic latency AND 2x frames/sec so emit_T=2 amortizes per-call epoch overhead 2x. Same 192/384 mag_compressed backbone + windowed export wrapper. L = sum_blocks (K-1)*D = 42 (topology-fixed, independent of STFT). window width = L + emit_T = 44. drop_nyquist slices 129->128 for HW alignment. Trains from scratch (frontend/backend dims differ from the 257-bin v5 weights, so no warm-start). Accept only if int8 PESQ holds >= 2.85.",
         "L": 42,
         "emit_T": 2,
         "drop_nyquist": true
     },
-
     "calibration": {
         "num_utterances": 200,
         "seed": 1234,
         "frames_per_utterance": 80
     },
-
     "num_workers": 4,
     "dist_config": {
         "dist_backend": "nccl",
         "dist_url": "tcp://localhost:54321",
         "world_size": 1
+    },
+    "loss": {
+        "magnitude": 0.9,
+        "complex": 0.1,
+        "consistency": 0.1,
+        "time": 0.2,
+        "metric": 0.05
     }
 }

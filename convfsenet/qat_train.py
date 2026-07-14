@@ -13,10 +13,10 @@ quantization is invariant to per-channel rescaling (the scale rescales with
 the weight, indices unchanged), so QAT on the raw weight is equivalent to QAT
 on the folded weight. No special BN handling needed.
 
-Reconstruction loss only (the model's PreProcLoss/DynCompMSE) — no GAN, like
-qat_train.py: fast and stable for a short fine-tune from an already-converged
-checkpoint. Validation runs with quant active, so PESQ / g_best track the
-*quantized* model directly.
+Reconstruction loss only — the MP-SENet objective (common/losses.py) minus the
+metric term, since there is no discriminator here. Fast and stable for a short
+fine-tune from an already-converged checkpoint. Validation runs with quant
+active, so PESQ / g_best track the *quantized* model directly.
 
 Usage:
 
@@ -49,8 +49,19 @@ from common.quant_fake import (
     install_static_activation_fake_quant,
     prepare_for_qat,
 )
-from convfsenet.train import _validate
+from convfsenet.train import _validate, forward_spectra
+from common.losses import generator_loss, generator_terms, loss_weights
 from common.utils import load_checkpoint, save_checkpoint
+
+
+def _recon_loss(model, noisy, clean, h, weights):
+    """The MP-SENet objective minus the metric term (no discriminator in QAT)."""
+    s = forward_spectra(model, noisy, clean, h)
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+    )
+    return generator_loss(terms, weights)
 
 
 def _load_fp32_into_model(model, init_from_path, device) -> None:
@@ -131,6 +142,10 @@ def train_qat(a, h):
     os.makedirs(a.checkpoint_path, exist_ok=True)
     os.makedirs(os.path.join(a.checkpoint_path, "logs"), exist_ok=True)
 
+    weights = loss_weights(h)
+    for k in ("phase", "metric"):        # mask-only model; no discriminator in QAT
+        weights.pop(k, None)
+
     optim = torch.optim.AdamW(model.parameters(), a.lr, betas=[h.adam_b1, h.adam_b2])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optim, T_max=a.epochs, eta_min=a.lr_min,
@@ -154,9 +169,11 @@ def train_qat(a, h):
         for i, (clean_audio, noisy_audio) in enumerate(train_loader):
             if i >= a.calib_batches:
                 break
-            model.train_step(
+            forward_spectra(
+                model,
                 noisy_audio.to(device, non_blocking=True).unsqueeze(1),
                 clean_audio.to(device, non_blocking=True).unsqueeze(1),
+                h,
             )
     # PESQ with the static fake-quant active — this should track the deployed
     # static int8 (the verification that the fake-quant matches quantize_static).
@@ -175,8 +192,7 @@ def train_qat(a, h):
             noisy_audio = noisy_audio.to(device, non_blocking=True).unsqueeze(1)
 
             optim.zero_grad()
-            loss_dict = model.train_step(noisy_audio, clean_audio)
-            loss = loss_dict["loss"]
+            loss = _recon_loss(model, noisy_audio, clean_audio, h, weights)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optim.step()

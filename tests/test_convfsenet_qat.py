@@ -30,7 +30,7 @@ def _fresh(extractor_type: str = "mag_compressed") -> ConvFSENet_QuantFriendly:
         extractor_type=extractor_type,
         compress_factor=0.3 if extractor_type == "mag_compressed" else None,
         causal=True,
-        loss=None, preproc=None, postproc=None,
+        preproc=None, postproc=None,
     )
 
 

@@ -2,12 +2,14 @@
 Standalone version of the model described by
 `config/model/convfsenet/quant_td.yaml` from the `convolve_dyn_experiments` repo.
 
-It bundles every class the model needs (BaseModel, TCMBlock, TCM, ConvFSENet,
-the quant-friendly variants, the time-domain training mixin, and the
-DynCompMSE / PreProcLoss combo) into a single file. Build with `build_model()`.
+It bundles every class the model needs (BaseModel, TCMBlock, TCM, ConvFSENet and
+the quant-friendly variants) into a single file. Build with `build_model()`.
 
-Composed config (resolved from quant_td -> quant -> shared, with the
-`dyncompmse_from_waveform` loss override):
+The model carries no loss: training uses the MP-SENet objective from
+common/losses.py, driven by convfsenet/train.py::forward_spectra. (It previously
+owned a PreProcLoss(DynCompMSE); that is gone.)
+
+Composed config (resolved from quant_td -> quant -> shared):
 
     _target_: dyn_experiments.models.ConvFSENet_QuantFriendly_TD
     n_fft: 512
@@ -23,94 +25,11 @@ Composed config (resolved from quant_td -> quant -> shared, with the
     causal: false
     preproc:  Spectrogram(n_fft=512, win_length=512, hop_length=256, power=None)
     postproc: InverseSpectrogram(n_fft=512, win_length=512, hop_length=256)
-    loss: PreProcLoss(
-        preproc=Spectrogram(n_fft=512, power=None),
-        loss=DynCompMSE(normalize=True, normalize_mode="threshold",
-                        normalize_framelen=512, normalize_threshold=0.025),
-    )
 """
 
 import torch
 from torch import nn
 from torch.nn import functional as F
-
-
-# =============================================================================
-# Losses
-# =============================================================================
-
-
-class CompositeLoss(nn.Module):
-    """Marker class — BaseModel.loss_function() checks `isinstance(loss, CompositeLoss)`."""
-    pass
-
-
-def _stft_to_rms(stft_clean, normalize_factor):
-    x = torch.linalg.norm(stft_clean.squeeze(1), dim=1)
-    x *= normalize_factor
-    return x
-
-
-def _get_active_speech_level_threshold(stft_clean, normalize_threshold, normalize_factor):
-    energy = _stft_to_rms(stft_clean, normalize_factor)
-    active_frames = energy > normalize_threshold
-    active_energy = energy[active_frames]
-    return active_energy.mean()
-
-
-def _normalize_several(stft_clean, stft_pred_list, normalize_threshold, normalize_factor, eps):
-    std_signal = _get_active_speech_level_threshold(stft_clean, normalize_threshold, normalize_factor)
-    stft_pred_list = [stft_pred.clone() / (std_signal + eps) for stft_pred in stft_pred_list]
-    stft_clean = stft_clean.clone() / (std_signal + eps)
-    return stft_clean, stft_pred_list
-
-
-class DynCompMSE(nn.Module):
-    """Magnitude+complex compressed MSE with active-speech-level normalization.
-
-    Only the `normalize_mode='threshold'` path is kept (matches `dyncompmse_norm.yaml`).
-    """
-
-    def __init__(self, normalize, normalize_framelen, normalize_threshold,
-                 normalize_mode="threshold", exponent=0.3, alpha=0.3, eps=1e-9):
-        super().__init__()
-        assert normalize_mode == "threshold", "Standalone only supports normalize_mode='threshold'"
-        self.normalize = normalize
-        self.normalize_threshold = normalize_threshold
-        self.normalize_factor = torch.sqrt(torch.tensor(2.0)) / normalize_framelen
-        self.exponent = exponent
-        self.alpha = alpha
-        self.eps = eps
-
-    def _r_pow(self, x, a):
-        return torch.pow(x + self.eps, a)
-
-    def forward(self, stft_pred, stft_clean, **kwargs):
-        if self.normalize:
-            stft_clean, stft_pred_list = _normalize_several(
-                stft_clean, [stft_pred],
-                self.normalize_threshold, self.normalize_factor, self.eps,
-            )
-            stft_pred = stft_pred_list[0]
-        pred_magnitude = self._r_pow(stft_pred.abs(), self.exponent)
-        clean_magnitude = self._r_pow(stft_clean.abs(), self.exponent)
-        loss_magnitude = torch.pow(pred_magnitude - clean_magnitude, 2).mean()
-        pred_complex = stft_pred * self._r_pow(stft_pred.abs(), self.exponent - 1.0)
-        clean_complex = stft_clean * self._r_pow(stft_clean.abs(), self.exponent - 1.0)
-        loss_complex = torch.pow((pred_complex - clean_complex).abs(), 2).mean()
-        return (1 - self.alpha) * loss_magnitude + self.alpha * loss_complex
-
-
-class PreProcLoss(nn.Module):
-    """Apply a preprocessing transform (here: Spectrogram) before computing the inner loss."""
-
-    def __init__(self, loss, preproc):
-        super().__init__()
-        self.loss_fnc = loss
-        self.preproc = preproc
-
-    def forward(self, x_pred, x_clean, **kwargs):
-        return self.loss_fnc(self.preproc(x_pred), self.preproc(x_clean), **kwargs)
 
 
 # =============================================================================
@@ -281,22 +200,18 @@ def _pad_signals_to_valid_length(*signals, hop_len):
 
 
 class BaseModel(nn.Module):
-    def __init__(self, loss, preproc, postproc):
+    """Spectrogram in -> masked spectrogram out, plus the STFT pair around it.
+
+    The model owns no loss: training goes through common/losses.py (the MP-SENet
+    objective), which needs the *pre-iSTFT* spectrum and so drives preproc /
+    forward / postproc itself. See convfsenet/train.py::forward_spectra.
+    """
+
+    def __init__(self, preproc, postproc):
         super().__init__()
-        self.loss_fnc = loss
         self.preproc = preproc
         self.postproc = postproc
         self.eps = 1e-9
-
-    def loss_function(self, *args, **kwargs):
-        if isinstance(self.loss_fnc, CompositeLoss):
-            loss, loss_dict = self.loss_fnc(*args, **kwargs)
-            loss_dict = {f"loss/{k}": v for k, v in loss_dict.items()}
-            loss_dict["loss"] = loss
-        else:
-            loss = self.loss_fnc(*args, **kwargs)
-            loss_dict = {"loss": loss}
-        return loss_dict
 
     def _pad_signals_if_needed(self, *signals):
         if not hasattr(self.preproc, "hop_length"):
@@ -310,32 +225,6 @@ class BaseModel(nn.Module):
     def _check_signals_shape(self, sig_pred, sig_clean):
         assert sig_pred.shape == sig_clean.shape, \
             f"prediction and target shapes do not match: pred={sig_pred.shape} vs clean={sig_clean.shape}"
-
-
-class TrainValidTest_TimeDomain:
-    """End-to-end loss on the time domain (preproc -> forward -> postproc -> loss(x_pred, x_clean))."""
-
-    def process_data(self, x_noisy, x_clean, crop_signals=False):
-        repr_noisy = self.preproc(x_noisy)
-        repr_pred = self.forward(repr_noisy)
-        x_pred = self.postproc(repr_pred)
-        if crop_signals:
-            x_pred, x_clean = self._crop_signals_if_needed(x_pred, x_clean)
-        self._check_signals_shape(x_pred, x_clean)
-        loss_dict = self.loss_function(x_pred, x_clean)
-        return x_pred, loss_dict
-
-    def train_step(self, x_noisy, x_clean):
-        _, loss_dict = self.process_data(x_noisy, x_clean, crop_signals=True)
-        return loss_dict
-
-    def valid_step(self, x_noisy, x_clean):
-        x_noisy, x_clean = self._pad_signals_if_needed(x_noisy, x_clean)
-        x_pred, loss_dict = self.process_data(x_noisy, x_clean)
-        return x_pred, x_clean, x_noisy, loss_dict
-
-    def test_step(self, x_noisy, x_clean):
-        return self.valid_step(x_noisy, x_clean)
 
 
 # =============================================================================
@@ -354,8 +243,8 @@ class ConvFSENet(BaseModel):
                  n_channels_res, n_channels_conv, kernel_size,
                  n_blocks, n_stacks, dropout, norm_type,
                  extractor_type, compress_factor, causal,
-                 loss, preproc, postproc):
-        super().__init__(loss, preproc, postproc)
+                 preproc, postproc):
+        super().__init__(preproc, postproc)
         self.n_fft = n_fft
         self.win_length = win_length
         self.n_features = n_features
@@ -393,13 +282,13 @@ class ConvFSENet_QuantFriendly(ConvFSENet):
                  n_channels_res, n_channels_conv, kernel_size,
                  n_blocks, n_stacks,
                  extractor_type, compress_factor, causal,
-                 loss, preproc, postproc):
+                 preproc, postproc):
         super().__init__(
             n_fft, win_length, n_features,
             n_channels_res, n_channels_conv, kernel_size,
             n_blocks, n_stacks, 0.0, "batch",
             extractor_type, compress_factor, causal,
-            loss, preproc, postproc,
+            preproc, postproc,
         )
         for i, m in enumerate(self.tcm):
             self.tcm[i] = TCMBlock_QuantFriendly(
@@ -407,8 +296,8 @@ class ConvFSENet_QuantFriendly(ConvFSENet):
             )
 
 
-class ConvFSENet_QuantFriendly_TD(TrainValidTest_TimeDomain, ConvFSENet_QuantFriendly):
-    """Quant-friendly ConvFSENet trained with an end-to-end time-domain loss."""
+class ConvFSENet_QuantFriendly_TD(ConvFSENet_QuantFriendly):
+    """Quant-friendly ConvFSENet, trained end-to-end in the time domain."""
     pass
 
 
@@ -431,14 +320,6 @@ def build_model():
     postproc = torchaudio.transforms.InverseSpectrogram(
         n_fft=n_fft, win_length=win_length, hop_length=hop_length,
     )
-    inner_loss = DynCompMSE(
-        normalize=True, normalize_mode="threshold",
-        normalize_framelen=n_fft, normalize_threshold=0.025,
-    )
-    loss = PreProcLoss(
-        loss=inner_loss,
-        preproc=torchaudio.transforms.Spectrogram(n_fft=n_fft, power=None),
-    )
     return ConvFSENet_QuantFriendly_TD(
         n_fft=n_fft,
         win_length=win_length,
@@ -451,7 +332,6 @@ def build_model():
         extractor_type="mag",
         compress_factor=None,
         causal=False,
-        loss=loss,
         preproc=preproc,
         postproc=postproc,
     )
@@ -542,22 +422,13 @@ def build_causal_model(h=None):
 
     preproc = _TorchSpectrogram(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
     postproc = _TorchInverseSpectrogram(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
-    # Loss preproc matches the YAML's Spectrogram(n_fft=512, power=None) — torchaudio
-    # defaults are hop=n_fft/2, win=n_fft. Reuse the same window/hop.
-    loss_preproc = _TorchSpectrogram(n_fft=n_fft, win_length=n_fft, hop_length=n_fft // 2)
-    inner_loss = DynCompMSE(
-        normalize=True, normalize_mode="threshold",
-        normalize_framelen=n_fft, normalize_threshold=0.025,
-    )
-    loss = PreProcLoss(loss=inner_loss, preproc=loss_preproc)
-
     return ConvFSENet_QuantFriendly_TD(
         n_fft=n_fft, win_length=win_length, n_features=n_features,
         n_channels_res=n_channels_res, n_channels_conv=n_channels_conv,
         kernel_size=kernel_size, n_blocks=n_blocks, n_stacks=n_stacks,
         extractor_type=extractor_type, compress_factor=compress_factor,
         causal=causal,
-        loss=loss, preproc=preproc, postproc=postproc,
+        preproc=preproc, postproc=postproc,
     )
 
 
@@ -574,10 +445,11 @@ if __name__ == "__main__":
 
     model.eval()
     with torch.no_grad():
-        x_pred, x_clean_p, x_noisy_p, loss_dict = model.valid_step(x_noisy, x_clean)
-    print(f"valid_step ok: x_pred shape={tuple(x_pred.shape)}, loss={loss_dict['loss'].item():.4f}")
+        x_pred = model.postproc(model(model.preproc(x_noisy)))
+    print(f"forward ok: x_pred shape={tuple(x_pred.shape)}")
 
     model.train()
-    loss_dict = model.train_step(x_noisy, x_clean)
-    loss_dict["loss"].backward()
-    print(f"train_step ok: loss={loss_dict['loss'].item():.4f}")
+    x_pred = model.postproc(model(model.preproc(x_noisy)))
+    x_pred, x_clean_c = model._crop_signals_if_needed(x_pred, x_clean)
+    F.l1_loss(x_pred, x_clean_c).backward()
+    print("backward ok")

@@ -1,6 +1,5 @@
 {
     "_comment": "LiSenNet NPU-HARDENED conv variant. Same sub-band U-Net + dual-path CONV bottleneck as configs/lisennet_conv_wide.json, but with deploy-friendly primitives so the exported int8 graph compiles to the STM32N6 Neural-ART NPU (the conv_wide variant maps its operators but crashes atonn at codegen on the 2-axis CustomLayerNorm / PReLU). norm='batchnorm' replaces the per-frame 2-axis CustomLayerNorm with a per-channel nn.BatchNorm2d (fixed stats, folds into the adjacent conv, NPU-native); act='relu' replaces PReLU/Mish/LearnableSigmoid with parameter-free ReLU/Sigmoid (removes the per-channel float slopes that block full int8). Mirrors ConvFSENet's quant-friendly recipe (conv->bn->relu). Requires retraining (the norm/activation swap changes behaviour); the input is already power-compressed (compress_factor 0.3) which tames dynamic range and reduces the need for the per-frame norm. Retrain from scratch into cp_lisennet_conv_hardened; A/B FP32 PESQ against cp_lisennet_conv_wide (2.970).",
-
     "num_gpus": 0,
     "batch_size": 16,
     "learning_rate": 0.0005,
@@ -8,33 +7,34 @@
     "adam_b2": 0.99,
     "lr_decay": 0.98,
     "seed": 1234,
-
     "sampling_rate": 16000,
     "segment_size": 32000,
-
     "n_fft": 512,
     "hop_size": 256,
     "win_size": 512,
-
     "num_channels": 20,
     "n_blocks": 2,
     "compress_factor": 0.3,
     "gradient_clip": 5.0,
-
     "bottleneck": "conv",
     "norm": "batchnorm",
     "act": "relu",
     "upsample": "convtranspose",
     "intra_kernel": 11,
     "inter_kernel": 3,
-    "inter_dilations": [1, 2, 4, 8],
-
+    "inter_dilations": [
+        1,
+        2,
+        4,
+        8
+    ],
     "loss": {
+        "magnitude": 0.9,
         "complex": 0.1,
-        "mag": 0.9,
-        "adv": 0.05
+        "consistency": 0.1,
+        "time": 0.2,
+        "metric": 0.05
     },
-
     "num_workers": 4,
     "dist_config": {
         "dist_backend": "nccl",

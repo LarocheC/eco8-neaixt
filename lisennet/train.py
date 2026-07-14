@@ -6,11 +6,19 @@ the shared VoiceBank-DEMAND dataset. LiSenNet is end-to-end (waveform in/out;
 STFT + Griffin-Lim phase live inside the model), so a batch is just
 (clean, noisy) waveforms.
 
-Losses (upstream model/model.py):
-  generator   = w_com * (MSE(re) + MSE(im)) + w_mag * MSE(mag) + w_adv * adv
-  discriminator (MetricGAN) = MSE(D(tgt,tgt), 1) + MSE(D(tgt,est), PESQ(tgt,est))
+Loss: the MP-SENet objective (common/losses.py), shared with every other model
+in this repo — magnitude + complex + STFT-consistency + time + MetricGAN. It
+replaces LiSenNet's own CMGAN loss (mag + complex + adversarial only), which
+lacked the time and consistency terms and showed the discriminator the network's
+raw magnitude rather than the round-tripped one.
+
+The anti-wrapping phase loss is omitted: LiSenNet has no phase decoder. Its phase
+comes from a 2-iteration Griffin-Lim seeded from a *detached* magnitude, so a
+phase loss would contribute no gradient to any parameter — an inert term, not a
+faithful one. See common/losses.py.
+
 The CMGAN MetricDiscriminator is reused from common/discriminator.py (identical
-to LiSenNet's). Phase is not learned (Griffin-Lim), so there is no phase loss.
+to LiSenNet's).
 """
 
 from __future__ import annotations
@@ -31,87 +39,87 @@ from lisennet.model import build_lisennet
 from common.dataset import Dataset, data_generator, load_voicebank_demand, seed_worker
 from common.env import AttrDict, build_env
 from common.discriminator import MetricDiscriminator, batch_pesq
+from common.losses import (
+    discriminator_loss, generator_loss, generator_terms, loss_weights,
+)
 from common.metrics import pesq_score
 from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
-_DEFAULT_LOSS_WEIGHTS = {"complex": 0.1, "mag": 0.9, "adv": 0.05}
+# No `phase`: LiSenNet has no phase decoder (see module docstring).
+_LOGGED_TERMS = ("magnitude", "complex", "consistency", "time", "metric")
 
 
 def _to_dev(t, device):
     return t.to(device, non_blocking=True)
 
 
-def _loss_weights(h):
-    cfg = h.get("loss", {}) or {}
-    return {k: float(cfg.get(k, v)) for k, v in _DEFAULT_LOSS_WEIGHTS.items()}
+def forward_spectra(model, noisy, clean):
+    """Forward LiSenNet and produce every tensor the MP-SENet loss needs.
 
+    The model already hands back the clean/predicted compressed spectra; what it
+    does not compute is the iSTFT -> STFT round trip, which the consistency term
+    needs and which is also what the discriminator must be shown. We rebuild it
+    with the model's own STFT + compression helpers so the geometry and the
+    power-law convention are guaranteed to match the spectra it returned.
+    """
+    r = model(noisy, clean)
 
-def generator_loss(results, discriminator, weights):
-    """CMGAN generator loss: complex + magnitude + adversarial (metric)."""
-    est_spec, tgt_spec = results["est_spec"], results["tgt_spec"]
-    loss_complex = F.mse_loss(est_spec.real, tgt_spec.real) + F.mse_loss(est_spec.imag, tgt_spec.imag)
-    loss_mag = F.mse_loss(results["est_mag"], results["tgt_mag"])
-    metric = discriminator(results["tgt_mag"], results["est_mag"]).flatten()
-    loss_adv = F.mse_loss(metric, torch.ones_like(metric))
-    loss = (weights["complex"] * loss_complex
-            + weights["mag"] * loss_mag
-            + weights["adv"] * loss_adv)
-    parts = {"complex": float(loss_complex.item()), "mag": float(loss_mag.item()),
-             "adv": float(loss_adv.item())}
-    return loss, parts
+    spec_g_hat = model.power_compress(model.apply_stft(r["est"]))
 
-
-def discriminator_loss(results, discriminator, device):
-    """MetricGAN discriminator loss: real -> 1, fake -> normalised PESQ(tgt, est)."""
-    tgt_mag = results["tgt_mag"]
-    est_mag = results["est_mag"].detach()
-    tgt_wav = results["tgt"]
-    est_wav = results["est"].detach()
-
-    pesq_scaled = batch_pesq(
-        list(tgt_wav.cpu().numpy()),
-        list(est_wav.cpu().numpy()),
+    return dict(
+        mag_r=r["tgt_mag"], com_r=torch.view_as_real(r["tgt_spec"]),
+        mag_g=r["est_mag"], com_g=torch.view_as_real(r["est_spec"]),
+        mag_g_hat=spec_g_hat.abs(), com_g_hat=torch.view_as_real(spec_g_hat),
+        audio_g=r["est"], audio_r=r["tgt"],
+        est_mag=r["est_mag"],
     )
-    metric_real = discriminator(tgt_mag, tgt_mag).flatten()
-    loss_real = F.mse_loss(metric_real, torch.ones_like(metric_real))
-    if pesq_scaled is not None:
-        metric_fake = discriminator(tgt_mag, est_mag).flatten()
-        loss_fake = F.mse_loss(metric_fake, pesq_scaled.to(device))
-    else:
-        # PESQ failed on some utterance (silence/too-short) — skip the fake branch.
-        loss_fake = torch.zeros((), device=device)
-    return loss_real + loss_fake
 
 
 def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, clip,
              teacher=None, distill_weight=0.0):
-    """One CMGAN step: discriminator then generator (one shared forward).
+    """One MetricGAN step: discriminator then generator (one shared forward).
 
     With ``teacher`` set, adds ``distill_weight * MSE(est_mag, teacher_est_mag)``
     to the generator loss — mask-level knowledge distillation from a stronger
-    (e.g. longer-receptive-field) model into this deployment architecture.
+    (e.g. longer-receptive-field) model into this deployment architecture. This
+    is an addition to the MP-SENet objective, not part of it; it is off unless
+    ``--distill_from`` is passed.
     """
-    results = model(noisy, clean)
     device = clean.device
+    s = forward_spectra(model, noisy, clean)
 
     # ----- discriminator -----
+    pesq_target = batch_pesq(
+        list(s["audio_r"].detach().cpu().numpy()),
+        list(s["audio_g"].detach().cpu().numpy()),
+    )
     optim_d.zero_grad()
-    d_loss = discriminator_loss(results, discriminator, device)
+    d_loss = discriminator_loss(discriminator, s["mag_r"], s["mag_g_hat"],
+                                pesq_target, device)
     d_loss.backward()
     torch.nn.utils.clip_grad_norm_(discriminator.parameters(), clip)
     optim_d.step()
 
     # ----- generator -----
     optim_g.zero_grad()
-    g_loss, parts = generator_loss(results, discriminator, weights)
+    metric_g = discriminator(s["mag_r"], s["mag_g_hat"])        # keeps generator grad
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+        metric_g=metric_g,
+    )
+    g_loss = generator_loss(terms, weights)
+
+    parts = {k: float(terms[k].item()) for k in _LOGGED_TERMS if k in terms}
     if teacher is not None:
         with torch.no_grad():
             teacher_mag = teacher(noisy, clean)["est_mag"]
-        loss_distill = F.mse_loss(results["est_mag"], teacher_mag)
+        loss_distill = F.mse_loss(s["est_mag"], teacher_mag)
         g_loss = g_loss + distill_weight * loss_distill
         parts["distill"] = float(loss_distill.item())
+
     g_loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     optim_g.step()
@@ -136,7 +144,8 @@ def train(a, h):
     os.makedirs(os.path.join(a.checkpoint_path, "logs"), exist_ok=True)
     print(f"checkpoints directory : {a.checkpoint_path}")
 
-    weights = _loss_weights(h)
+    weights = loss_weights(h)
+    weights.pop("phase", None)                 # no phase decoder — see module docstring
     clip = float(h.get("gradient_clip", 5.0))
 
     # ----- distillation teacher (optional, frozen) ---------------------------
@@ -206,13 +215,14 @@ def train(a, h):
 
             if steps % a.stdout_interval == 0:
                 print(f"Steps : {steps:d}, G: {metrics['loss']:.4f}, D: {metrics['d_loss']:.4f}, "
-                      f"Mag: {metrics['mag']:.4f}, Com: {metrics['complex']:.4f}, "
+                      f"Mag: {metrics['magnitude']:.4f}, Com: {metrics['complex']:.4f}, "
                       f"s/b : {time.time() - start_b:.3f}")
             if steps % a.summary_interval == 0:
                 sw.add_scalar("Training/Generator Loss", metrics["loss"], steps)
                 sw.add_scalar("Training/Discriminator Loss", metrics["d_loss"], steps)
-                for k in ("mag", "complex", "adv"):
-                    sw.add_scalar(f"Training/{k}", metrics[k], steps)
+                for k in _LOGGED_TERMS:
+                    if k in metrics:
+                        sw.add_scalar(f"Training/{k}", metrics[k], steps)
 
             if steps % a.checkpoint_interval == 0 and steps != 0:
                 save_checkpoint(f"{a.checkpoint_path}/g_{steps:08d}", {

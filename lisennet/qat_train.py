@@ -41,9 +41,10 @@ from torch.nn.utils import parametrize
 from torch.utils.data import DataLoader
 
 from lisennet.model import build_lisennet
-from lisennet.train import _validate, _loss_weights
+from lisennet.train import _validate, forward_spectra
 from common.dataset import Dataset, data_generator, load_voicebank_demand, seed_worker
 from common.env import AttrDict, build_env
+from common.losses import generator_loss, generator_terms, loss_weights
 from common.quant_fake import (
     QSpec,
     _FakeQuantWeightParam,
@@ -53,14 +54,15 @@ from common.quant_fake import (
 from common.utils import load_checkpoint, save_checkpoint
 
 
-def _recon_loss(results, weights):
-    """CMGAN reconstruction loss WITHOUT the adversarial term (no discriminator during
-    QAT): complex (real + imag MSE) + magnitude MSE. Matches
-    ``lisennet.train.generator_loss`` minus the adv branch."""
-    est_spec, tgt_spec = results["est_spec"], results["tgt_spec"]
-    loss_complex = F.mse_loss(est_spec.real, tgt_spec.real) + F.mse_loss(est_spec.imag, tgt_spec.imag)
-    loss_mag = F.mse_loss(results["est_mag"], results["tgt_mag"])
-    return weights["complex"] * loss_complex + weights["mag"] * loss_mag
+def _recon_loss(model, noisy, clean, weights):
+    """The MP-SENet objective minus the metric term — there is no discriminator
+    during QAT. Magnitude + complex + STFT-consistency + time."""
+    s = forward_spectra(model, noisy, clean)
+    terms = generator_terms(
+        mag_g=s["mag_g"], com_g=s["com_g"], mag_r=s["mag_r"], com_r=s["com_r"],
+        com_g_hat=s["com_g_hat"], audio_g=s["audio_g"], audio_r=s["audio_r"],
+    )
+    return generator_loss(terms, weights)
 
 
 def _load_fp32_into_model(model, init_from_path, device) -> None:
@@ -134,7 +136,9 @@ def train_qat(a, h):
     os.makedirs(a.checkpoint_path, exist_ok=True)
     os.makedirs(os.path.join(a.checkpoint_path, "logs"), exist_ok=True)
 
-    weights = _loss_weights(h)
+    weights = loss_weights(h)
+    for k in ("phase", "metric"):               # no phase decoder; no discriminator in QAT
+        weights.pop(k, None)
     optim = torch.optim.AdamW(model.parameters(), a.lr, betas=[h.adam_b1, h.adam_b2])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=a.epochs, eta_min=a.lr_min)
 
@@ -169,8 +173,7 @@ def train_qat(a, h):
             noisy_audio = noisy_audio.to(device, non_blocking=True)
 
             optim.zero_grad()
-            results = model(noisy_audio, clean_audio)
-            loss = _recon_loss(results, weights)
+            loss = _recon_loss(model, noisy_audio, clean_audio, weights)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(h.get("gradient_clip", 5.0)))
             optim.step()

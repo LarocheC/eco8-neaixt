@@ -22,10 +22,12 @@ import torch
 from torch.utils.data import Dataset as TorchDataset, DataLoader
 
 from basenet.model import build_basenet
-from basenet.losses import anti_wrapping_function, phase_losses, spectral_losses
 from basenet.train import enhance, generator_loss, gan_step
 from common.discriminator import MetricDiscriminator
 from common.env import AttrDict
+from common.losses import (
+    MPSENET_WEIGHTS, anti_wrapping_function, generator_terms, phase_losses,
+)
 
 
 # ---- synthetic dataset (mirrors common.dataset.Dataset output) --------------
@@ -77,19 +79,24 @@ def test_anti_wrapping_ignores_2pi_offsets():
     assert torch.allclose(out, expected, atol=1e-5)
 
 
-def test_phase_and_spectral_losses_zero_at_optimum():
+def test_all_loss_terms_zero_at_optimum():
+    """A perfect prediction must cost exactly nothing on every term — including
+    consistency and time, which are the two BASENet gained from MP-SENet."""
     torch.manual_seed(0)
     mag = torch.rand(2, 201, 30)
     pha = (torch.rand(2, 201, 30) * 2 - 1) * math.pi
     com = torch.stack((mag * torch.cos(pha), mag * torch.sin(pha)), dim=-1)
+    audio = torch.randn(2, 8000)
+
     ip, gd, iaf = phase_losses(pha, pha)
-    assert float(ip) == pytest.approx(0.0, abs=1e-6)
-    assert float(gd) == pytest.approx(0.0, abs=1e-6)
-    assert float(iaf) == pytest.approx(0.0, abs=1e-6)
-    sl = spectral_losses(mag, pha, com, mag, pha, com)
-    assert float(sl["magnitude"]) == pytest.approx(0.0, abs=1e-6)
-    assert float(sl["complex"]) == pytest.approx(0.0, abs=1e-6)
-    assert float(sl["phase"]) == pytest.approx(0.0, abs=1e-6)
+    for v in (ip, gd, iaf):
+        assert float(v) == pytest.approx(0.0, abs=1e-6)
+
+    terms = generator_terms(mag_g=mag, com_g=com, mag_r=mag, com_r=com,
+                            com_g_hat=com, audio_g=audio, audio_r=audio,
+                            pha_g=pha, pha_r=pha)
+    for k in ("magnitude", "phase", "complex", "consistency", "time"):
+        assert float(terms[k]) == pytest.approx(0.0, abs=1e-6), k
 
 
 # ---- training steps ---------------------------------------------------------
@@ -107,13 +114,13 @@ def test_generator_step_runs_and_trends_down(cfg):
         clean = clean.unsqueeze(1)         # (B, 1, samples)
         noisy = noisy.unsqueeze(1)
         optim.zero_grad()
-        loss, parts = generator_loss(model, noisy, clean, cfg)
+        loss, terms = generator_loss(model, noisy, clean, cfg)
         loss.backward()
         optim.step()
         l = float(loss.item())
         assert np.isfinite(l)
-        for k in ("magnitude", "phase", "complex", "time"):
-            assert np.isfinite(parts[k])
+        for k in ("magnitude", "phase", "complex", "consistency", "time"):
+            assert np.isfinite(float(terms[k]))
         losses.append(l)
 
     assert np.mean(losses[-2:]) <= np.mean(losses[:2]) * 1.5, (
@@ -166,8 +173,9 @@ def test_gan_step_runs_end_to_end(cfg):
     noisy = noisy.unsqueeze(0).unsqueeze(1)
 
     metrics = gan_step(model, disc, optim, optim_d, noisy, clean, cfg,
-                       metric_lambda=0.05, device=device)
-    for k in ("loss", "base_loss", "loss_metric", "loss_disc"):
+                       device=device, weights=MPSENET_WEIGHTS)
+    for k in ("loss", "metric", "loss_disc", "magnitude", "phase",
+              "complex", "consistency", "time"):
         assert np.isfinite(metrics[k]), f"{k} not finite: {metrics[k]}"
 
 

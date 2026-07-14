@@ -46,7 +46,7 @@ def _fresh_offline(causal: bool = True, extractor_type: str = "mag") -> ConvFSEN
         extractor_type=extractor_type,
         compress_factor=0.3 if extractor_type == "mag_compressed" else None,
         causal=causal,
-        loss=None, preproc=None, postproc=None,
+        preproc=None, postproc=None,
     )
 
 
