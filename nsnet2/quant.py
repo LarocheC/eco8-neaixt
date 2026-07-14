@@ -46,6 +46,11 @@ from onnxruntime.quantization import (
 )
 from onnxruntime.quantization.shape_inference import quant_pre_process
 
+import nsnet2.qdq_einsum_quantizer  # noqa: F401  -- registers QDQRegistry["Einsum"] so the
+# structured block-diagonal / Monarch weight operands (fed to Einsum by the
+# structure-preserving export) actually get int8-quantized. Without this the
+# "int8" model keeps its dominant weights in FP32.
+
 from nsnet2.calibration import VBDCalibrationReader
 from common.dataset import load_voicebank_demand
 from common.env import AttrDict
@@ -225,6 +230,34 @@ def quantize_checkpoint(cp_dir, n_calib_utts, out_path=None, hf_cache_dir=None,
         f"QuantizeLinear nodes — quantize_static silently produced a "
         f"non-quantized graph. Check that calibration_data_reader yielded "
         f"frames and that nodes_to_exclude did not skip every quantizable op."
+    )
+
+    # Einsum weight-quant audit. The structure-preserving export lowers each
+    # BlockdiagLinear / MonarchLinear matmul to an Einsum whose weight operand
+    # is a graph initializer. onnxruntime has no built-in QDQ handler for
+    # Einsum, so without nsnet2.qdq_einsum_quantizer (imported at the top of
+    # this module) quantize_static SILENTLY leaves those dominant weights in
+    # FP32 — the exact bug that made "int8 is loss-free" an artifact for the
+    # structured variants. The n_qlinear check above does NOT catch it: the
+    # activation-side Q/DQ pairs satisfy it trivially. After a correct pass
+    # every Einsum weight operand is consumed via a DequantizeLinear, so no
+    # Einsum input should still be a raw FLOAT initializer. No-op for the dense
+    # baseline (no Einsum nodes); only bites structure-preserving exports.
+    float_init_names = {
+        i.name for i in model_check.graph.initializer
+        if i.data_type == onnx.TensorProto.FLOAT
+    }
+    unquantized_einsum_weights = [
+        (n.name, inp)
+        for n in model_check.graph.node if n.op_type == "Einsum"
+        for inp in n.input if inp in float_init_names
+    ]
+    assert not unquantized_einsum_weights, (
+        f"Einsum weight quant: {len(unquantized_einsum_weights)} Einsum operand(s) "
+        f"are still raw FP32 initializers (not DequantizeLinear-fed) — the "
+        f"structured block-diagonal / Monarch weights were NOT quantized. Ensure "
+        f"'import nsnet2.qdq_einsum_quantizer' runs (registers QDQRegistry['Einsum']) "
+        f"before quantize_static. Offenders: {unquantized_einsum_weights[:4]}"
     )
 
     # --- 11. Telemetry (D-16) — mirrors Phase 2 export_onnx.py D-16 shape ----

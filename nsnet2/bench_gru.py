@@ -64,9 +64,10 @@ def main() -> None:
     p.add_argument("--iters", type=int, default=20)
     p.add_argument("--variants", nargs="+",
                    default=["gru", "triton"],
-                   help="any of: gru, triton, triton_compile, triton_monarch4, "
-                        "triton_monarch8, triton_butterfly, py_butterfly, "
-                        "py_butterfly_2blocks, py_monarch4, py_monarch8")
+                   help="any of: gru, triton, triton_compile, triton_blockdiag4, "
+                        "triton_blockdiag8, triton_monarch4, triton_monarch8, "
+                        "triton_butterfly, py_butterfly, py_butterfly_2blocks, "
+                        "py_blockdiag4, py_blockdiag8, py_monarch4, py_monarch8")
     args = p.parse_args()
 
     torch.manual_seed(0)
@@ -86,6 +87,10 @@ def main() -> None:
             h = make_h("triton", args.n_fft, args.hidden, args.num_layers)
         elif variant == "triton_compile":
             h = make_h("triton", args.n_fft, args.hidden, args.num_layers, compile_step=True)
+        elif variant == "triton_blockdiag4":
+            h = make_h("triton_blockdiag", args.n_fft, args.hidden, args.num_layers, nblocks=4)
+        elif variant == "triton_blockdiag8":
+            h = make_h("triton_blockdiag", args.n_fft, args.hidden, args.num_layers, nblocks=8)
         elif variant == "triton_monarch4":
             h = make_h("triton_monarch", args.n_fft, args.hidden, args.num_layers, nblocks=4)
         elif variant == "triton_monarch8":
@@ -96,6 +101,10 @@ def main() -> None:
             h = make_h("butterfly", args.n_fft, args.hidden, args.num_layers)
         elif variant == "py_butterfly_2blocks":
             h = make_h("butterfly", args.n_fft, args.hidden, args.num_layers, nblocks=2)
+        elif variant == "py_blockdiag4":
+            h = make_h("blockdiag", args.n_fft, args.hidden, args.num_layers, nblocks=4)
+        elif variant == "py_blockdiag8":
+            h = make_h("blockdiag", args.n_fft, args.hidden, args.num_layers, nblocks=8)
         elif variant == "py_monarch4":
             h = make_h("monarch", args.n_fft, args.hidden, args.num_layers, nblocks=4)
         elif variant == "py_monarch8":

@@ -42,8 +42,8 @@ class NSNet2Streaming(nn.Module):
     per layer so ``forward_step`` exports cleanly via
     ``torch.onnx.export(dynamo=False, opset_version=17)``.
 
-    For ``base.gru_kind != "gru"`` (structured variants — butterfly, monarch,
-    and the triton_* kinds), the wrapper delegates ``forward_step`` to
+    For ``base.gru_kind != "gru"`` (structured variants — butterfly, blockdiag,
+    monarch, and the triton_* kinds), the wrapper delegates ``forward_step`` to
     ``base.gru`` per-step (D-05); the Phase 1 parity test and ONNX export
     smoke test SKIP that branch.
     """

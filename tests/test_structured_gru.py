@@ -1,8 +1,8 @@
 """CPU coverage for the structured / triton GRU + structured-linear paths.
 
 The streaming / export / quant suites all load configs/baseline.json
-(gru.kind='gru') and skip structured variants, so the butterfly / monarch /
-triton GRU families — including the structure_input support and the
+(gru.kind='gru') and skip structured variants, so the butterfly / blockdiag /
+monarch / triton GRU families — including the structure_input support and the
 configs/*_triton.json variants — otherwise have no automated coverage. These
 are construction + forward smoke tests on CPU: the gru_qat Triton kernel needs
 CUDA, so on CPU ``use_triton='auto'`` falls back to an equivalent per-step
@@ -29,6 +29,7 @@ from nsnet2.model import NSNet2  # noqa: E402
 
 @pytest.mark.parametrize("cfg", [
     {"kind": "linear"},
+    {"kind": "blockdiag", "nblocks": 4},
     {"kind": "monarch", "nblocks": 4},
     {"kind": "butterfly", "nblocks": 1, "init": "randn"},
     {"kind": "butterfly", "nblocks": 1, "init": "ortho"},
@@ -41,15 +42,37 @@ def test_make_linear_forward_shape(cfg):
     assert torch.isfinite(y).all()
 
 
+def test_blockdiag_and_monarch_are_distinct_layers():
+    """'blockdiag' is a single block-diagonal factor (no cross-block mixing);
+    'monarch' is the genuine two-factor construction (full cross-channel
+    mixing). They must map to different torch_structured classes, and monarch
+    must actually mix across blocks."""
+    bd = make_linear(64, 64, bias=False, cfg={"kind": "blockdiag", "nblocks": 4})
+    mo = make_linear(64, 64, bias=False, cfg={"kind": "monarch", "nblocks": 4})
+    assert type(bd).__name__ == "BlockdiagLinear"
+    assert type(mo).__name__ == "MonarchLinear"
+    # A single input channel: block-diagonal lights up at most one block
+    # (<=16 outputs); a true monarch mixes across all blocks (all 64).
+    x = torch.zeros(1, 64)
+    x[0, 0] = 1.0
+    with torch.no_grad():
+        bd_nz = (bd(x).abs() > 1e-9).sum().item()
+        mo_nz = (mo(x).abs() > 1e-9).sum().item()
+    assert bd_nz <= 16, f"blockdiag should not mix across blocks, got {bd_nz} nonzero"
+    assert mo_nz == 64, f"monarch should mix across all channels, got {mo_nz} nonzero"
+
+
 # ---------------------------------------------------------------------------
 # GRU factory — every kind builds and forwards with nn.GRU-compatible shapes
 # ---------------------------------------------------------------------------
 
 GRU_CFGS = [
     {"kind": "gru"},
+    {"kind": "blockdiag", "nblocks": 4},
     {"kind": "monarch", "nblocks": 4},
     {"kind": "butterfly", "nblocks": 1, "h_init": "ortho"},
     {"kind": "triton"},
+    {"kind": "triton_blockdiag", "nblocks": 4, "struct_input": True},
     {"kind": "triton_monarch", "nblocks": 4, "struct_input": True},
     {"kind": "triton_butterfly", "nblocks": 1, "struct_input": True, "h_init": "ortho"},
 ]
@@ -98,6 +121,9 @@ def _cfg(linear, gru):
 
 
 @pytest.mark.parametrize("linear,gru", [
+    ({"kind": "blockdiag", "nblocks": 4}, {"kind": "blockdiag", "nblocks": 4}),
+    ({"kind": "blockdiag", "nblocks": 4},
+     {"kind": "triton_blockdiag", "nblocks": 4, "struct_input": True}),
     ({"kind": "monarch", "nblocks": 4}, {"kind": "monarch", "nblocks": 4}),
     ({"kind": "monarch", "nblocks": 4},
      {"kind": "triton_monarch", "nblocks": 4, "struct_input": True}),
