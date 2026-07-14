@@ -215,6 +215,141 @@ class _CausalTimeConv(nn.Module):
         return self.act(self.pw(y))
 
 
+class TimeGRU(nn.Module):
+    """Unidirectional GRU over *time*, applied per frequency bin (weights shared over freq).
+
+    The recurrent half of :class:`DualPathHybrid` — the drop-in replacement for the
+    conv bottleneck's dilated ``_CausalTimeConv`` stack. Same job (mix along time,
+    causally), opposite mechanism: unbounded memory in an ``H``-wide hidden state
+    instead of a bounded ``RF``-frame FIFO of activations.
+
+    Two numerically-equivalent evaluation paths over the same parameters:
+
+    * **offline** (``t > 1``, training / whole-utterance): ``nn.GRU`` over
+      ``(b*f, t, d)`` — the cuDNN-fused kernel, so training speed is unaffected.
+    * **streaming** (``t == 1``, deploy): one GRU *cell* step written as **1x1
+      convolutions** over ``(b, d, 1, f)``, reading and writing an explicit
+      ``(b, H, 1, f)`` hidden state.
+
+    The streaming form is why a recurrent bottleneck can go on the NPU at all. A
+    traced ``nn.GRU`` exports an ONNX ``GRU`` op (Neural-ART cannot map it) and needs
+    the ``(b,t,f,d) -> (b*f,t,d)`` reshape that the compiler rejects outright ("order
+    of dimensions of input cannot be interpreted"). Unrolled at ``t == 1`` the
+    recurrence is just ``Conv/Add/Sigmoid/Tanh/Mul`` on 4-D NCHW tensors — every op
+    NPU-native, no reshape, no GRU node. Sharing the weights across frequency is what
+    lets the gates be 1x1 convs: the ``f`` axis rides along as spatial width, exactly
+    as ``nn.GRU`` treats it as batch.
+
+    ``h' = z*(h - n) + n`` is the algebraic identity of the reference
+    ``(1-z)*n + z*h`` with one less node and no broadcast constant (~1e-7 apart in
+    fp32; ``tests/test_lisennet_hybrid_bottleneck.py`` pins the cell against
+    ``nn.GRU``).
+    """
+
+    def __init__(self, emb_dim, hidden_dim):
+        super().__init__()
+        self.rnn = nn.GRU(emb_dim, hidden_dim, 1, batch_first=True, bidirectional=False)
+        self.dense = nn.Linear(hidden_dim, emb_dim)
+        self.emb_dim = emb_dim
+        self.hidden_dim = hidden_dim
+        # Streaming: the hidden state, carried across frames as (b, H, 1, f). Default off.
+        self.streaming = False
+        self._h = None
+
+    def stream_reset(self):
+        self._h = None
+
+    @staticmethod
+    def _pw(x, weight, bias):
+        """Apply a ``(out, in)`` linear map as a 1x1 conv over ``(b, in, 1, f)``.
+
+        The weight slice is a view of an ``nn.GRU`` / ``nn.Linear`` parameter, so it
+        constant-folds into a plain Conv initializer at export — no Split, no Reshape.
+        """
+        return F.conv2d(x, weight.unsqueeze(-1).unsqueeze(-1), bias)
+
+    def _cell_step(self, x, h):
+        """One GRU step as 1x1 convs. x: (b, d, 1, f), h: (b, H, 1, f) -> (b, H, 1, f).
+
+        Gate slicing follows PyTorch's ``nn.GRU`` layout: ``weight_*_l0`` stacks the
+        reset / update / new gates in rows ``[0:H] / [H:2H] / [2H:3H]``. Slicing the
+        weights (rather than chunking the activations) keeps six independent Conv
+        nodes in the graph instead of a Conv + Split, which the Neural-ART compiler
+        would likely drop to a software epoch — and epoch count, not MACC, is what
+        sets frame cost on this NPU.
+        """
+        H = self.hidden_dim
+        w_ih, w_hh = self.rnn.weight_ih_l0, self.rnn.weight_hh_l0
+        b_ih, b_hh = self.rnn.bias_ih_l0, self.rnn.bias_hh_l0
+
+        r = torch.sigmoid(self._pw(x, w_ih[:H], b_ih[:H])
+                          + self._pw(h, w_hh[:H], b_hh[:H]))
+        z = torch.sigmoid(self._pw(x, w_ih[H:2 * H], b_ih[H:2 * H])
+                          + self._pw(h, w_hh[H:2 * H], b_hh[H:2 * H]))
+        n = torch.tanh(self._pw(x, w_ih[2 * H:], b_ih[2 * H:])
+                       + r * self._pw(h, w_hh[2 * H:], b_hh[2 * H:]))
+        return z * (h - n) + n                               # == (1 - z) * n + z * h
+
+    def forward(self, x):                                    # (b, d, t, f)
+        b, d, t, f = x.size()
+        if self.streaming:
+            assert t == 1, f"streaming TimeGRU expects one frame at a time, got t={t}"
+            if self._h is None:
+                self._h = x.new_zeros(b, self.hidden_dim, 1, f)
+            self._h = self._cell_step(x, self._h)            # (b, H, 1, f)
+            return self._pw(self._h, self.dense.weight, self.dense.bias)
+
+        # Offline: fold frequency into the batch axis and run the fused sequence kernel.
+        y = x.permute(0, 3, 2, 1).reshape(b * f, t, d)       # (b*f, t, d)
+        y, _ = self.rnn(y)                                   # (b*f, t, H)
+        y = self.dense(y)                                    # (b*f, t, d)
+        return y.reshape(b, f, t, d).permute(0, 3, 2, 1)     # (b, d, t, f)
+
+
+class DualPathHybrid(nn.Module):
+    """Conv over frequency, **GRU over time** — the recurrent counterpart of
+    :class:`DualPathConv`.
+
+    Same two-path structure and the same intra-frequency mixer as
+    :class:`DualPathConv`; the *only* difference is the inter-time path:
+
+      * **intra-frequency** — symmetric depthwise freq conv + 1x1 pointwise, identical
+        to :class:`DualPathConv` (frequency is fully available per frame, so
+        bidirectional context needs no state and a conv is the cheap way to get it).
+      * **inter-time** — a :class:`TimeGRU` instead of the dilated
+        :class:`_CausalTimeConv` stack: unbounded temporal memory in an ``H``-wide
+        recurrent state, rather than a finite receptive field held in FIFO buffers.
+
+    That single-variable swap is the point. Against the conv bottleneck it isolates
+    *recurrence vs. dilated convolution + FIFO* on the time axis with the encoder,
+    decoder, norms, activations and intra-frequency path held fixed, and it is the
+    only axis on which the two differ in how they stream: bounded ``O(RF*d)``
+    activation FIFOs and a finite lookback, versus ``O(H)`` state and infinite
+    lookback. Both forms export to NPU-native ops (see :class:`TimeGRU`), so the
+    comparison is a real deployment choice and not a modelling thought experiment.
+
+    ``(b, d, t, f)`` in and out, same interface as :class:`DualPathRNN` /
+    :class:`DualPathConv`.
+    """
+
+    def __init__(self, emb_dim, hidden_dim, n_freqs=32, intra_kernel=7,
+                 norm="layernorm", act="prelu"):
+        super().__init__()
+        self.intra_norm = _make_norm(norm, emb_dim, (emb_dim, n_freqs))
+        self.intra_dw = nn.Conv2d(emb_dim, emb_dim, (1, intra_kernel),
+                                  padding=(0, intra_kernel // 2), groups=emb_dim)   # symmetric over freq
+        self.intra_pw = nn.Conv2d(emb_dim, emb_dim, 1)
+        self.intra_act = _make_act(act, emb_dim)
+
+        self.inter_norm = _make_norm(norm, emb_dim, (emb_dim, n_freqs))
+        self.inter = TimeGRU(emb_dim, hidden_dim)
+
+    def forward(self, x):                                    # (b, d, t, f)
+        y = self.intra_act(self.intra_pw(self.intra_dw(self.intra_norm(x))))
+        x = x + y                                            # intra-frequency residual
+        return x + self.inter(self.inter_norm(x))            # inter-time residual
+
+
 class DualPathConv(nn.Module):
     """NPU-mappable drop-in for :class:`DualPathRNN` (no GRU, no ``nn.LayerNorm``).
 
@@ -294,10 +429,13 @@ class ConvolutionalGLU(nn.Module):
 class DPR(nn.Module):
     """Dual-path block: a two-path mixer (``bottleneck``) then a ConvolutionalGLU.
 
-    ``bottleneck="rnn"`` (default) is the faithful LiSenNet :class:`DualPathRNN`;
-    ``bottleneck="conv"`` swaps in the NPU-mappable :class:`DualPathConv`. Both
-    keep the attribute name ``dp_rnn_attn`` so the surrounding code and the RNN
-    checkpoints are unaffected.
+    ``bottleneck="rnn"`` (default) is the faithful LiSenNet :class:`DualPathRNN`
+    (GRU on both axes); ``bottleneck="conv"`` swaps in the NPU-mappable
+    :class:`DualPathConv` (conv on both axes); ``bottleneck="hybrid"`` is
+    :class:`DualPathHybrid` — conv over frequency, GRU over time — which isolates
+    *recurrence vs. dilated conv + FIFO* on the time axis alone. All three keep the
+    attribute name ``dp_rnn_attn`` so the surrounding code and the RNN checkpoints
+    are unaffected.
     """
 
     def __init__(self, emb_dim=16, hidden_dim=24, n_freqs=32, dropout_p=0.1,
@@ -307,10 +445,14 @@ class DPR(nn.Module):
         if bottleneck == "conv":
             self.dp_rnn_attn = DualPathConv(emb_dim, n_freqs, intra_kernel, inter_kernel,
                                             inter_dilations, norm=norm, act=act)
+        elif bottleneck == "hybrid":
+            self.dp_rnn_attn = DualPathHybrid(emb_dim, hidden_dim, n_freqs, intra_kernel,
+                                              norm=norm, act=act)
         elif bottleneck == "rnn":
             self.dp_rnn_attn = DualPathRNN(emb_dim, hidden_dim, n_freqs, dropout_p)
         else:
-            raise ValueError(f"unknown bottleneck {bottleneck!r} (expected 'rnn' or 'conv')")
+            raise ValueError(
+                f"unknown bottleneck {bottleneck!r} (expected 'rnn', 'conv' or 'hybrid')")
         self.conv_glu = ConvolutionalGLU(emb_dim, n_freqs=n_freqs, expansion_factor=2,
                                          dropout_p=dropout_p, norm=norm, act=act)
 
@@ -479,17 +621,21 @@ class MaskDecoder(nn.Module):
 class LiSenNet(nn.Module):
     def __init__(self, num_channels=16, n_blocks=2, n_fft=512, hop_length=256, compress_factor=0.3,
                  bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4),
-                 norm="layernorm", act="prelu", upsample="subpixel"):
+                 norm="layernorm", act="prelu", upsample="subpixel", hidden_dim=None):
         super().__init__()
         self.n_fft = n_fft
         self.n_freqs = n_fft // 2 + 1
         self.hop_length = hop_length
         self.compress_factor = compress_factor
         self.bottleneck = bottleneck
+        # Recurrent width (``rnn`` / ``hybrid`` bottlenecks). Upstream ties it to the
+        # channel count; the ``hybrid`` study overrides it to size the GRU against the
+        # conv bottleneck's parameter budget, so the two differ only in the time mixer.
+        self.hidden_dim = num_channels // 2 * 3 if hidden_dim is None else int(hidden_dim)
 
         self.encoder = Encoder(in_channels=3, num_channels=num_channels, norm=norm, act=act)
         self.blocks = nn.Sequential(*[
-            DPR(emb_dim=num_channels, hidden_dim=num_channels // 2 * 3,
+            DPR(emb_dim=num_channels, hidden_dim=self.hidden_dim,
                 n_freqs=self.n_freqs // (2 ** 3), dropout_p=0.1,
                 bottleneck=bottleneck, intra_kernel=intra_kernel,
                 inter_kernel=inter_kernel, inter_dilations=inter_dilations,
@@ -623,6 +769,7 @@ def build_lisennet(h=None):
         norm=str(g("norm", "layernorm")),
         act=str(g("act", "prelu")),
         upsample=str(g("upsample", "subpixel")),
+        hidden_dim=g("hidden_dim", None),
     )
 
 
