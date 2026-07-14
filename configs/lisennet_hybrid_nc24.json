@@ -1,0 +1,38 @@
+{
+    "_comment": "RECURRENT-TIME-AXIS ablation of the round-1 deploy model (lisennet_conv_hardened_nc24). Single-variable swap: bottleneck conv -> hybrid replaces ONLY the inter-time dilated conv stack (_CausalTimeConv, RF 68) with a GRU over time (TimeGRU, unbounded RF); the encoder, decoder, intra-frequency conv mixer, batchnorm/relu/convtranspose hardening and n_blocks are identical. hidden_dim 18 sizes the GRU so params match the conv model to 0.3% (36,384 vs 36,288), so any quality delta is recurrence-vs-FIFO and not capacity. inter_kernel/inter_dilations are omitted: a GRU has no dilation schedule. Deploy: --streaming only (the stateless windowed graph is undefined for unbounded lookback); the GRU cell exports as 1x1 convs, so 0 GRU ops. Streams with 11 state tensors / 13k floats vs the conv model's 17 / 58k. Train into cp_lisennet_hybrid_nc24.",
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "num_channels": 24,
+    "n_blocks": 2,
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+    "bottleneck": "hybrid",
+    "hidden_dim": 18,
+    "norm": "batchnorm",
+    "act": "relu",
+    "upsample": "convtranspose",
+    "intra_kernel": 11,
+    "loss": {
+        "magnitude": 0.9,
+        "complex": 0.1,
+        "consistency": 0.1,
+        "time": 0.2,
+        "metric": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}

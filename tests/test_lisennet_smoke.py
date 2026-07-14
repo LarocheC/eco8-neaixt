@@ -150,7 +150,8 @@ def test_shipped_config_builds():
     assert 20_000 < n < 80_000
 
 
-def test_no_nan_gradients_on_digital_silence(cfg):
+@pytest.mark.parametrize("bottleneck", ["rnn", "conv", "hybrid"])
+def test_no_nan_gradients_on_digital_silence(cfg, bottleneck):
     """Regression: the consistency term used to NaN the whole model.
 
     Real VBD utterances contain EXACT digital silence, so the STFT of the model's
@@ -162,8 +163,13 @@ def test_no_nan_gradients_on_digital_silence(cfg):
 
     Note this must stay a *gradient* check: asserting finite loss values passes
     even on the broken version.
+
+    Parametrized over every bottleneck (including the hybrid conv-freq/GRU-time
+    one) because the hazard lives in the STFT round trip, not the bottleneck —
+    so a new bottleneck must not be assumed safe.
     """
     torch.manual_seed(0)
+    cfg = AttrDict({**cfg, "bottleneck": bottleneck})
     model = build_lisennet(cfg)
 
     clean = torch.randn(2, 32000) * 0.1
@@ -183,5 +189,5 @@ def test_no_nan_gradients_on_digital_silence(cfg):
                if p.grad is not None and not torch.isfinite(p.grad).all()]
         assert not bad, (
             f"'{name}' term produced non-finite gradients on digitally-silent audio "
-            f"({len(bad)} params, e.g. {bad[0]})"
+            f"with bottleneck={bottleneck} ({len(bad)} params, e.g. {bad[0]})"
         )

@@ -43,6 +43,7 @@ from rich.progress import track
 from common.dataset import load_voicebank_demand
 from common.env import AttrDict
 from common.metrics import eval_pesq
+from common.quality import QualitySuite, resolve_metrics
 
 
 # ----- session + state plumbing ---------------------------------------------
@@ -253,7 +254,14 @@ def main():
                         help="TB log directory; if unset, no TB writes.")
     parser.add_argument("--max_utterances", type=int, default=None,
                         help="Optional slice for fast smoke iteration.")
+    parser.add_argument("--metrics", default="none",
+                        help="Extra perceptual metrics on top of PESQ: "
+                             "'all' | 'none' | e.g. 'dnsmos,nisqa,scoreq'. "
+                             "Off by default -- DNSMOS alone costs ~4 min on the full split.")
+    parser.add_argument("--metrics_json", default=None,
+                        help="Write the extra metrics' means to this JSON path")
     a = parser.parse_args()
+    extra_metrics = resolve_metrics(a.metrics)
 
     # Sibling config.json
     parent_dir = Path(a.checkpoint_file).parent
@@ -283,6 +291,9 @@ def main():
 
     os.makedirs(a.output_dir, exist_ok=True)
     pesq_primary, pesq_fp32, deltas, rtfs = [], [], [], []
+    # Only retained when --metrics is on: the learned MOS metrics are far cheaper
+    # scored in one batched pass at the end than per-utterance inside this loop.
+    refs, ests_primary, ests_fp32 = [], [], []
 
     if a.input_noisy_wavs_dir:
         import librosa
@@ -333,6 +344,11 @@ def main():
             print(line)
             pesq_primary.append(p_pri)
             rtfs.append(rtf)
+            if extra_metrics:
+                refs.append(clean_wav)
+                ests_primary.append(primary_audio)
+                if dual:
+                    ests_fp32.append(fp32_audio)
             sf.write(
                 os.path.join(a.output_dir, item["id"] + ".wav"),
                 primary_audio, int(h.sampling_rate), "PCM_16",
@@ -353,6 +369,22 @@ def main():
             f"PESQ failures={n_fail}"
         )
     print(summary)
+
+    # Extra perceptual metrics (opt-in; the PESQ summary above is unchanged).
+    if extra_metrics and refs:
+        suite = QualitySuite(metrics=extra_metrics, sr=int(h.sampling_rate))
+        conds = [("primary", ests_primary)] + ([("fp32", ests_fp32)] if dual else [])
+        means_by_cond = {}
+        for cond, ests in conds:
+            means = QualitySuite.summarize(suite.score(ests, refs))
+            means_by_cond[cond] = means
+            print(f"Mean [{cond}]: "
+                  + ", ".join(f"{k}={v:.3f}" for k, v in means.items()))
+        if a.metrics_json:
+            with open(a.metrics_json, "w") as f:
+                json.dump({"n_utts": len(refs), "metrics": list(extra_metrics),
+                           "means": means_by_cond}, f, indent=2)
+            print(f"wrote {a.metrics_json}")
 
     if a.log_dir:
         from torch.utils.tensorboard import SummaryWriter

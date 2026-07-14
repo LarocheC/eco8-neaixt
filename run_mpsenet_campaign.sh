@@ -47,13 +47,20 @@ cd "$(dirname "$0")"
 # ---------------------------------------------------------------------------
 
 # LiSenNet — objective REALLY changed (gained the time + consistency terms).
-# nc24 is the current deploy winner; nc24_s2 is the same recipe at a different
+# nc24 is the round-1 deploy winner; nc24_s2 is the same recipe at a different
 # seed and is what tells you the run-to-run noise floor — without it you cannot
 # tell a real loss-driven PESQ gain from variance. Keep it.
+#
+# The two lisennet_hybrid_* runs are the hybrid-bottleneck ablations (conv on
+# frequency, GRU on time). Each is a single-variable swap against the conv model
+# of the same name, so train the pair together or the comparison is meaningless:
+#   lisennet_hybrid_nc24             vs lisennet_conv_hardened_nc24
+#   lisennet_hybrid_nc24_deep_relu6  vs lisennet_conv_hardened_nc24_deep_relu6
 LISENNET_RUNS="lisennet lisennet_conv lisennet_conv_wide lisennet_conv_hardened
                lisennet_conv_hardened_nc24 lisennet_conv_hardened_nc28
                lisennet_conv_hardened_nc24_deep lisennet_conv_hardened_nc24_deep_relu6
-               lisennet_conv_hardened_nc24_dil16 lisennet_conv_hardened_nc24_s2"
+               lisennet_conv_hardened_nc24_dil16 lisennet_conv_hardened_nc24_s2
+               lisennet_hybrid_nc24 lisennet_hybrid_nc24_deep_relu6"
 
 # ConvFSENet — objective REALLY changed (DynCompMSE fully replaced).
 #   convfsenet_win           192/384, n_fft 512 — the deployed backbone
