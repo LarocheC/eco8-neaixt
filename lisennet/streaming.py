@@ -39,14 +39,16 @@ import torch
 from torch import nn
 
 from lisennet.model import (
-    ConvolutionalGLU, DSConv, DualPathRNN, LiSenNet, MaskDecoder, _CausalTimeConv,
+    ConvolutionalGLU, DSConv, DualPathRNN, LiSenNet, MaskDecoder, TimeGRU, _CausalTimeConv,
 )
 
-# The modules that carry temporal state in streaming mode. ``DualPathRNN`` (the
-# RNN bottleneck) carries a GRU hidden state; ``_CausalTimeConv`` (the conv
-# bottleneck's inter-time layer) carries a FIFO ring buffer — only one of the two
-# is present depending on the model's ``bottleneck``.
-_STREAM_MODULES = (DSConv, ConvolutionalGLU, DualPathRNN, MaskDecoder, _CausalTimeConv)
+# The modules that carry temporal state in streaming mode. Which of the three
+# bottleneck-specific ones is present depends on the model's ``bottleneck``:
+# ``DualPathRNN`` (rnn) carries a GRU hidden state internally; ``_CausalTimeConv``
+# (conv) carries a FIFO ring buffer of past activations; ``TimeGRU`` (hybrid)
+# carries a GRU hidden state as an explicit ``(b, H, 1, f)`` tensor. The encoder /
+# GLU / decoder causal convs always carry FIFOs.
+_STREAM_MODULES = (DSConv, ConvolutionalGLU, DualPathRNN, MaskDecoder, _CausalTimeConv, TimeGRU)
 
 
 def enable_streaming(model: LiSenNet) -> None:
@@ -166,26 +168,37 @@ class LiSenNetStreamingONNX(nn.Module):
       * each state    : the FIFO buffer of one causal conv, a *static* shape (only
         the batch axis is dynamic) — Neural-ART wants fixed state shapes.
 
-    This works with the conv bottleneck (``bottleneck="conv"``); the RNN
-    bottleneck carries a GRU hidden state instead of conv FIFOs and is not the
-    NPU target, so it is rejected here.
+    Works with the two NPU-deployable bottlenecks, whose state slots differ in kind
+    but not in contract:
+
+      * ``bottleneck="conv"``  — every slot is a conv FIFO of past activations.
+      * ``bottleneck="hybrid"`` — the same FIFOs, plus one ``(B, H, 1, F)`` GRU
+        hidden state per DPR block (:class:`~lisennet.model.TimeGRU`). It streams
+        through the identical mechanism: a state tensor in, a state tensor out. The
+        hidden state is *smaller* than the FIFO stack it replaces and its lookback is
+        unbounded — the trade this variant exists to measure.
+
+    The faithful ``bottleneck="rnn"`` model is rejected: its intra path is a GRU over
+    *frequency* whose ``(b,t,f,d) -> (b*t,f,d)`` reshape the Neural-ART compiler
+    cannot interpret, so it is not an NPU streaming target at all.
     """
 
-    # Modules and the buffer attribute(s) each one carries, in a fixed order.
+    # Modules and the state attribute(s) each one carries, in a fixed order.
     _SLOT_ATTRS = {
         DSConv: ("_buf_low", "_buf_high"),
         ConvolutionalGLU: ("_buf",),
         _CausalTimeConv: ("_buf",),
+        TimeGRU: ("_h",),
         MaskDecoder: ("_buf",),
     }
 
     def __init__(self, model: LiSenNet):
         super().__init__()
-        if getattr(model, "bottleneck", "rnn") != "conv":
+        if getattr(model, "bottleneck", "rnn") not in ("conv", "hybrid"):
             raise ValueError(
-                "LiSenNetStreamingONNX requires bottleneck='conv' (the NPU variant); "
-                f"got {getattr(model, 'bottleneck', 'rnn')!r}. The RNN bottleneck's GRU "
-                "hidden state is not a conv FIFO and does not map to the NPU."
+                "LiSenNetStreamingONNX requires bottleneck='conv' or 'hybrid' (the NPU "
+                f"variants); got {getattr(model, 'bottleneck', 'rnn')!r}. The faithful RNN "
+                "bottleneck's intra-frequency GRU reshape does not map to the NPU."
             )
         if any(isinstance(m, DualPathRNN) for m in model.modules()):
             raise ValueError("model still contains a DualPathRNN — not an NPU streaming target")
