@@ -359,36 +359,52 @@ as `Conv / Add / Sigmoid / Tanh / Mul` on 4-D tensors. It is the same `feat + st
 → est_mag + state_i_out` contract as the conv variant, so it deploys through the same
 toolchain — the GRU hidden state is just another state tensor.
 
-### What it costs to stream (measured; PESQ pending)
+### On silicon — the GRU beats the FIFO by 1.5–2.2× at matched params (2026-07-14)
 
-At matched parameters, on the deployable streaming graph:
+All four streaming int8 graphs compiled (`stedgeai` 4.0.1, `n6-noextmem`) and were
+measured on the STM32N6570-DK in one session. **The two conv rows are re-measurements
+of the trained deploy models and reproduce their published latencies** (2.787 vs
+2.791; 4.823 vs 4.83), which is what makes the two new rows trustworthy. The GRU
+models carry **re-initialized weights** — output is garbage, latency and the epoch
+profile are not (the ‡ convention already used above).
 
-| variant | params | RF | state tensors | state | ONNX nodes | ms/frame (CPU, 1 thr) |
-| ------- | -----: | --: | ---: | ---: | ---: | ---: |
-| conv nc24            | 36,288 |  68 | 17 | 226.5 kB | 642 | 2.70 |
-| **hybrid nc24**      | 36,384 |  ∞  | **11** | **51.0 kB** | **476** | **1.79** |
-| conv relu6-deep      | 46,248 | 196 | 25 | 616.5 kB | 931 | 4.42 |
-| **hybrid relu6-deep**| 45,600 |  ∞  | **13** | **66.0 kB** | **577** | **2.51** |
+| streaming int8 | params | RF | epochs (HW/hyb/SW) | MACC | activations | **ms/frame** | RTF |
+| -------------- | -----: | --: | :-- | ---: | ---: | ---: | ---: |
+| conv nc24            | 36,288 |  68 | 131 (74/51/6) | 1,299,086 | 146.6 KiB | 2.787 | 0.174 |
+| **GRU nc24** ‡       | 36,384 |  ∞  | **95** (65/**24**/6) | 1,285,838 | **39.9 KiB** | **1.822** | **0.114** |
+| conv relu6-deep      | 46,248 | 196 | 199 (116/77/6) | 1,677,197 | 307.1 KiB | 4.823 | 0.301 |
+| **GRU relu6-deep** ‡ | 45,600 |  ∞  | **117** (86/**25**/6) | 1,588,814 | **52.3 KiB** | **2.181** | **0.136** |
 
-* **Recurrence streams cheaper than the FIFO it replaces — 4.4–9.3× less state.**
-  This inverts the usual intuition. A conv+FIFO carries an *activation history*
-  (RF × C × F floats, and it grows with every extension of the receptive field); a
-  GRU carries a *compressed summary* (H × F floats, fixed) and its lookback is
-  unbounded. Buying context with dilations means buying state; buying it with
-  recurrence does not.
-* **It also deletes the ops that actually cost time on this chip.** The N6 streaming
-  graph is launch/state-bound, not compute-bound (see above: NPU idle ~74%, "epoch
-  count, not compute, sets the frame cost"). The hybrid drops 26–38% of the nodes and
-  most of the Slice/Concat/Pad state plumbing (53→37 Slice, 46→30 Concat, 20→12 Pad
-  on nc24) — precisely the overhead that sets the floor. On host CPU it is already
-  **1.5–1.8× faster per frame**; the on-board prediction is a real latency win, and
-  it is falsifiable.
+* **Recurrence is 1.53× (nc24) and 2.21× (relu6-deep) faster per frame, at matched
+  parameters and near-identical MACC** (within 1% / 5%). The GRU relu6-deep even beats
+  the *conv nc24* (2.181 vs 2.787 ms) while being the deeper, longer-context model.
+* **The win is overhead, not compute.** MACC barely moves, so none of it comes from
+  arithmetic. What collapses is the epoch count (131→95, 199→117) and specifically the
+  *hybrid* epochs — the state plumbing — 51→24 and 77→25. This is the direct
+  confirmation of the earlier finding that the streaming graph is launch/state-bound
+  (NPU idle ~74%): remove the state machinery and the frame cost falls with it.
+* **The GRU cell maps to hardware.** SW epochs stay at 6 in every variant — the same
+  three stride-3 encoder convs and the Gather layout ops that were always software.
+  None of the cell's `Sigmoid`/`Tanh`/`Mul`/`Sub` fell to the M55. Recurrence on this
+  NPU is not a compromise; it is native, once written as convolutions.
+* **Recurrence streams cheaper than the FIFO it replaces — 3.7–5.9× less activation
+  memory** (146.6→39.9 KiB, 307.1→52.3 KiB). This inverts the usual intuition. A
+  conv+FIFO holds an *activation history* (RF × C × F, growing with every extension of
+  the receptive field); a GRU holds a *compressed summary* (H × F, fixed) with
+  unbounded lookback. Buying context with dilations means buying state; buying it with
+  recurrence does not — which is why the gap *widens* with RF (1.53× at RF 68, 2.21×
+  at RF 196).
 * **The stateless windowed graph is not available to it, by construction.** A GRU has
   no finite receptive field, so no window reproduces the offline model — the windowed
-  export raises rather than silently shipping a truncated model. That is the honest
-  statement of the trade, and it is the one axis where conv+FIFO strictly wins: only a
-  finite RF can be recomputed statelessly. (Per the section below, that mode loses by
-  12–26× anyway, so it costs the hybrid nothing in practice.)
+  export raises rather than silently shipping a truncated model. That is the one axis
+  where conv+FIFO strictly wins: only a finite RF can be recomputed statelessly. (Per
+  the section below, that mode loses by 12–26× anyway, so it costs the GRU nothing.)
+
+Caveat on the rig: `n6_loader` hit transient gdb "Loading memories failed" faults on
+the conv relu6-deep model (3 attempts failed, a later attempt loaded first try and
+gave 4.823 ms). It is a flaky ST-LINK link, not a memory limit — but a measurement
+harness must never validate after a failed load, or it times whatever firmware is
+still resident. The measure script gates on "Start operation achieved successfully".
 
 **Quality is not yet measured** — both configs are ready to train
 (`configs/lisennet_hybrid_nc24.json`, `configs/lisennet_hybrid_nc24_deep_relu6.json`)
@@ -397,7 +413,9 @@ dilated FIFO at equal parameters, and how the GRU's `tanh`/`sigmoid` gates survi
 per-tensor int8 (the round-3 finding was that PTQ pain concentrates in *linear*
 paths, so a gated recurrence is not obviously worse — but it is not obviously better
 either, and the hidden state is a recursive quantization path with no ReLU to bound
-it). Until those runs land, the claims above are structural only.
+it). Until those runs land, **the claims above are about cost, not quality** — the GRU
+buys its 1.5–2.2× latency and 4–6× state reduction on an untrained network, and none
+of that is worth anything if PESQ regresses. That is the one number still missing.
 
 ```bash
 python -m lisennet.train --config configs/lisennet_hybrid_nc24.json \

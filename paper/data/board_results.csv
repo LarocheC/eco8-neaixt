@@ -12,3 +12,5 @@ deepstr,n6-noextmem,4.877,4.871,4.894,0.006,0.999999,OK
 deepwin,n6-allmems-O3,366.253,365.981,366.400,0.127,1.000000,OK
 nc24str,n6-noextmem,2.789,2.784,2.807,0.006,0.994097,OK
 nc24win,n6-allmems-O3,73.643,73.361,73.968,0.181,0.998285,OK
+grunc24str,n6-noextmem,1.822,1.819,1.834,0.004,DUMMY,OK
+grur6deepstr,n6-noextmem,2.181,2.177,2.195,0.005,DUMMY,OK
