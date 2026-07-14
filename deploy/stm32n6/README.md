@@ -18,7 +18,7 @@ iteration: every step is a non-interactive `make` target.
 > fastest (their <1 MB weights fit on-chip), then ConvFSENet; the dense GRU baseline runs
 > but is memory-bound (2.70 MB weights overflow on-chip RAM → RTF 1.43). NSNet2 dense needs
 > a `skip_optimization` re-quant to compile; the monarch variants need a conv-native rank-2
-> re-export (`host/export_monarch_npu.py`, any fully-monarch config). Full analysis — root
+> re-export (`host/export_blockdiag_npu.py`, any fully-monarch config). Full analysis — root
 > causes, the fixes, the deployed numbers, variant selection:
 > **[NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md)**.
 
