@@ -195,8 +195,11 @@ Three further swaps make every operator HW-mappable \emph{and}, as
 Sec.~\ref{ssec:quant} shows, quantization-friendly:
 (1)~\textbf{norm}: the per-frame two-axis LayerNorm becomes per-channel
 BatchNorm, which folds into the preceding convolution at export;
-(2)~\textbf{activation}: PReLU/Mish become ReLU6 --- a bounded, NPU-native
-clip that also caps every activation's dynamic range for the quantizer;
+(2)~\textbf{activation}: PReLU/Mish become ReLU6 --- a bounded clip that both
+caps every activation's dynamic range for the quantizer \emph{and} disappears
+at int8, since a $[0,6]$ clamp folds into the requantization range (the
+deployed graph contains no explicit activation op and no extra software epoch;
+Sec.~\ref{ssec:silicon});
 (3)~\textbf{upsampling}: the sub-pixel shuffle becomes a plain
 $1\times3$/stride-3 transposed convolution (4-D tensors only, $\sim$3$\times$
 fewer decoder MACs). Retrained from scratch with the unchanged CMGAN recipe,
@@ -299,8 +302,8 @@ compiler report and an on-device per-epoch profiler.
     \midrule
     ~+ dilation 16                     & 37.7\,k & 132 & 3.034 & 2.954 \\
     ~+ 3 blocks (deep)                 & 46.2\,k & 196 & 3.069 & 2.985 \\
-    \textbf{relu6-deep}                & 46.2\,k & 196 & \textbf{3.084} & \textbf{3.014} \\
-    \textbf{relu6-deep, hybrid dec.}   & 46.2\,k & 196 & 3.084 & \textbf{3.052} \\
+    \textbf{relu6-deep} (all-int8)     & 46.2\,k & 196 & \textbf{3.084} & \textbf{3.014} \\
+    \quad w/ FP32 decoder (hybrid)     & 46.2\,k & 196 & 3.084 & \textbf{3.052} \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -383,13 +386,17 @@ real-time on this chip. (Block~c is reported for completeness: at a 64-frame
 block the window amortizes to 1.15\,ms/frame, but 1.02\,s of algorithmic
 latency makes that a throughput mode, not a real-time one.)
 
-\textbf{The best offline recipe does not ship.} The hybrid decoder-FP32 graph
-(PESQ 3.052) compiles and runs, but its float decoder pulls 19 epochs onto the
-Cortex-M55 and needs 3.5\,MB of weights plus 12.3\,MB of activations: it
-measures \textbf{34\,ms per frame, RTF 2.1} --- $11\times$ the all-int8
-windowed graph and past the real-time budget. Sec.~\ref{ssec:quant}'s
-activation clipping recovers most of the same quality (3.014) \emph{inside}
-the budget; that, not the hybrid, is the deployable answer.
+\textbf{The FP32 \emph{decoder} is what fails to ship --- not ReLU6.} The
+all-int8 relu6-deep graph deploys with only 6 software epochs, the same as
+every other pure-int8 variant: ReLU6 folds into the quantization and adds
+nothing to the epoch count. It is the \emph{hybrid} recipe --- the one that
+leaves the decoder in FP32 for PESQ 3.052 --- that does not run: its float
+decoder pulls 19 epochs onto the Cortex-M55 and needs 3.5\,MB of weights plus
+12.3\,MB of activations, and it measures \textbf{34\,ms per frame, RTF 2.1}
+($11\times$ the all-int8 windowed graph, past the budget). The same quality
+knob without the float decoder --- Sec.~\ref{ssec:quant}'s activation clipping
+--- recovers most of it (3.014) \emph{inside} the budget; that, and not the
+FP32 decoder, is the deployable answer.
 
 \textbf{The frame cost is launch-bound, not compute-bound.} Per-epoch
 profiling of the 24-channel streaming graph shows the NPU core busy for only
