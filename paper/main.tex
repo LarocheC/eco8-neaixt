@@ -286,7 +286,11 @@ compiler report and an on-device per-epoch profiler.
   \centering
   \caption{VoiceBank-DEMAND quality ladder (full 824-utt test split). RT-int8
   = static int8 + noisy phase, the deployable configuration. RF in frames
-  (16\,ms hop).}
+  (16\,ms hop). The ``$+$'' rows are cumulative architecture changes on
+  ``hardened, 24\,ch'' ($+$\,dilation 16 adds one dilation stage;
+  $+$\,3 blocks adds a third dual-path block; relu6-deep swaps ReLU$\to$ReLU6
+  at the same shape) --- each is trained from scratch with the same recipe,
+  not warm-started from the row above.}
   \label{tab:quality}
   \small
   \begin{tabular}{@{}lrrcc@{}}
