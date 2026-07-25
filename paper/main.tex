@@ -368,73 +368,106 @@ best-quality real-time streaming enhancer on this board, ahead of ConvFSENet
 true one-hop latency. On-target outputs track the host int8 reference at
 cosine 0.998.
 
-\textbf{Deleting the FIFO is a trap --- and the numbers say why.} At the same
-16\,ms latency, the stateless RF-window (block~b) is \textbf{11.6--26$\times$
-slower} than streaming and misses real time for \emph{every} variant
-(RTF 1.9--8.0). This is not because the window maps badly --- the opposite. It
-uses the accelerator far \emph{better}: with no Slice/Concat state ops and a
-69--197-frame convolution extent, it sustains 2.2--3.1\,GMAC/s against
-streaming's 0.34--0.56, a $6\text{--}8\times$ higher utilization, confirming
-that the $T{=}1$ streaming graph is launch- and state-bound rather than
-compute-bound. But it must recompute the whole receptive field every frame:
-$70\times$ the MACs at RF~68, $200\times$ at RF~196. A $6\text{--}8\times$
-efficiency gain cannot pay a $70\text{--}200\times$ compute bill. Amortizing
-over an emit block restores real time only by re-introducing latency
-($T{\geq}3$, 48\,ms for 24\,ch; $T{\geq}9$, 144\,ms for relu6-deep) and even
-then runs at 11--15\,ms/frame --- still $3\text{--}5\times$ costlier than
-streaming, which needs no block at all. \emph{The FIFO graph dominates on both
-axes}, which is what makes the \texttt{Pad} export fix of
-Sec.~\ref{sec:background} the load-bearing step of this deployment: without
-it, the only NPU-mappable graph was the window, and this model would not be
-real-time on this chip. (Block~c is reported for completeness: at a 64-frame
-block the window amortizes to 1.15\,ms/frame, but 1.02\,s of algorithmic
-latency makes that a throughput mode, not a real-time one.)
+\textbf{Deleting the FIFO is a trap.} At the same 16\,ms latency, the stateless
+RF-window (block~b) is \textbf{11.6--26$\times$ slower} and misses real time for
+\emph{every} variant. Not because it maps badly --- the opposite: with no
+Slice/Concat state ops it sustains $6\text{--}8\times$ higher utilization
+(2.2--3.1 vs.\ 0.34--0.56\,GMAC/s), confirming the streaming graph is
+launch/state-bound. But it recomputes the whole receptive field every frame
+($70\times$ the MACs at RF~68, $200\times$ at RF~196), and that gain cannot pay
+that bill; amortizing (block~c) restores real time only by trading back
+latency. \emph{The FIFO dominates on both axes}, which is what makes the
+\texttt{Pad} export fix (Sec.~\ref{sec:background}) load-bearing: without it the
+only NPU-mappable graph was the window, and this model would not be real-time.
 
-\textbf{The FP32 \emph{decoder} is what fails to ship --- not ReLU6.} The
-all-int8 relu6-deep graph deploys with only 6 software epochs, the same as
-every other pure-int8 variant: ReLU6 folds into the quantization and adds
-nothing to the epoch count. It is the \emph{hybrid} recipe --- the one that
-leaves the decoder in FP32 for PESQ 3.052 --- that does not run: its float
-decoder pulls 19 epochs onto the Cortex-M55 and needs 3.5\,MB of weights plus
-12.3\,MB of activations, and it measures \textbf{34\,ms per frame, RTF 2.1}
-($11\times$ the all-int8 windowed graph, past the budget). The same quality
-knob without the float decoder --- Sec.~\ref{ssec:quant}'s activation clipping
---- recovers most of it (3.014) \emph{inside} the budget; that, and not the
-FP32 decoder, is the deployable answer.
+\textbf{The FP32 \emph{decoder} is what fails to ship --- not ReLU6}, which
+folds into the quantization for free (6 software epochs, like every pure-int8
+variant). The \emph{hybrid} recipe (FP32 decoder, PESQ 3.052) is the one that
+does not run: its float decoder pulls 19 epochs onto the Cortex-M55 and
+measures \textbf{34\,ms/frame, RTF 2.1} --- past the budget.
+Sec.~\ref{ssec:quant}'s activation clipping recovers most of that quality
+(3.014) \emph{inside} it, and is the deployable answer.
 
 \textbf{The frame cost is launch-bound, not compute-bound.} Per-epoch
 profiling of the 24-channel streaming graph shows the NPU core busy for only
-0.72\,ms of 2.79\,ms (26\%); the floor is the distributed launch and
-state-plumbing overhead of its 131 epochs --- the same regime as the
-ConvFSENet baseline, and the reason the windowed graphs, with fewer and fatter
-epochs, amortize so much better. Re-measuring the 24-channel rows eleven days
-apart reproduced 2.789 vs.\ 2.791\,ms and 73.64 vs.\ 73.63\,ms, so the
-comparisons above are well inside run-to-run noise.
+0.72\,ms of 2.79\,ms (26\%); the floor is the launch and state-plumbing
+overhead of its 131 epochs --- the same regime as the ConvFSENet baseline, and
+why the windowed graphs amortize better. (Re-measuring the 24-channel rows
+eleven days apart reproduced 2.789 vs.\ 2.791\,ms, so the comparisons are
+inside run-to-run noise.)
+
+\subsection{Should the time axis be a convolution at all?}
+\label{ssec:recurrence}
+
+We replaced \emph{both} GRUs with convolutions, but only the intra-frequency
+one is uncontroversial (bidirectional over an axis fully available per frame).
+The inter-time conv instead approximates recurrence's unbounded memory with a
+dilated FIFO. A \emph{hybrid} bottleneck --- conv on frequency, GRU on time ---
+isolates that single choice at matched parameters (Table~\ref{tab:recurrence}).
+Recurrence is not un-deployable: at $t{=}1$ a GRU step is a set of $1\times1$
+convolutions with the hidden state as one more state tensor, so it exports with
+\emph{zero} GRU ops, maps to hardware (6 software epochs, like every variant),
+and runs \textbf{1.5--2.2$\times$ faster with 4--6$\times$ less state} than the
+FIFO --- state machinery, not arithmetic, is the streaming graph's cost.
+
+\begin{table}[t]
+  \centering
+  \caption{Recurrence vs.\ convolution on the \emph{time} axis, at matched
+  parameters (conv-on-frequency held fixed). Streaming int8, on the
+  STM32N6570-DK; PESQ on the full test split. GRU rows have $\mathrm{RF}=\infty$.}
+  \label{tab:recurrence}
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}llrrrr@{}}
+    \toprule
+    time mixer & RF & ms/frame & state & FP32 & int8 \\
+    \midrule
+    conv (FIFO), nc24     &  68 & 2.79 & 147\,KiB & \textbf{3.013} & \textbf{2.963} \\
+    \textbf{GRU}, nc24     & $\infty$ & \textbf{1.82} & \textbf{40\,KiB} & 2.953 & 2.867 \\
+    \midrule
+    conv (FIFO), deep     & 196 & 4.82 & 307\,KiB & \textbf{3.084} & \textbf{3.013} \\
+    \textbf{GRU}, deep     & $\infty$ & \textbf{2.18} & \textbf{52\,KiB} & 3.073 & 2.975 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The quality trade is \emph{receptive-field-dependent}, which is the point. At
+RF~68 the GRU loses (Table~\ref{tab:recurrence}): 68 frames of bounded context
+already suffice, and its recursive $\tanh/\sigma$ state --- unbounded, with no
+ReLU to clamp it --- quantizes far worse (PTQ drop $-0.104$ vs.\ the conv's
+$-0.015$, the Sec.~\ref{ssec:quant} effect on a recurrence). At RF~196 the gap
+essentially closes: the FP32 $-0.011$ is within the seed noise of
+Sec.~\ref{ssec:quality} and the int8 drop is now comparable, not $7\times$
+worse --- unbounded recurrence becomes competitive exactly where the FIFO
+spends the most state to fake it. What the conv keeps at every RF is a
+\emph{certifiable} recovery guarantee: its state \emph{is} the last
+$\mathrm{RF}$ inputs, so after a glitch two streams re-converge to identical
+output within $\mathrm{RF}$ frames (measured: 68, 196) --- a bound the IIR GRU
+cannot offer. The honest summary is \emph{efficiency vs.\ certifiability}:
+convolution is the safe default we ship; recurrence-on-time is the better bet
+at long receptive fields, matching quality at half the latency and a sixth of
+the state, where the recovery guarantee can be forgone.
 
 % ===========================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
-We turned a GRU-centric lightweight enhancer into an NPU-native one and
-showed the redesign is not a compromise: the convolutional dual-path
-bottleneck matches the recurrent original in FP32, the hardening that the
-hardware demands is precisely what makes int8 quantization nearly free, and
-the one place quantization still hurts --- the linear decoder --- can be
-diagnosed with a seeded selective-quantization scan and repaired by
-activation clipping --- the one repair that stays inside the latency budget,
-where a float decoder does not. Measuring both causal-context strategies at
-equal latency also overturns an intuition: deleting the FIFO state buys a
-$6\text{--}8\times$ better-utilized accelerator and still loses by
-$12\text{--}26\times$, because recomputing a 68--196-frame receptive field
-every frame is simply a bigger bill than the state plumbing it removes. The
-deployed model streams frame-by-frame with 16\,ms algorithmic latency at
-real-time factor 0.30 on a microcontroller NPU while \emph{exceeding} the
-quality of the CPU-oriented original's deployable configuration by $+0.083$
-PESQ. We believe the recipe
---- re-express recurrence as bounded-context convolution, harden primitives
-for the int8 vocabulary, and treat quantization robustness as an
-architecture-design criterion rather than an afterthought --- transfers
-beyond this model and this accelerator.
+We turned a GRU-centric lightweight enhancer into an NPU-native one and showed
+the redesign is not a compromise: the convolutional dual-path bottleneck
+matches the recurrent original in FP32, the hardening the hardware demands is
+what makes int8 nearly free, and the one place quantization still hurts --- the
+linear decoder --- is diagnosable and repairable with activation clipping
+inside the latency budget, where a float decoder is not. The deployed model
+streams frame-by-frame at 16\,ms latency, real-time factor 0.30, while
+\emph{exceeding} the CPU-oriented original's deployable quality by $+0.083$
+PESQ. Along the way, two comparisons at equal latency map the design space:
+recompute-in-a-window loses to explicit state by $12\text{--}26\times$, while
+recurrence-on-time (once written as convolutions) \emph{beats} the conv+FIFO
+on efficiency and ties it on quality at long receptive fields --- state, not
+recompute, and a compressed state at that, is what makes this class of model
+real-time. We believe the recipe --- re-express recurrence as NPU-native ops,
+harden primitives for the int8 vocabulary, and treat quantization robustness
+as a design criterion --- transfers beyond this model and accelerator.
 
 % ===========================================================================
 \vfill\pagebreak
