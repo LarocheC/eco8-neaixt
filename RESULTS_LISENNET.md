@@ -406,16 +406,39 @@ gave 4.823 ms). It is a flaky ST-LINK link, not a memory limit — but a measure
 harness must never validate after a failed load, or it times whatever firmware is
 still resident. The measure script gates on "Start operation achieved successfully".
 
-**Quality is not yet measured** — both configs are ready to train
-(`configs/lisennet_hybrid_nc24.json`, `configs/lisennet_hybrid_nc24_deep_relu6.json`)
-and the open question is whether unbounded recurrent context beats a 68- or 196-frame
-dilated FIFO at equal parameters, and how the GRU's `tanh`/`sigmoid` gates survive
-per-tensor int8 (the round-3 finding was that PTQ pain concentrates in *linear*
-paths, so a gated recurrence is not obviously worse — but it is not obviously better
-either, and the hidden state is a recursive quantization path with no ReLU to bound
-it). Until those runs land, **the claims above are about cost, not quality** — the GRU
-buys its 1.5–2.2× latency and 4–6× state reduction on an untrained network, and none
-of that is worth anything if PESQ regresses. That is the one number still missing.
+**Quality — measured (2026-07-25, both trained to matched epoch budgets:
+nc24 100 ep, deep 140 ep). The hypothesis holds: the GRU's disadvantage is
+real at short RF and essentially vanishes at long RF.**
+
+| model (matched params) | FP32 | RT-int8 | streaming int8 | PTQ drop |
+| ---------------------- | ---: | ------: | -------------: | -------: |
+| conv nc24 (RF 68)          | 3.013 | 2.998 | 2.963 | −0.015 |
+| **GRU nc24** (RF ∞)        | 2.953 | 2.849 | 2.867 | −0.104 |
+| conv relu6-deep (RF 196)   | 3.084 | 3.014 | 3.013 | −0.070 |
+| **GRU relu6-deep** (RF ∞)  | 3.073 | 2.991 | 2.975 | −0.082 |
+
+* **At RF 68 the GRU loses on quality** — FP32 −0.060, real-time int8 −0.149.
+  Two causes: unbounded context does not help when 68 frames already suffice
+  (the conv trains to a better FP32 optimum), and the GRU's recursive
+  `tanh`/`sigmoid` state quantizes far worse (PTQ drop −0.104 vs the conv's
+  −0.015, ~7×) — the round-3 "linear-path" worry, realized on the recurrence.
+* **At RF 196 the gap essentially closes.** FP32 3.073 vs 3.084 is **−0.011**,
+  within the ±0.004–0.02 seed noise this study already reports — a statistical
+  tie. Real-time int8 trails by only −0.023, streaming by −0.038, and the PTQ
+  drop (−0.082) is now comparable to the conv's (−0.070), not 7× worse. As
+  predicted, unbounded recurrent context becomes competitive exactly where the
+  conv+FIFO must spend the most state (196 frames) to fake it.
+* **Net at depth: the GRU matches conv quality in FP32 and trails ~0.04 at
+  int8, while running 2.21× faster (2.18 vs 4.82 ms) with 6× less state (52 vs
+  307 KiB)** — and giving up only the FIFO's certifiable bounded-time recovery.
+  The efficiency win now comes at a near-zero quality cost. At RF 68 the same
+  swap is not worth it.
+
+So the honest, complete trade: **conv+FIFO is the safe default (best quality
+at any RF, certifiable recovery); recurrence-on-time is the better bet at long
+receptive fields, where it matches quality at half the latency and a sixth of
+the state.** Recompute-vs-FIFO (the window, earlier) loses on both axes;
+GRU-vs-FIFO wins on efficiency and ties on quality once the context is long.
 
 ```bash
 python -m lisennet.train --config configs/lisennet_hybrid_nc24.json \
