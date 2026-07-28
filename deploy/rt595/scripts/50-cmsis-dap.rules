@@ -1,5 +1,6 @@
-# NXP LPC-Link2 / CMSIS-DAP debug probe (VID 1fc9) — allow non-root access for pyocd.
+# NXP LPC-Link2 / CMSIS-DAP debug probe (VID 1fc9) — non-root access for pyocd.
+# MODE:= is immutable so later default rules (50-udev-default) cannot reset it to 0664.
 # Install: sudo cp deploy/rt595/scripts/50-cmsis-dap.rules /etc/udev/rules.d/ &&
 #          sudo udevadm control --reload && sudo udevadm trigger
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", MODE="0666"
-KERNEL=="hidraw*", ATTRS{idVendor}=="1fc9", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1fc9", GROUP="plugdev", MODE:="0666"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1fc9", GROUP="plugdev", MODE:="0666"

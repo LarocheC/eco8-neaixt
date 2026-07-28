@@ -59,3 +59,23 @@ deploy/rt595/sdk
 deploy/rt595/build/
 deploy/rt595/host_out/
 deploy/rt595/host/__pycache__/
+
+# RT595: TFLM source tree + built lib (regenerable: deploy/rt595/tflm/build_rt500.sh)
+deploy/rt595/tflm/tflite-micro/
+deploy/rt595/tflm/*.a
+# RT595: ISS scratch builds
+deploy/rt595/iss/work/
+deploy/rt595/iss/**/*.elf
+deploy/rt595/iss/**/*.o
+
+# Cadence licence — node-locked to one MAC, expires 2027-07-28. Obtain per deploy/rt595/tflm/README.md
+RT500SDK.lic
+# Vendor installers / core tarballs (large, fetched from NXP + Cadence)
+LinkServer_*.deb.bin
+nxp_rt500_*_linux.tgz
+
+# Benchmark outputs: 5.6 GB of enhanced audio + HF caches, regenerable.
+# The distilled per-run summaries are committed as benchmarks/baselines.json.
+benchmarks/out/
+benchmarks/smoke/
+benchmarks/__pycache__/
