@@ -125,7 +125,19 @@ def main():
     ap.add_argument("--checkpoint_file", required=True)
     ap.add_argument("--output", required=True, help="output stem (no extension)")
     ap.add_argument("--int8", action="store_true")
-    ap.add_argument("--calib_frames", type=int, default=64)
+    ap.add_argument("--calib", choices=("vbd", "flowtest"), default="vbd",
+                    help="vbd = real VoiceBank-DEMAND speech with propagated state "
+                         "(default, quality-valid). flowtest = synthetic noise; produces a "
+                         "deliberately NON-quality-valid artifact (default: %(default)s)")
+    ap.add_argument("--calib_utts", type=int, default=8)
+    ap.add_argument("--calib_frames", type=int, default=256)
+    ap.add_argument("--calib_warmup", type=int, default=0,
+                    help="skip N frames per utterance before recording (cold start IS a real "
+                         "operating condition, so the default keeps them)")
+    ap.add_argument("--calib_seed", type=int, default=0)
+    ap.add_argument("--calib_split", default="train",
+                    help="never 'test' for a model you intend to score (default: %(default)s)")
+    ap.add_argument("--vbd_path", default=None, help="override the HF datasets cache dir")
     ap.add_argument("--repo", default=str(REPO_ROOT))
     a = ap.parse_args()
 
@@ -155,26 +167,45 @@ def main():
     if not a.int8:
         return
 
+    import json
     from ai_edge_quantizer import quantizer, recipe
+    from streaming_calib import (build_calibration_samples, build_flowtest_samples,
+                                 CalibrationUnavailable)
 
-    # Random-frame representative data — valid scales, realistic shapes (see module docstring).
-    rng = np.random.default_rng(0)
-    samples = []
-    for _ in range(a.calib_frames):
-        smp = {}
-        for nm, t in zip(in_names, args):
-            arr = t.detach().numpy().astype(np.float32)
-            if nm == in_names[0]:                       # jitter the feature input only
-                arr = (rng.standard_normal(arr.shape) * 0.5).astype(np.float32)
-            smp[nm] = arr
-        samples.append(smp)
-    print(f"  calibrating on {len(samples)} random frames (flow-test int8)")
+    # Real speech with PROPAGATED STATE. Calibrating the state ports on their
+    # init_states() zeros is what collapsed their scales onto the quantizer floor and
+    # left the recurrence numerically dead — see streaming_calib.py. There is
+    # deliberately NO fallback here: bad calibration must fail loudly, not silently
+    # produce an artifact that benchmarks perfectly and enhances nothing.
+    if a.calib == "vbd":
+        samples, stats = build_calibration_samples(
+            a.model, a.checkpoint_file, view, args, in_names, patch_ctx,
+            n_utts=a.calib_utts, max_frames=a.calib_frames, warmup=a.calib_warmup,
+            seed=a.calib_seed, split=a.calib_split, cache_dir=a.vbd_path)
+        print(f"  calibrating on {len(samples)} frames from {stats['n_utts']} "
+              f"VoiceBank-DEMAND[{stats['split']}] utterances, with propagated state")
+        worst = min(s["std"] for s in stats["per_state"])
+        print(f"  state activation: {len(stats['per_state'])} ports, "
+              f"smallest per-port std {worst:.3e}")
+    else:
+        samples, stats = build_flowtest_samples(
+            view, args, in_names, patch_ctx, n_frames=a.calib_frames, seed=a.calib_seed)
+        print("  " + "!" * 68)
+        print(f"  !! FLOW TEST: {len(samples)} synthetic noise frames. The result is NOT")
+        print("  !! quality-valid and must never populate a PESQ/quality column.")
+        print("  " + "!" * 68)
 
     q = quantizer.Quantizer(str(fp32_path), recipe.static_wi8_ai8())
     calib = q.calibrate({"serving_default": samples}) if q.need_calibration else None
     result = q.quantize(calib)
     result.export_model(str(int8_path))
+
+    sidecar = int8_path.with_suffix(".calib.json")
+    stats["artifact"] = str(int8_path)
+    stats["artifact_bytes"] = int8_path.stat().st_size
+    sidecar.write_text(json.dumps(stats, indent=2) + "\n")
     print(f"Wrote {int8_path}  ({int8_path.stat().st_size/1024:.1f} KiB, int8 w8/a8)")
+    print(f"Wrote {sidecar}  (calibration provenance)")
 
 
 if __name__ == "__main__":
