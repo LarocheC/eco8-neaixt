@@ -1,20 +1,23 @@
 /*
- * TFLite-Micro op resolver for the LiSenNet streaming SE model.
- * The exact op set of the int8 graph (from `pyocd`-free host inspection of the
- * .tflite): ADD, CONCATENATION, CONV_2D, DEPTHWISE_CONV_2D, LOGISTIC, MUL, PAD,
- * QUANTIZE, RESHAPE, SLICE, SUB, TANH, TRANSPOSE, TRANSPOSE_CONV. Keep this list in
- * sync if the exported graph's ops change (gen_io_layout.py prints them).
+ * TFLite-Micro op resolver for the SPARSE (blockdiag) NSNet2 streaming model.
+ *
+ * The structured-linear variants do NOT lower to FULLY_CONNECTED like the dense
+ * model. torch_structured's BlockdiagLinear becomes BATCH_MATMUL surrounded by
+ * RESHAPE/TRANSPOSE (the block-permute), so the op set is materially different:
+ * dense = 50 nodes / 16 FULLY_CONNECTED, blockdiag_full = 76 nodes / 8 BATCH_MATMUL
+ * + 19 RESHAPE + 15 SLICE.
+ *
+ * Op set from the flatbuffer histogram of nsnet2_blockdiagfull_streaming.tflite.
  */
 #include "tensorflow/lite/micro/kernels/micro_ops.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 
 extern "C" tflite::MicroOpResolver &MODEL_GetOpsResolver(void)
 {
-    static tflite::MicroMutableOpResolver<14> s_resolver;
+    static tflite::MicroMutableOpResolver<11> s_resolver;
     s_resolver.AddAdd();
+    s_resolver.AddBatchMatMul();
     s_resolver.AddConcatenation();
-    s_resolver.AddConv2D();
-    s_resolver.AddDepthwiseConv2D();
     s_resolver.AddLogistic();
     s_resolver.AddMul();
     s_resolver.AddPad();
@@ -23,7 +26,5 @@ extern "C" tflite::MicroOpResolver &MODEL_GetOpsResolver(void)
     s_resolver.AddSlice();
     s_resolver.AddSub();
     s_resolver.AddTanh();
-    s_resolver.AddTranspose();
-    s_resolver.AddTransposeConv();
     return s_resolver;
 }
