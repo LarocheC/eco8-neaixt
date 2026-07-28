@@ -1,0 +1,24 @@
+# Bench build (M33 target) — measures M33-local vs HiFi4-offloaded, one firmware.
+#
+# It's the current M33 build with main.cpp swapped for bench_main.cpp and both backends
+# added. It links the M33-local int8 driver (model_se_stream.cpp — the "without HiFi4"
+# path) AND the DSP RPC (se_remote.cpp — the "with HiFi4" path). It does NOT link
+# se_remote_alias.c (that would collide with model_se_stream.cpp on SE_*).
+#
+# M33 sources for the bench target:
+#   dsp_offload/bench/bench_main.cpp          # driver (replaces app/main.cpp)
+#   dsp_offload/bench/se_backend_m33.cpp      # vtable -> local SE_*
+#   dsp_offload/bench/se_backend_hifi4.cpp    # vtable -> se_dsp_*
+#   app/model_se_stream.cpp                   # M33-local int8 inference (SE_*)
+#   app/model_ops_micro.cpp                   # op resolver
+#   app/model_data.h  app/model_io_layout.h   # INT8 export (regenerate — see README step 1)
+#   dsp_offload/cm33/se_remote.cpp            # DSP RPC core (se_dsp_*)
+#   dsp_offload/cm33/dsp_boot.c               # DSP_Boot() + g_se_ipc
+#   app/se_test_feats.h                       # baked frames
+#   (do NOT add: app/main.cpp, cm33/se_remote_alias.c)
+#
+# Include dirs: dsp_offload/  dsp_offload/bench/  dsp_offload/cm33/  app/
+#
+# The DSP target is built exactly as in README_DSP_OFFLOAD.md; pack both into an MPI.
+# Before the DSP image exists, the bench still builds and runs — the HiFi4 backend simply
+# reports "unavailable" and you get the M33 int8 baseline on its own.
