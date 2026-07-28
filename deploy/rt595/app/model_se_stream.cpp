@@ -35,6 +35,77 @@ static inline int8_t quant_i8(float x, float scale, int zp)
     return (int8_t)q;
 }
 
+/* Reject an export whose recurrent state is numerically dead.
+ *
+ * ai-edge-quantizer gives state_in and state_out independent scales. When the
+ * calibration never exercised a state port, its input scale collapses onto the
+ * calibrator floor (~3.92e-12 in practice). An int8 tensor with that scale spans
+ * about +/-5e-10, so EVERY real state value saturates to one code: the recurrence
+ * silently stops carrying information and the model runs as if it were stateless.
+ * It still executes, still produces plausible output, and still benchmarks at
+ * exactly the same cycle count -- the loop is data-independent -- so nothing
+ * downstream notices. Observed on ConvFSENet (9/9 states) and NSNet2 (1/1);
+ * LiSenNet relu6-deep is clean (0/25).
+ *
+ * The driver cannot repair a garbage scale, so it refuses to run on one. Define
+ * SE_ALLOW_DEAD_STATE=1 to measure cycles anyway -- the timing is still valid,
+ * the enhancement is not. */
+/* Max Q16 ratio the 32-bit requant loop can evaluate without overflow.
+ *
+ * The loop computes (d * ratio) + 32768 in int32, where d = sout - out_zp is
+ * bounded by +/-255 (both are int8). So ratio must satisfy
+ *     255 * ratio + 32768 <= INT32_MAX   ->   ratio <= 8,421,313
+ * We use 8,000,000 (a Q16 gain of ~122x) for margin. This is not a limitation in
+ * practice: a healthy recurrence has in_scale ~= out_scale, i.e. a gain near 1.0
+ * (ratio ~65536). A gain of 122x already means the state input can only represent
+ * 1/122 of the range the state output produces -- pathological well before the
+ * arithmetic limit. Validating this ONCE in SE_CheckStateScales is what lets the
+ * per-element loop stay 32-bit; making the loop 64-bit instead cost +35% on
+ * LiSenNet (8,902,092 -> 12,002,304 cyc/frame), which is not a price worth paying
+ * to keep undefined behaviour well-defined. */
+#ifndef SE_STATE_RATIO_MAX
+#define SE_STATE_RATIO_MAX (8000000.0)
+#endif
+
+static status_t SE_CheckStateScales(void)
+{
+    int dead = 0;
+    for (int k = 0; k < MODEL_N_STATES; k++)
+    {
+        const model_state_map_t *m = &MODEL_STATE_MAP[k];
+        if (m->memcpy_safe) continue;
+        if (!(m->in_scale > 0.0f) || !(m->out_scale > 0.0f))
+        {
+            PRINTF("state %d: non-positive scale (in %g out %g)\r\n",
+                   k, (double)m->in_scale, (double)m->out_scale);
+            dead++;
+            continue;
+        }
+        double ratio = (double)m->out_scale / (double)m->in_scale * 65536.0;
+        if (ratio > SE_STATE_RATIO_MAX)
+        {
+            PRINTF("state %2d: in_scale %g is collapsed vs out_scale %g (Q16 ratio %.3g)"
+                   " -- every state code saturates\r\n",
+                   k, (double)m->in_scale, (double)m->out_scale, ratio);
+            dead++;
+        }
+    }
+    if (dead == 0) return kStatus_Success;
+
+    PRINTF("\r\n*** %d/%d recurrent states are numerically DEAD ***\r\n"
+           "The int8 export's state input scales collapsed onto the calibration floor, so\r\n"
+           "the recurrence carries no information -- this model runs as if it were stateless.\r\n"
+           "Fix the export (calibrate with real propagated state), not the firmware.\r\n",
+           dead, (int)MODEL_N_STATES);
+#if SE_ALLOW_DEAD_STATE
+    PRINTF("SE_ALLOW_DEAD_STATE set: continuing. CYCLES ARE VALID, OUTPUT IS NOT.\r\n\r\n");
+    return kStatus_Success;
+#else
+    PRINTF("Refusing to run. Rebuild with -DSE_ALLOW_DEAD_STATE=1 to measure cycles anyway.\r\n\r\n");
+    return kStatus_Fail;
+#endif
+}
+
 status_t SE_Init(void)
 {
     const tflite::Model *model = tflite::GetModel(model_data);
@@ -67,6 +138,9 @@ status_t SE_Init(void)
     PRINTF("SE model: %u IO, %u states; arena used %u / %u B\r\n",
            (unsigned)MODEL_N_IO, (unsigned)MODEL_N_STATES,
            (unsigned)s_arenaUsed, (unsigned)SE_TENSOR_ARENA_SIZE);
+
+    if (SE_CheckStateScales() != kStatus_Success) return kStatus_Fail;
+
     SE_ResetStates();
     return kStatus_Success;
 }
@@ -142,8 +216,16 @@ status_t SE_ProcessFrame(const float *feat_in, float *mask_out)
              * The scale ratio is loop-invariant, so hoist it once into Q16 fixed point
              * and requantise with a multiply and a shift: 5 cyc/elem. Measured on the
              * ISS: LiSenNet 19,186,677 -> 8,902,092 (2.16x), ConvFSENet 3,640,203 ->
-             * 2,767,999 (1.32x), with bit-identical per-frame output checksums. */
-            const int ratio = (int)(m->out_scale / m->in_scale * 65536.0f + 0.5f);
+             * 2,767,999 (1.32x), with bit-identical per-frame output checksums.
+             *
+             * This stays 32-bit ONLY because SE_Init has already proved every ratio is
+             * <= SE_STATE_RATIO_MAX (see the note there). On an export whose state input
+             * scale collapsed to the calibrator floor (~3.9e-12) the ratio would be ~2.6e14,
+             * overflowing int32 and making this loop undefined behaviour -- silently pinning
+             * every state to one code and killing the recurrence while the cycle count and
+             * the output checksum both look entirely normal. SE_Init refuses such a model
+             * rather than letting this loop run on it. */
+            const int32_t ratio = (int32_t)(m->out_scale / m->in_scale * 65536.0f + 0.5f);
             for (int i = 0; i < m->count; i++)
             {
                 int q = (((((int)sout[i] - m->out_zp) * ratio) + 32768) >> 16) + m->in_zp;
