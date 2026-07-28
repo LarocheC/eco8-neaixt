@@ -79,3 +79,7 @@ nxp_rt500_*_linux.tgz
 benchmarks/out/
 benchmarks/smoke/
 benchmarks/__pycache__/
+
+# lane: pytest + accel-map cache
+deploy/rt595/lane/**/__pycache__/
+deploy/rt595/lane/.pytest_cache/
