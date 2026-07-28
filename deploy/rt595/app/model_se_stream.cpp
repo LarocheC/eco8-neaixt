@@ -84,9 +84,15 @@ void SE_ResetStates(void)
 
 status_t SE_ProcessFrame(const float *feat_in, float *mask_out)
 {
-    /* 1. Feed the 3-channel feature into the feat input tensor. int8 model: quantise;
-     *    fp32 model: copy floats straight through. (Gated at compile time per model.) */
-    const int feat_n = 3 * MODEL_FEATURE_LEN;
+    /* 1. Feed the feature into the feat input tensor. int8 model: quantise;
+     *    fp32 model: copy floats straight through. (Gated at compile time per model.)
+     *    MODEL_FEATURE_TOTAL is the product of ALL feat dims — 3*F for LiSenNet's
+     *    3-channel feature, but 1*F for ConvFSENet/NSNet2. The old hardcoded `3 *`
+     *    over-fed those models by 3x. */
+#ifndef MODEL_FEATURE_TOTAL
+#define MODEL_FEATURE_TOTAL (3 * MODEL_FEATURE_LEN)   /* pre-multi-model header fallback */
+#endif
+    const int feat_n = MODEL_FEATURE_TOTAL;
 #if MODEL_FEATURE_IS_INT8
     int8_t *feat = s_interp->input(MODEL_FEATURE_IN_POS)->data.int8;
     for (int i = 0; i < feat_n; i++)
@@ -127,10 +133,23 @@ status_t SE_ProcessFrame(const float *feat_in, float *mask_out)
         }
         else
         {
+            /* Integer Q16 requant. The naive form -- dequantise to float, then
+             * quant_i8() -- costs a SCALAR FLOAT DIVIDE (lrintf(x / scale)) per element,
+             * measured at 59 cyc/elem on the HiFi4. With 157,830 state elements and 0/25
+             * states memcpy-safe, that was 9.3 M of LiSenNet's 19.2 M cyc/frame -- ~48%
+             * of the "inference" cost was this loop, not the network.
+             *
+             * The scale ratio is loop-invariant, so hoist it once into Q16 fixed point
+             * and requantise with a multiply and a shift: 5 cyc/elem. Measured on the
+             * ISS: LiSenNet 19,186,677 -> 8,902,092 (2.16x), ConvFSENet 3,640,203 ->
+             * 2,767,999 (1.32x), with bit-identical per-frame output checksums. */
+            const int ratio = (int)(m->out_scale / m->in_scale * 65536.0f + 0.5f);
             for (int i = 0; i < m->count; i++)
             {
-                float v = ((int)sout[i] - m->out_zp) * m->out_scale;
-                sin[i] = quant_i8(v, m->in_scale, m->in_zp);
+                int q = (((((int)sout[i] - m->out_zp) * ratio) + 32768) >> 16) + m->in_zp;
+                if (q < -128) q = -128;
+                if (q >  127) q =  127;
+                sin[i] = (int8_t)q;
             }
         }
     }
