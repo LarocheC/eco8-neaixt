@@ -54,11 +54,31 @@ CAP=$!
 sleep 1
 
 # ---- 3. flash ------------------------------------------------------------
-echo "== flashing $(basename "$ELF") =="
-"$PYOCD" flash -t "$TARGET" --format elf "$ELF" || {
-  echo "pyocd flash failed. If it reports a flash-algo/FLM problem, try:" >&2
-  echo "  $PYOCD flash -t $TARGET -O keep_unwritten=false --format elf $ELF" >&2
-  kill $CAP 2>/dev/null || true; exit 1; }
+# NOTE: pyocd/SWD flashing is KNOWN BROKEN on this part (investigated 2026-07-23).
+# pyocd types the SRAM alias 0x10000000-0x10020000 as ROM, so the DFP's FlexSPI algo
+# (RAMstart 0x1001c000) is rejected by flm_region_builder._select_flash_ram; forcing
+# it past that makes the algo's pc_init hardfault (IPSR=3). It is attempted here
+# because it costs seconds and would be the nicest path if a newer DFP ever fixes it,
+# but the SUPPORTED route on this board is blhost over the ROM ISP -- see below.
+echo "== flashing $(basename "$ELF") (pyocd; known-fragile on this part) =="
+if ! "$PYOCD" flash -t "$TARGET" --format elf "$ELF"; then
+  cat >&2 <<EOF
+
+pyocd flash failed -- expected on this part. Use the ROM ISP route instead, which is
+NXP's supported path and sidesteps the whole SWD/FLM problem. It DOES need physical
+access to SW7:
+
+  1. SW7 -> Serial ISP:  1-ON, 2-OFF, 3-OFF   then power-cycle the board
+  2. ~/.venvs/rt595-flash/bin/blhost -p $PORT -- flash-image \\
+         $RT595/build/$(basename "${ELF%.elf}").bin erase
+  3. SW7 -> flash boot:  1-OFF, 2-OFF, 3-ON   then power-cycle to run
+
+SWD attach/read/reset still work without changing SW7, so once the probe is bound you
+can verify and remotely reset an already-flashed board from here:
+  pyocd commander -t $TARGET   (then: reg, read32 0xE000ED08, ...)
+EOF
+  kill $CAP 2>/dev/null || true; exit 1
+fi
 
 echo "== resetting =="
 "$PYOCD" reset -t "$TARGET" || true
