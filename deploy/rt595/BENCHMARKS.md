@@ -21,31 +21,44 @@ Dense NSNet2 is undeployable on this chip for one reason: 2.89 MB of int8 weight
 1.30 MB `dram0_0_seg`. The structured-linear (sparse) variants fix that, and one of them is
 faster *and* better-scoring than the dense model.
 
-| variant | params | int8 PESQ | weights | arena | total | cyc/frame | vs budget | fits DRAM |
-|---|---:|---:|---:|---:|---:|---:|---:|---|
-| dense baseline | 2,783,657 | 2.8334 | 2886K | 17K | 2903K | 1,522,055 | 0.48x | **NO** |
-| **blockdiag_full** (4 blk) | 701,657 | **2.8433** | 720K | 17K | **737K** | **1,464,617** | **0.46x** | **YES** |
-| blockdiag_8 (8 blk) | 354,657 | 2.8256 | 376K | 17K | 393K | 1,736,358 | 0.55x | YES |
-| monarch_8 | 553,369 | **2.8562** | 601K | 593K | 1194K | 4,537,793 | 1.43x | over budget |
+| variant | blocks | params | int8 PESQ | weights | arena | total | cyc/frame | vs budget | fits DRAM |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| dense baseline | - | 2,783,657 | 2.8334 | 2886K | 17K | 2903K | 1,522,055 | 0.48x | **NO** |
+| **blockdiag_full** | 4 | 701,657 | **2.8433** | 720K | 17K | **737K** | **1,464,617** | **0.46x** | **YES** |
+| blockdiag_8 | 8 | 354,657 | 2.8256 | 376K | 17K | 393K | 1,736,358 | 0.55x | YES |
+| monarch_full | 4 | 1,098,557 | 2.8463 | 1148K | **1169K** | 2317K | 3,310,045 | 1.04x | **NO** |
+| monarch_8 | 8 | 553,369 | **2.8562** | 601K | 593K | 1194K | 4,537,793 | 1.43x | over budget |
 
 PESQ is int8 over 824 VoiceBank-DEMAND test utterances, from `benchmarks/baselines.json`.
 
 **`blockdiag_full` is the deploy pick:** 4x smaller than dense, fits with 565 KB to spare,
 real-time with 2.2x headroom, and it *beats* the dense baseline on PESQ (2.8433 vs 2.8334).
 
+**Monarch is a dead end on this chip in every configuration tested** — the two variants fail
+differently but both fail, and the reason is structural rather than a tuning problem.
+
 **The op-granularity law shows up again, and it dominates parameter count.** These variants all do
-far less arithmetic than dense, yet only one is faster:
+far less arithmetic than dense, yet only the blockdiag ones are competitive:
 
 - torch_structured's linears do **not** lower to `FULLY_CONNECTED`. They become `BATCH_MATMUL`
   wrapped in `RESHAPE`/`TRANSPOSE`. Node counts: dense 50 (16 FULLY_CONNECTED), blockdiag_full 76
-  (8 BATCH_MATMUL, 19 RESHAPE), monarch_8 **128** (24 BATCH_MATMUL, 24 TRANSPOSE, 35 RESHAPE).
-- **monarch_8 is 3.0x SLOWER than dense on ~5x fewer parameters.** Its block-permute costs 24
-  TRANSPOSEs and 35 RESHAPEs of pure data movement, and it inflates the arena 35x (17 KB -> 593 KB)
-  because every intermediate needs materialising. Best PESQ of the four, unusable on cycles.
-- **More blocks is worse:** blockdiag_8 (8 blocks) is 19% slower than blockdiag_full (4 blocks)
-  while being half the size. Smaller blocks = smaller matmuls = less SIMD amortisation.
+  (8 BATCH_MATMUL, 19 RESHAPE), **both monarch variants 128** (24 BATCH_MATMUL, 24 TRANSPOSE,
+  35 RESHAPE).
+- **`nblocks` does not change monarch's graph topology at all** — monarch_full (4 blocks) and
+  monarch_8 (8 blocks) emit byte-for-byte the same op histogram. `nblocks` only sets the block
+  *dimensions*. So the 2-factor permute's 24 TRANSPOSEs are a fixed tax you cannot tune away.
+- **The arena is the real killer, not the cycles.** blockdiag needs **17 KB**; monarch needs
+  593 KB (8 blk) to **1169 KB** (4 blk) — 35x to 69x more — because each factor's intermediate
+  must be materialised, and bigger blocks mean bigger intermediates. monarch_full's arena alone
+  (1.17 MB) nearly exhausts the 1.30 MB data segment before its 1.15 MB of weights are placed.
+- Fewer, larger blocks *is* faster (monarch_full 3.31 M vs monarch_8 4.54 M; blockdiag_full
+  1.46 M vs blockdiag_8 1.74 M) — but for monarch it trades cycles for arena and loses either way.
+- **More blocks is worse for speed:** blockdiag_8 (8 blocks) is 19% slower than blockdiag_full
+  (4 blocks) at half the size. Smaller blocks = smaller matmuls = less SIMD amortisation.
 
-So on HiFi4, prefer **few, large blocks** and avoid factorisations that need a permute.
+So on HiFi4: prefer **block-diagonal with few, large blocks**, and avoid any factorisation that
+needs a permute — the transposes cost more than the MACs they save, and the materialised
+intermediates cost more memory than the weights they save.
 
 Reproduce (checkpoints' model code lives on `main`, so use a worktree overlay — never a branch
 switch, since concurrent sessions share this checkout):
