@@ -83,3 +83,6 @@ benchmarks/__pycache__/
 # lane: pytest + accel-map cache
 deploy/rt595/lane/**/__pycache__/
 deploy/rt595/lane/.pytest_cache/
+
+# lane: git worktree overlays for checkpoints whose model code lives on another branch
+.lane/
