@@ -22,24 +22,48 @@ BAUD="${SERIAL_BAUD:-115200}"
 CAPTURE="${CAPTURE:-$RT595/build/serial_capture.txt}"
 SECONDS_CAPTURE="${SECONDS_CAPTURE:-25}"
 
-# ---- 1. is the CMSIS-DAP HID interface actually bound? --------------------
-bad=""
-for i in /sys/bus/usb/devices/*:1.0; do
-  [ -f "${i%:*.*}/idVendor" ] || continue
-  [ "$(cat "${i%:*.*}/idVendor" 2>/dev/null)" = "1fc9" ] || continue
-  [ "$(cat "$i/bInterfaceClass" 2>/dev/null)" = "03" ] || continue
-  if [ ! -e "$i/driver" ]; then bad="$(basename "$i")"; fi
-done
-if [ -n "$bad" ]; then
-  cat >&2 <<EOF
-ERROR: the probe's CMSIS-DAP HID interface ($bad) has no driver bound.
-The device enumerates on USB but returns nothing to DAP_INFO, so pyocd fails with
-"index out of range" and LinkServer reports "No probes detected". Bind it:
+# ---- 1. is the probe's DAP engine actually alive? -------------------------
+# Test the CHANNEL, not the driver binding. pyocd talks to this probe over libusb
+# (its default backend is `pyusb`), so interface :1.0 having no kernel driver is
+# NORMAL and correct -- binding usbhid to it would stop libusb claiming it. The
+# only thing that matters is whether the probe answers a DAP command.
+if ! "${PYTHON:-$HOME/.venvs/rt595-flash/bin/python}" - <<'PROBE'
+import sys
+try:
+    from pyocd.probe.pydapaccess.interface import INTERFACE
+    devs = INTERFACE['pyusb'].get_all_connected_interfaces()
+    if not devs:
+        print("no CMSIS-DAP probe found on USB", file=sys.stderr); sys.exit(1)
+    d = devs[0]; d.open()
+    try:
+        pkt = bytearray(64); pkt[1] = 0xF0          # DAP_Info(capabilities)
+        d.write(list(pkt))
+        sys.exit(0 if d.read() else 2)
+    finally:
+        d.close()
+except SystemExit:
+    raise
+except Exception as e:
+    print(f"probe check failed: {type(e).__name__}: {e}", file=sys.stderr); sys.exit(1)
+PROBE
+then
+  cat >&2 <<'EOF'
+ERROR: the probe enumerates but its CMSIS-DAP engine does not answer.
 
-    echo -n '$bad' | sudo tee /sys/bus/usb/drivers/usbhid/bind
+Confirmed at the lowest reachable level: libusb claims interface 0 cleanly, writes
+of both 64 and 1024 bytes are accepted, and every read returns ZERO bytes at any
+timeout. That surfaces as pyocd "index out of range" (an IndexError on resp[0] of
+an empty DAP_INFO reply) and LinkServer "No probes detected" -- one dead channel,
+two confusing symptoms. The probe's VCOM (/dev/ttyACM0) keeps working throughout,
+because that is a separate CDC interface on the same LPC4322.
 
-(needs root; does NOT need physical access to the board). A physical debug-USB
-re-plug also works.
+This is NOT fixable in software. Do NOT bind usbhid to the interface -- pyocd uses
+libusb and needs it unbound. USBDEVFS_RESET does not help either: it resets the USB
+port, not the LPC4322 running the CMSIS-DAP firmware.
+
+THE FIX IS PHYSICAL: unplug and replug the DEBUG USB cable (de-powers the LPC4322 so
+it reboots its CMSIS-DAP firmware). Then re-run. Confirm with the probe serial:
+    pyocd list      # expect ORA2CQKQ
 EOF
   exit 2
 fi
