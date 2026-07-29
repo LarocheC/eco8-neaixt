@@ -1,9 +1,44 @@
 # RT595 cycle benchmarks
 
-## SILICON RESULT (2026-07-29) — the ISS is numerically exact
+## HiFi4 SILICON RESULT (2026-07-29) — real-time confirmed, ISS timing exact to 0.1%
 
-`blockdiag_full` flashed to the EVK and run on the **Cortex-M33**. This is the first
-hardware measurement in this project; everything else below is simulated.
+`blockdiag_full` run on the **HiFi4 DSP of the EVK itself**, booted entirely over SWD
+(`scripts/dsp_hw_run.py` — no M33 firmware change, no reflash; the debugger performs the
+whole `BOARD_DSP_Init()` register sequence, places the three blobs, and reads
+`g_bench_result` out of DSP DRAM).
+
+| | cyc/frame | ms @198 MHz | vs 3,168,000 budget |
+|---|---:|---:|---:|
+| **HiFi4 (silicon)** | **1,466,196** | **7.41** | **0.46x — real-time, 2.16x headroom** |
+| HiFi4 (ISS, flat) | 1,464,615 | 7.40 | 0.46x |
+| M33 (silicon) | 5,319,161 | 26.86 | 1.68x over |
+
+- **Silicon/ISS = 1.001x.** For an image that fits entirely in DSP local SRAM, the flat
+  ISS number *is* the silicon number. This closes the `--mem_model` scare below: that
+  8.6–18.4x penalty was measured through the generic sim LSP linking off-core, and the
+  Fusion-F1 has no caches to model — local-RAM images run at the ISS's zero-wait-state
+  figure on real hardware.
+- **All 16 checksums match the ISS and the M33 exactly** — three implementations
+  (xa_nnlib on silicon, xa_nnlib on ISS, CMSIS-NN on M33), one bit-exact answer.
+- Frame spread on the DSP is 50 cycles (0.003%): single-frame measurements are exact.
+- M33/HiFi4 silicon ratio: **3.63x**.
+- Arena on the DSP build: 17,176 B vs 17,096 B on the ISS/M33 builds — TFLM's internal
+  alignment padding shifts with the arena's base address; benign.
+- The measured `XT_RSR_CCOUNT` read overhead is 1 cycle.
+- The DSP ran at 198 MHz (SYSPLL0 PFD1 = 528×18/24 = 396 MHz, /2), NXP's own
+  `dsp_support.c` configuration, so the 3,168,000 budget applies as-is. VDDCORE stayed at
+  the PCA9420 power-on default 1.0 V, which is the required tier for 198/198 MHz.
+- The run also empirically confirmed the M33↔DSP data alias: DSP D-side 0x00840000 is
+  physical/M33 0x00040000 (−0x800000), while I-side addresses are identity-mapped.
+
+**Bottom line: sparse (block-diagonal) NSNet2 speech enhancement runs in real time on the
+i.MX RT595's HiFi4, measured on silicon, with 2.16x headroom and PESQ above the dense
+baseline.**
+
+## M33 SILICON RESULT (2026-07-29) — the ISS is numerically exact
+
+`blockdiag_full` flashed to the EVK and run on the **Cortex-M33**. This was the first
+hardware measurement in this project.
 
 ```
 === RT595 LiSenNet streaming SE (M33 / TFLite-Micro) ===
@@ -55,8 +90,13 @@ identical across every column below, so each row is the same computation measure
 | ConvFSENet 192-384 | 190 ops, 10 IO / 9 states | 3,640,203 | 2,767,999 | **30,388,703** | 9.6x over |
 | LiSenNet relu6-deep | 320 ops, 26 IO / 25 states | 19,186,677 | 8,902,092 | **76,428,487** | 24.1x over |
 
-**No model is real-time on this chip today.** Arena high-water: NSNet2 9.8 KB, ConvFSENet 160 KB,
-LiSenNet 277 KB. Weight blobs: 2.89 MB / 1.71 MB / 250 KB.
+**None of these three is real-time on this chip** — but with the silicon validation above, the
+reason differs per model and the `--mem_model` column should be ignored (sim-LSP artifact; see
+caveat 1). LiSenNet *fits* local SRAM (250 KB weights + 277 KB arena), so its flat Q16 number
+is the real one: 8.9 M = 2.8x over budget, a compute problem. Dense NSNet2 (2.89 MB) and
+ConvFSENet (1.71 MB) exceed the 1.24 MB DSP data segment, so their flat numbers are
+unrealizable as-linked — a memory problem first. Arena high-water: NSNet2 9.8 KB, ConvFSENet
+160 KB, LiSenNet 277 KB.
 
 ## Sparse NSNet2 — the variant that makes NSNet2 deployable
 
@@ -119,16 +159,19 @@ TRANSPOSE). The dense `nsnet2_ops.cpp` does **not** work for these — no `AddBa
 
 ## Read the caveats before quoting any of these
 
-**1. `--mem_model` is mandatory.** Plain `xt-run <elf>` models zero-latency single-cycle memory —
-no caches, no stalls. That is a compute-only lower bound, not a latency estimate. It costs
-8.6x–18.4x here, and it **inverts the ranking**: NSNet2 looks like the runaway winner on flat
-memory and degrades the most under a cache model, because its 2.89 MB of int8 weights move more
-bytes than the flat run claimed cycles. `--mem_model` is *still* zero-wait-state; the board adds
-PSRAM latency on top and none of these weight blobs fit HiFi4 local SRAM.
+**1. `--mem_model` vs flat memory — RESOLVED ON SILICON.** Plain `xt-run <elf>` models
+zero-latency single-cycle memory. The 8.6x–18.4x `--mem_model` penalties in the table were
+measured through the generic `-mlsp=sim` LSP, which links the image *off-core* — an artifact,
+not a property of the chip: the Fusion-F1 has no caches, and the silicon run above shows a
+local-SRAM image (real min-rt LSP) hitting the flat ISS figure to 0.1%. The distinction that
+actually matters is **does the image fit DSP local SRAM** (data ≤1.24 MB at 0x840000, text
+≤1 MB at 0x180400). blockdiag_full fits → flat ISS is exact. Dense NSNet2 (2.89 MB weights)
+does not fit → would need PSRAM behind the outbound PIF bus, and no simulation here bounds
+that cost.
 
-**2. The budget is unverified.** `3.17 M cyc/frame` = 198 MHz x 16 ms hop, and the 198 MHz is a
-TODO in `dsp_offload/dsp/dsp_main.cpp`. Read `CLOCK_GetDspClkFreq()` on the board before treating
-any of the right-hand column as pass/fail.
+**2. The budget is verified.** `3.17 M cyc/frame` = 198 MHz × 16 ms hop; both silicon runs
+confirmed 198 MHz (M33 banner, and the DSP clocked at SYSPLL0 PFD1/2 = 198 MHz by
+`dsp_hw_run.py` itself).
 
 **3. NSNet2 uses SYNTHETIC (random) weights** — `host/make_nsnet2_synth.py`. Valid for latency
 (dense int8 op cost is weight-independent), never for quality. Replace with `nsnet2:baseline`

@@ -1,19 +1,20 @@
 # Getting real silicon numbers
 
-Every performance figure in `BENCHMARKS.md` comes from the Cadence ISS. This is what it
-takes to replace them with measurements from the actual chip, and what each tier proves.
+**Both tiers are now done (2026-07-29): the M33 and the HiFi4 have been measured on the
+actual chip, and both agree bit-exactly with the ISS.** This file records what each tier
+proves and how to reproduce it.
 
-**One physical action gates everything: re-plug the debug USB cable.** The LPC-Link2's
-CMSIS-DAP engine is unresponsive (writes accepted, reads return zero bytes, at every
-packet size and timeout, with libusb holding interface 0 cleanly). Its VCOM keeps working
-because that is a separate CDC interface on the same LPC4322. No software fix exists —
-`USBDEVFS_RESET` resets the USB port, not the LPC4322. See `scripts/flash_linux.sh`.
+Historical note: all of this was gated on one physical action — re-plugging the debug USB
+cable — because the LPC-Link2's CMSIS-DAP engine can wedge (writes accepted, reads return
+zero bytes; its VCOM keeps working since that is a separate CDC interface on the same
+LPC4322). No software fix exists — `USBDEVFS_RESET` resets the USB port, not the LPC4322.
+If the probe wedges again, re-plug. See `scripts/flash_linux.sh`.
 
 ---
 
-## Tier 1 — M33 on silicon. Ready now, nothing to change.
+## Tier 1 — M33 on silicon. DONE 2026-07-29 (5,319,161 cyc/frame, checksums = ISS).
 
-The firmware in `build/` already carries `blockdiag_full`. After the re-plug:
+The firmware in `build/` already carries `blockdiag_full`. To re-run:
 
 ```bash
 scripts/enter_isp.py                                             # ROM ISP, no SW7 change
@@ -47,12 +48,39 @@ independent check on the 198 MHz assumed by the 3,168,000 cyc/frame budget.
 
 ---
 
-## Tier 2 — HiFi4 DSP on silicon. This is the number that matters.
+## Tier 2 — HiFi4 DSP on silicon. DONE 2026-07-29 — and far simpler than planned.
 
-`blockdiag_full`'s headline 1,464,617 cyc/frame is a **DSP** figure. Measuring it on
-hardware needs the M33 to boot the DSP, which is a real piece of work — roughly a day.
-NXP ships a working template for this exact board at
-`sdk/examples/eiq_examples/common/tflm/dsp/evkmimxrt595_fusionf1/`.
+**Result: 1,466,196 cyc/frame mean (7.41 ms @198 MHz, 0.46x budget), all 16 checksums
+identical to the ISS and the M33. Silicon/ISS = 1.001x.** See `BENCHMARKS.md`.
+
+The plan below assumed the M33 must boot the DSP (embed blobs, enlarge the linker
+region, add a loader — "roughly a day"). None of that was needed: everything
+`BOARD_DSP_Init()` does is MMIO plus memcpy, so **the debugger can boot the DSP itself
+with the M33 halted**. `scripts/dsp_hw_run.py` does the whole thing over SWD:
+
+```bash
+~/.venvs/rt595-flash/bin/python deploy/rt595/scripts/dsp_hw_run.py   # ~40 s total
+```
+
+It halts the M33, brings up SYSPLL0 PFD1 /24 (396 MHz) and the DSP clock /2
+(198 MHz), sets `DSP_VECT_REMAP=0x600`, powers the domain (PDRUNCFG1 bit 25 + PMC
+apply), pulses the DSP reset with DSPSTALL held, writes the three blobs with full
+readback verify, zeroes `g_bench_result`, releases DSPSTALL, and polls the struct.
+Rebuild the blobs with `iss/build_dsp_hw.sh`; after any rebuild re-derive the result
+address (`xt-nm dsp_bench.elf | grep g_bench_result`, then −0x800000 +0x20000000).
+
+Two facts the run established beyond the numbers: the DSP D-side alias really is
+−0x800000 (DSP 0x00840000 = M33 0x00040000; I-side is identity), and the ELF's
+`.ResetVector.text` links at VMA 0 with the remap hardware redirecting fetches to
+0x180000 — so the remap register must be written before release, or the DSP fetches
+from unmapped address 0.
+
+CAVEAT: the data blob lands at 0x20040000, in the middle of the halted M33 app's RAM.
+Reset the board before using the M33 firmware again; do not just resume it.
+
+The original M33-boots-DSP plan is kept below for reference — it is the right shape
+for a *product* (the M33 must boot the DSP without a debugger) but is not needed for
+measurement.
 
 **1. Rebuild the bench against the deployable LSP.** Use `min-rt`, not `gdbio`. min-rt has
 no stdio — `printf` is silently dropped by libminrt — so the bench cannot report by
