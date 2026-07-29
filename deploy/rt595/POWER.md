@@ -71,19 +71,49 @@ Sanity anchors when reading: at 46 % duty the *average* inference power is 0.463
 the S1−S0 sustained delta (S1 runs the DSP flat out, no idle gaps). Energy per
 16 ms frame = (S1−S0 power) × 7.41 ms.
 
-## Estimated energy per frame (datasheet-anchored, pending the meter)
+## Estimated energy per frame (NXP-documented currents, pending the meter)
 
-With VDDCORE = 1.00 V measured and the duty cycle measured, the only unknown is the
-active current. The arithmetic, ready for a number:
+With VDDCORE = 1.00 V and the duty cycle measured, the only unknown is the active
+current. NXP has measured almost our exact configuration:
+
+- **AN13657** ("Using i.MX RT500 FusionF1 DSP in Low-Power Design", Rev 0, 2022,
+  measured on this same MIMXRT595-EVK): DSP running an FFT loop at **198 MHz,
+  VDDCORE = 1.0 V** → **24.0 mA** total IDDCORE (HCLK 12 MHz, M33 sleeping);
+  active-minus-suspended **delta ≈ 18.5 mA (~93 µA/MHz)**. With HCLK also at
+  198 MHz (closer to our S1): 31.71 mA active / 13.89 mA DSP-suspended — same
+  ≈ 18 mA delta. DSP stalled at low clock: 1.62 mA; DSP fully powered down:
+  1.02 mA.
+- **IMXRT500EC datasheet Rev 3** Table 11 (typ): DSP FFT at 200 MHz / **0.9 V** =
+  21.48 mA, M33 in WFI. (Scaled to 1.0 V this is consistent with AN13657.)
+- For the M33 comparison, Tables 9/10 (typ): M33 while(1)/CoreMark at
+  **192 MHz / 1.0 V ≈ 21.9 mA** — i.e. 80–114 µA/MHz total depending on the V/f
+  point. No smaller "marketing µA/MHz" figure exists in any NXP document we could
+  find; these are the real numbers.
+
+So, expected **S1−S0 ≈ 19–23 mA at 1.00 V ≈ 19–23 mW** (FFT is a reasonable
+intensity proxy for our conv/GRU mix — the meter will say how good):
 
 ```
-P_active            = 1.00 V × I_DSP@198MHz
-E per 16 ms frame   = P_active × 7.41 ms
-P_avg (continuous SE, sleep between frames) ≈ 0.463 × P_active + 0.537 × P_idle
+P_DSP inference        ≈ 19–23 mW                (NXP-measured FFT proxy, 198 MHz, 1.0 V)
+E per 16 ms frame      ≈ P × 7.41 ms  ≈ 0.14–0.17 mJ
+continuous SE average  ≈ P × 46.3 %   ≈ 8.8–10.6 mW   (inference share only)
+per second of audio    ≈ 62.5 × E     ≈ 9–11 mJ
 ```
 
-Datasheet/app-note values for I_DSP are being collected below; the meter protocol
-above replaces them with a measurement.
+**The idle 53.7 % dominates the system average and is a design choice**, not a
+model property: DSP suspended with HCLK left at 198 MHz costs 13.9 mA (13.9 mW!),
+dropping HCLK to 12 MHz while idle → 5.5 mA, DSP powered down → 1.0 mA, and
+full deep-sleep retention (between utterances, 5 MB SRAM held) → 52 µA
+(datasheet Table 13). AN13606's measured always-listening voice pipeline on this
+chip (DMIC + wake, DSP off) runs at ~170 µA on VDDCORE for scale.
+
+**M33 vs DSP energy per frame**: the M33 at ~21.9 mA / 1.0 V for its measured
+26.86 ms costs ≈ **0.59 mJ/frame** — vs ≈ 0.15 mJ on the DSP. The DSP does the
+same frame ~4x cheaper in energy *and* is the only core that meets the deadline.
+
+All currents above are the VDDCORE rail only (add ~0.2–0.4 mA on the 1.8 V rails
+active, per AN13606) and NXP-typical/single-EVK values — the meter protocol above
+turns them into this board's numbers.
 
 ## Not done / possible follow-ups
 
