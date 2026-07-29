@@ -79,7 +79,8 @@ RESULT_LEN = 4 * (8 + N_FRAMES + N_FRAMES)
 
 SE_BENCH_MAGIC = 0x48465F31          # "HF_1"
 STATE_NAMES = {0: "not started", 1: "ST_ENTER", 2: "ST_INIT_OK", 3: "ST_WARMED",
-               4: "ST_RUNNING", 5: "ST_DONE", 0xE1: "ST_INIT_FAIL", 0xE2: "ST_FRAME_FAIL"}
+               4: "ST_RUNNING", 5: "ST_DONE", 0xE1: "ST_INIT_FAIL", 0xE2: "ST_FRAME_FAIL",
+               0xE3: "ST_LOOP_MISMATCH"}
 
 DSP_HZ = 198_000_000                 # SYSPLL0 528 * 18/24 = 396, /2
 ISS_CYCLES = 1_464_615               # blockdiag_full, ISS, per frame (representative)
@@ -113,6 +114,10 @@ def main():
                     help="seconds to wait for the done-magic (default: %(default)s)")
     ap.add_argument("--skip-load", action="store_true",
                     help="do not touch the target state; just poll/read the result struct")
+    ap.add_argument("--forever", action="store_true",
+                    help="expect a FOREVER=1 build (sustained inference for power "
+                         "measurement): after validating pass 1, confirm the loop is "
+                         "alive via n_frames and leave the DSP running on detach")
     a = ap.parse_args()
 
     import os
@@ -252,6 +257,23 @@ def main():
         print(f"ISS said {ISS_CYCLES:,} -> silicon/ISS = {mean / ISS_CYCLES:.3f}x")
         print("checksums: ALL 16 MATCH the ISS" if ok else
               "checksums: MISMATCH — computation differs from the ISS, cycles are moot")
+
+        if a.forever and ok:
+            # Liveness check on the sustained loop: n_frames must keep climbing and
+            # the state must stay ST_DONE (0xE3 would mean a pass diverged).
+            f0 = t.read32(a.result_addr + 8)
+            time.sleep(6.0)
+            f1 = t.read32(a.result_addr + 8)
+            st = t.read32(a.result_addr + 4)
+            if f1 <= f0 or st != 5:
+                print(f"SUSTAINED LOOP NOT ALIVE: n_frames {f0} -> {f1}, "
+                      f"state {STATE_NAMES.get(st, st)}", file=sys.stderr)
+                return 6
+            rate = (f1 - f0) / 6.0
+            print(f"\nsustained inference ALIVE: {rate:.0f} frames/s "
+                  f"({rate * 16:.1f} ms of audio per s; self-checking each pass)")
+            print("The DSP stays in this state after disconnect — take meter readings "
+                  "now. A plain dsp_hw_run.py reload or a reset ends it.")
         return 0 if ok else 5
 
 

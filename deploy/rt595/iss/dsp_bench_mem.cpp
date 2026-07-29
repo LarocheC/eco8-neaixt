@@ -32,6 +32,7 @@ enum {
     ST_RUNNING    = 4,
     ST_DONE       = 5,
     ST_FRAME_FAIL = 0xE2,
+    ST_LOOP_MISMATCH = 0xE3,      /* forever mode: a pass diverged from pass 1 */
 };
 
 typedef struct {
@@ -111,5 +112,41 @@ int main(void)
     g_bench_result.state = ST_DONE;
     g_bench_result.magic = SE_BENCH_MAGIC;     /* publish: everything above is valid */
 
+#if SE_BENCH_FOREVER
+    /* Sustained-inference mode, for power measurement with a physical meter: keep
+     * re-running the same 16 frames indefinitely. State is reset each pass, so every
+     * pass must reproduce the pass-1 checksums — a divergence parks the core with
+     * ST_LOOP_MISMATCH instead of silently measuring garbage. `n_frames` keeps
+     * counting monotonically past 16 and is the host's liveness signal; `cycles[]`
+     * stays live so sustained-load timing drift (e.g. thermal) would be visible. */
+    {
+        int32_t expect[SE_TEST_FRAMES];
+        for (unsigned t = 0; t < SE_TEST_FRAMES; t++)
+            expect[t] = g_bench_result.checksum[t];
+        for (;;)
+        {
+            SE_ResetStates();
+            for (unsigned t = 0; t < SE_TEST_FRAMES; t++)
+            {
+                unsigned c0 = XT_RSR_CCOUNT();
+                if (SE_ProcessFrame(se_test_feats[t], s_mask) != kStatus_Success)
+                {
+                    g_bench_result.state = ST_FRAME_FAIL;
+                    for (;;) {}
+                }
+                g_bench_result.cycles[t] = XT_RSR_CCOUNT() - c0;
+                float s = 0.0f;
+                for (int i = 0; i < MODEL_MASK_LEN; i++) s += s_mask[i];
+                if ((int32_t)(s * 1000.0f) != expect[t])
+                {
+                    g_bench_result.state = ST_LOOP_MISMATCH;
+                    for (;;) {}
+                }
+                g_bench_result.n_frames++;
+            }
+        }
+    }
+#else
     for (;;) {}
+#endif
 }
