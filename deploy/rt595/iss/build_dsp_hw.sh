@@ -45,9 +45,11 @@ INC=(-I. -I"$TF"
      -I"$TF/tensorflow/lite/micro/tools/make/downloads/ruy")
 ARENA="${ARENA:-32768}"        # measured use is 17,096 B; the driver default of 512 KB
                                # overflows the DSP's 1.30 MB dram0_0_seg
+FOREVER="${FOREVER:-0}"        # 1 = sustained-inference build for power measurement:
+                               # re-runs the 16 frames endlessly (see dsp_bench_mem.cpp)
 CXXFLAGS=(--xtensa-core=$CORE -mlsp="$LSP" -stdlib=libc++ -O2 -std=c++17
           -DTF_LITE_STATIC_MEMORY -DTF_LITE_MCU_DEBUG_LOG
-          -DSE_TENSOR_ARENA_SIZE="$ARENA" "${INC[@]}")
+          -DSE_TENSOR_ARENA_SIZE="$ARENA" -DSE_BENCH_FOREVER="$FOREVER" "${INC[@]}")
 CFLAGS=(--xtensa-core=$CORE -mlsp="$LSP" -O2 -DTF_LITE_STATIC_MEMORY "${INC[@]}")
 
 echo "[1/5] dsp_bench_mem.cpp"; xt-clang++ "${CXXFLAGS[@]}" -c dsp_bench_mem.cpp  -o dsp_bench_mem.o
