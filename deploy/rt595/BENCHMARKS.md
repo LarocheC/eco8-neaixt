@@ -1,4 +1,47 @@
-# RT595 HiFi4 cycle benchmarks
+# RT595 cycle benchmarks
+
+## SILICON RESULT (2026-07-29) — the ISS is numerically exact
+
+`blockdiag_full` flashed to the EVK and run on the **Cortex-M33**. This is the first
+hardware measurement in this project; everything else below is simulated.
+
+```
+=== RT595 LiSenNet streaming SE (M33 / TFLite-Micro) ===
+SE model: 2 IO, 1 states; arena used 17096 / 524288 B
+core 198 MHz; 16 test frames of 257-bin features
+frame, cycles, us, mask_checksum
+0, 5328934, 26913, 202378        ...        15, 5316635, 26851, 250472
+```
+
+| | cyc/frame | ms @198 MHz | vs 3,168,000 budget |
+|---|---:|---:|---:|
+| **M33 (silicon)** | **5,319,161** | 26.86 | 1.68x over |
+| HiFi4 (ISS) | 1,464,615 | 7.40 | 0.46x — real-time |
+
+**All 16 per-frame mask checksums are byte-identical between silicon and the ISS.**
+That is the load-bearing result. The M33 runs CMSIS-NN and the HiFi4 runs xa_nnlib —
+completely different kernel implementations — yet they agree exactly on every frame. So
+the ISS is faithfully executing the real model, int8 inference is deterministic across
+both backends, and the recalibrated export behaves identically on hardware.
+
+Other confirmations from the same run:
+- **Core clock really is 198 MHz**, so the 3,168,000 cyc/frame budget is correct — this
+  was previously an unverified assumption inherited from a TODO.
+- **Arena is 17,096 B on silicon, exactly as the ISS reported.**
+- Frame-to-frame spread is 0.24%, so single-frame ISS measurements are representative.
+- The M33/HiFi4 ratio is **3.63x**, a sane SIMD-vs-scalar gap that gives an empirical
+  anchor for the DSP figures.
+
+What this does NOT settle: the HiFi4 number itself is still simulated, and the ISS assumes
+zero-wait-state local RAM. Only a DSP-side run measures real memory behaviour — see
+`ONBOARD_MEASUREMENT.md` Tier 2.
+
+Worth noting for the M33 track: blockdiag NSNet2 at 5.32 M cyc/frame is **4x faster than
+LiSenNet's 21.2 M** on the same core, i.e. 1.68x over real-time rather than 6.7x.
+
+---
+
+# HiFi4 cycle benchmarks (simulated)
 
 int8 streaming graphs on the Cadence ISS, core `nxp_rt500_RI23_11_newlib` (Fusion-F1), built
 through `iss/build_iss.sh` against `tflm/libtflm_rt500.a`. Per-frame output checksums are
