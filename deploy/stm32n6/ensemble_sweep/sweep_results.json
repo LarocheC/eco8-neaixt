@@ -1,0 +1,111 @@
+{
+ "base_fixed": {
+  "epochs": 139,
+  "sw": 6,
+  "hybrid": 51,
+  "hw": 82,
+  "macc": 1844819,
+  "weights_B": 35829,
+  "acts_B": 122312,
+  "measured": {
+   "ms_frame": 2.598,
+   "std": 0.002,
+   "batch": 16,
+   "hw_ms": 1.412,
+   "hybrid_ms": 0.445,
+   "sw_ms": 0.275
+  }
+ },
+ "ens_k2_fold": {
+  "epochs": 172,
+  "sw": 24,
+  "hybrid": 60,
+  "hw": 88,
+  "macc": 3680129,
+  "weights_B": 87423,
+  "acts_B": 241048,
+  "measured": {
+   "ms_frame": 7.387,
+   "std": 0.003,
+   "batch": 4,
+   "hw_ms": 1.98,
+   "hybrid_ms": 0.712,
+   "sw_ms": 4.057,
+   "sw_cause": "per-member ConvTranspose expansion ~2.79ms + grouped 2D-kernel encoder convs ~0.9ms fell to SW"
+  }
+ },
+ "ens_k3_fold": {
+  "epochs": 197,
+  "sw": 33,
+  "hybrid": 73,
+  "hw": 91,
+  "macc": 5515439,
+  "weights_B": 130923,
+  "acts_B": 357298,
+  "measured": {
+   "ms_frame": 10.584,
+   "batch": 1,
+   "hw_ms": 2.592,
+   "hybrid_ms": 0.958,
+   "sw_ms": 6.025
+  }
+ },
+ "ens_k2_branches": {
+  "epochs": 234,
+  "sw": 12,
+  "hybrid": 104,
+  "hw": 118,
+  "macc": 3689638,
+  "weights_B": 71673,
+  "acts_B": 186984,
+  "measured": {
+   "error": "E801 Invalid firmware - validation app rejects 35-in/36-out IO table"
+  }
+ },
+ "ens_k3_branches": {
+  "epochs": 345,
+  "sw": 18,
+  "hybrid": 155,
+  "hw": 172,
+  "macc": 5534457,
+  "weights_B": 107517,
+  "acts_B": 270672,
+  "measured": {
+   "error": "E801 (same IO limit)"
+  }
+ },
+ "ens_k2_bdfold": {
+  "epochs": 144,
+  "hw": 88,
+  "hybrid": 50,
+  "sw": 6,
+  "macc": 4263889,
+  "weights_B": 97017,
+  "acts_B": 243548,
+  "measured": {
+   "ms_frame": 3.762,
+   "std": 0.004,
+   "batch": 4,
+   "hw_ms": 2.037,
+   "hybrid_ms": 0.66,
+   "sw_ms": 0.439
+  }
+ },
+ "ens_k3_bdfold": {
+  "epochs": 149,
+  "hw": 91,
+  "hybrid": 52,
+  "sw": 6,
+  "macc": 7266719,
+  "weights_B": 186485,
+  "acts_B": 368548,
+  "measured": {
+   "ms_frame": 5.312,
+   "std": 0.006,
+   "batch": 4,
+   "hw_ms": 2.694,
+   "hybrid_ms": 0.896,
+   "sw_ms": 0.854
+  }
+ }
+}
