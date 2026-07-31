@@ -1,9 +1,11 @@
 # Idle-cycle ensemble study — handover (2026-07-31)
 
-**Status: parked for a future study.** Everything below was measured in one
-day on the WSL2 laptop + the STM32N6570-DK; this branch (`ensemble-study`)
-carries the scripts, results, and this doc so the work can be picked up on
-any machine. The detailed lab log with all tables lives in
+**Status: parked for a future study.** The first day's work was measured on
+the WSL2 laptop + the STM32N6570-DK; a same-day continuation on the training
+box added the **member-correct fold (bit-exact) and the measured streamed SR
+quality** (see "Continuation" below and the lab log). This branch
+(`ensemble-study`) carries the scripts, results, and this doc so the work can
+be picked up on any machine. The detailed lab log with all tables lives in
 [`deploy/stm32n6/ensemble_sweep/README.md`](deploy/stm32n6/ensemble_sweep/README.md);
 this doc is the orientation layer.
 
@@ -59,15 +61,40 @@ weights, no retraining.
   the top-50 % D2 frames K=2→K=4 captures **96 %** of the K=4 gain at 3.0
   members average (random-frame control: 45 %).
 
+## Continuation (same day, training box): member-correct fold + streamed quality
+
+- **`fold_members.py` (v3)** folds K *distinct* SR members into one streaming
+  graph, **bit-exact vs K separate sessions** (est_mag + all 25 FIFO states,
+  100 % of elements, over a full real utterance): per-member GLU (fc1 → two
+  grouped 1x1s, chunk chain deleted), permuted-block dense weights under the
+  skip concats, stride-2-Slice tail with `est_mag (B,K,1,F)` (per-member masks
+  → mean *and* D on-device), and `conv_1` stacked on out-channels only — the
+  feat-replication SW cost (old thread 6) is gone structurally.
+- **Streamed SR quality, measured on relu6-deep's own streaming graph**
+  (824 utts, `sr_stream_ensemble.py`): on the deployed percentile grid the
+  offline recovery is lagged (K=1 −0.0067! K=4 +0.0100, K=8 +0.0123, still
+  climbing). Attribution: **percentile tail-clipping**, which SR cannot
+  dither. On a MinMax grid: RTN alone **+0.0237**, SR K=4 **+0.0405** over
+  the deployed RTN (3.0117 → 3.0523; FP32 3.0682) — recalibration + fold
+  closes 72 % of the streamed PTQ gap with the shipped weights.
+- Board artifacts tracked for the laptop:
+  `paper/data/tmp_quant/ens_graphs/ens_memb{_mm,}_k*.onnx` + streaming base
+  graphs; the K=1 twin isolates the restructure cost. Laptop TODO + expected
+  epochs: lab-log §"Artifacts + the laptop's TODO".
+
 ## What's in this branch
 
 | path | what |
 |---|---|
 | `deploy/stm32n6/ensemble_sweep/` | full lab log (README), fold/branch/probe/sanitize scripts, compile reports, npu_profiler logs, `sweep_results.json` |
+| `deploy/stm32n6/ensemble_sweep/fold_members.py` | **v3 member-correct fold** — K *distinct* members in one graph, bit-exact vs separate sessions (per-member GLU, permuted-block skips, per-member tail, no feat replication) |
 | `sr_decoder_ensemble.py` (+`_results.json`) | SR-member builder + PESQ harness; caps, K-sweep. **Run first** — it (re)builds member graphs into `paper/data/tmp_quant/sr_graphs/` deterministically |
+| `sr_stream_ensemble.py` (+`_results.json`) | **streamed** SR-ensemble harness — frame-by-frame FIFO streaming graph, per-member state, `mm_` prefix for the MinMax-grid attribution configs, `memb_fold_k*` for the folded graphs |
 | `sr_uncertainty.py` (+`_results.json`) | UQ correlations, OOD AUROCs, utterance-level adaptive sim |
 | `sr_adaptive_frames.py` (+`_results.json`) | frame-level escalation curve + random control |
-| `paper/data/tmp_quant/relu6deep_rt_int8_{fp32,pc_signed}.onnx` | the FP32/QDQ graphs the sr scripts consume (regenerable via `paper/data/eval_conv_rt_int8.py`, ~30 min) |
+| `paper/data/tmp_quant/relu6deep_rt_int8_{fp32,pc_signed}.onnx` | the FP32/QDQ graphs the offline sr scripts consume (regenerable via `paper/data/eval_conv_rt_int8.py`, ~30 min) |
+| `paper/data/tmp_quant/relu6deep_streaming_{fp32,int8_signed}.onnx` | the relu6-deep **streaming** graphs (feat + 25 FIFO states; signed percentile grid) — tracked copies; regenerate from the checkpoint with `lisennet/export_onnx.py --streaming` + `lisennet/quant_onnx.py --mode static --streaming` |
+| `paper/data/tmp_quant/ens_graphs/ens_memb_k{1,2,4}.onnx` | **board artifacts**: member-correct SR folds (K=2/K=4) + the K=1 restructured twin (A/B for the fc1-split/tail cost) |
 | `lisennet/eval_metrics_ext.py`, `paper/data/eval_conv_rt_int8.py` | harness dependencies (Table-1 protocol) |
 
 ## Reproducing on another machine
@@ -76,7 +103,9 @@ weights, no retraining.
   `PIP_INDEX_URL=https://pypi.org/simple` (the default JFrog index 401s).
 - Dataset: `common.dataset.load_voicebank_demand()` pulls
   `JacobLinCool/VoiceBank-DEMAND-16k` via HF datasets (cached ~here; will
-  download elsewhere).
+  download elsewhere). Run the harnesses with `HF_HUB_OFFLINE=1
+  HF_DATASETS_OFFLINE=1` once cached — 24 joblib workers doing HF freshness
+  HEAD checks get 429-rate-limited mid-eval.
 - Quality/UQ scripts are host-only: `sr_decoder_ensemble.py --n 824 --configs
   rtn fp32 all_w_exact all_sr_k2 all_sr_k4` then `sr_uncertainty.py`,
   `sr_adaptive_frames.py`. ~2–4 min per single-member config, K× for ensembles.
@@ -109,25 +138,31 @@ weights, no retraining.
 
 ## Open threads, in priority order
 
-1. **Member-correct fold** — the bd-fold is latency-exact but numerically
-   interleaves members through the GLU's dynamic channel split. Needed for
-   on-chip quality: split each `fc1` into two grouped convs (per-member GLU)
-   + per-member decoder skips. Then board-validate a K=2/K=4 SR fold and
-   host-eval its *streamed* PESQ.
-2. **Streaming frame-escalation** — the 96 %-at-half-cost result is the
+1. **Board latency of the v3 member-correct folds** (laptop):
+   `stedgeai generate` + `npu_profiler` on
+   `paper/data/tmp_quant/ens_graphs/ens_memb_k{1,2,4}.onnx` (+ the
+   `relu6deep_streaming_int8_signed.onnx` baseline). The K=1 twin vs baseline
+   A/B prices the fc1-split/tail restructure; expected epochs ≈ v2 bd-fold ±
+   a few. Risk: 26-in/26-out vs npu_profiler's E801 threshold (18/18 worked).
+2. **Ship-grade quality fold**: the MinMax recalibration is worth +0.0237
+   before any ensembling — decide percentile→MinMax for the deploy recipe
+   (check nc24/nc20 too), then board-validate `ens_memb_mm_k4` (host PESQ
+   3.0523 vs deployed 3.0117).
+3. **Streaming frame-escalation** — the 96 %-at-half-cost result is the
    offline ceiling; escalated members need FIFO-state warm-up (copy states
-   from the always-on pair; members differ only at rounding grain).
-3. **Seed members** — independently trained seeds through the same fold turn
-   D into genuine epistemic uncertainty (and may beat SR draws on PESQ).
-4. **Layer-resolved D** — members differing in one layer's rounding rank the
-   activation quantizers; directly targets the remaining ~0.026 gap.
-5. relu6-deep bd-fold latency (checkpoints for nc20/28/dil16/deep never left
-   the training box; relu6-deep + nc24 are local and tracked).
-6. Replicate `feat` after the FP32 prologue (SW grows 0.28→0.44→0.85 ms
-   with K; avoidable).
+   from the always-on pair). The K=4 member-correct fold + per-member state
+   slices make this buildable now.
+4. **Seed members** — independently trained seeds through the same fold turn
+   D into genuine epistemic uncertainty. Note: `fold_members.py` asserts
+   members share activation scales; different seeds need a joint
+   recalibration pass first.
+5. **Layer-resolved D** — members differing in one layer's rounding rank the
+   activation quantizers; targets the remaining ~0.016 (MinMax grid) gap.
 
 ## Anchor numbers to remember
 
-baseline 2.598 ms / K=2 fold 3.762 ms / K=3 fold 5.312 ms · RTN 3.0268 →
-SR-K=4 3.0421 (cap FP32 3.0682) · frame-adaptive: 96 % of K=4 at 3.0 members
-· OOD white-noise AUROC 1.000.
+baseline 2.598 ms / K=2 fold 3.762 ms / K=3 fold 5.312 ms · offline RTN
+3.0268 → SR-K=4 3.0421 (cap FP32 3.0682) · frame-adaptive: 96 % of K=4 at
+3.0 members · OOD white-noise AUROC 1.000 · **streamed** (relu6-deep own
+grid): RTN 3.0117, SR-K=4 +0.0100; MinMax recal +0.0237, MinMax SR-K=4
+**3.0523** (+0.0405) · member-correct fold bit-exact (fold == K sessions).

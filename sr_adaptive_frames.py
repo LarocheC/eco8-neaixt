@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-REPO = Path("/home/claroche/eco8-neaixt")
+REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
 from common.dataset import Dataset, load_voicebank_demand  # noqa: E402
@@ -31,7 +31,11 @@ from lisennet.eval_metrics_ext import _pesq_one, _session, full_graph_mask  # no
 from lisennet.export_onnx import _load_from_checkpoint  # noqa: E402
 
 GRAPHS = REPO / "paper" / "data" / "tmp_quant" / "sr_graphs"  # built by sr_decoder_ensemble.py
-CKPT = REPO / "cp_lisennet_conv_hardened_deep_relu6" / "g_best"
+for _name in ("cp_lisennet_conv_hardened_deep_relu6",
+              "cp_lisennet_conv_hardened_nc24_deep_relu6"):   # laptop / training box
+    if (REPO / _name / "g_best").exists():
+        CKPT = REPO / _name / "g_best"
+        break
 OUT = REPO / "sr_adaptive_frames_results.json"
 
 FRACS = (0.0, 0.10, 0.25, 0.50, 1.0)

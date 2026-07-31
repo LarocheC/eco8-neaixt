@@ -34,7 +34,7 @@ import onnx
 import torch
 from onnx import numpy_helper
 
-REPO = Path("/home/claroche/eco8-neaixt")
+REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
 from common.dataset import Dataset, load_voicebank_demand  # noqa: E402
@@ -44,7 +44,11 @@ from lisennet.export_onnx import _load_from_checkpoint  # noqa: E402
 
 TMP = REPO / "paper" / "data" / "tmp_quant"
 GRAPHS = TMP / "sr_graphs"  # built by sr_decoder_ensemble.py (run it first)
-CKPT = REPO / "cp_lisennet_conv_hardened_deep_relu6" / "g_best"
+for _name in ("cp_lisennet_conv_hardened_deep_relu6",
+              "cp_lisennet_conv_hardened_nc24_deep_relu6"):   # laptop / training box
+    if (REPO / _name / "g_best").exists():
+        CKPT = REPO / _name / "g_best"
+        break
 ENS = REPO / "sr_decoder_ensemble_results.json"
 OUT = REPO / "sr_uncertainty_results.json"
 K = 8

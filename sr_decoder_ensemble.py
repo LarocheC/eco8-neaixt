@@ -34,7 +34,7 @@ import onnx
 import torch
 from onnx import numpy_helper
 
-REPO = Path("/home/claroche/eco8-neaixt")
+REPO = Path(__file__).resolve().parent
 import sys  # noqa: E402
 
 sys.path.insert(0, str(REPO))
@@ -48,7 +48,11 @@ from lisennet.export_onnx import _load_from_checkpoint  # noqa: E402
 TMP = REPO / "paper" / "data" / "tmp_quant"
 QDQ = TMP / "relu6deep_rt_int8_pc_signed.onnx"
 FP32 = TMP / "relu6deep_rt_int8_fp32.onnx"
-CKPT = REPO / "cp_lisennet_conv_hardened_deep_relu6" / "g_best"
+for _name in ("cp_lisennet_conv_hardened_deep_relu6",
+              "cp_lisennet_conv_hardened_nc24_deep_relu6"):   # laptop / training box
+    if (REPO / _name / "g_best").exists():
+        CKPT = REPO / _name / "g_best"
+        break
 OUT = REPO / "sr_decoder_ensemble_results.json"
 GRAPH_DIR = TMP / "sr_graphs"  # members regenerate deterministically (CRC-seeded)
 GRAPH_DIR.mkdir(parents=True, exist_ok=True)

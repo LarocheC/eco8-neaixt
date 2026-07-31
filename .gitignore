@@ -27,6 +27,10 @@ deploy/stm32n6/windowed_eval/
 deploy/stm32n6/gate0_artifacts/
 # Stray deployment ONNX at the repo root (real artifacts live under cp_*/)
 /g_best*.onnx
+# SR ensemble member graphs (deterministic: sr_decoder_ensemble.py / sr_stream_ensemble.py)
+paper/data/tmp_quant/sr_graphs/
+paper/data/tmp_quant/sr_stream_graphs/
+paper/data/tmp_quant/sr_stream_graphs_mm/
 
 # GSD planning (kept local — commit_docs=false)
 .planning/

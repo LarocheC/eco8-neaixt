@@ -235,3 +235,148 @@ host-eval its streamed PESQ. (2) Streaming frame-escalation with state-copy
 (tests the adaptive ceiling's deployability). (3) Optional: per-member
 activation recalibration; relu6-deep bd-fold once trained checkpoints are
 copied over; replicate feat after the prologue.
+
+## Member-correct fold (v3) + streamed SR quality (2026-07-31, training box)
+
+Continuation on the training box (the deep/relu6 checkpoints live here; the
+DK + stedgeai stay on the laptop). Two deliverables: the member-correct fold
+the previous section called for, and the *streamed* SR-ensemble quality it
+unlocks — measured on relu6-deep's own streaming graph, not projected from the
+offline study. Everything below is host-side; board latency of the new graphs
+is the one piece still owed by the laptop.
+
+### relu6-deep streaming graphs (new exports, tracked)
+
+`lisennet/export_onnx.py --streaming` on
+`cp_lisennet_conv_hardened_nc24_deep_relu6/g_best` → feat + **25** FIFO states
+(889 nodes, 57 Conv / 3 ConvTranspose / 3 GLU chunk chains; the exporter's Pad
+fix is built in, so no `sanitize_pads.py` step). Quantized with the deploy
+recipe (`quant_onnx.py --mode static --streaming`: signed per-channel QDQ,
+state-threaded percentile calibration). Tracked as
+`paper/data/tmp_quant/relu6deep_streaming_{fp32,int8_signed}.onnx` (+ a
+MinMax-calibrated sibling `..._int8_minmax.onnx`, below).
+
+Sanity anchors: ORT streaming FP32 == offline torch frame-exactly (max diff
+9.5e-7 over an utterance) and its full-824 PESQ **3.0682** equals the offline
+FP32 number to 4 decimals. The regenerated percentile int8 grid scores
+**3.0117** vs the 3.0132 recorded in `paper/data/stream_pesq.json` (r6) — the
+grid is calibration-pipeline-identical but library-drift-sensitive at the
+±0.0015 level; all deltas below are paired against *this* graph's grid.
+
+### fold_members.py — K distinct members, bit-exact
+
+`fold_channels.py` (v2) is a latency proxy: identical members, interleaved
+through the GLU chunk and the skip concats. `fold_members.py` (v3) folds K
+*different* member graphs (same structure + scales, different int8 weights —
+the SR protocol) with per-member semantics:
+
+- **GLU**: each `fc1` (1x1, emb→2h) becomes TWO grouped 1x1 convs — rows
+  [0:h] / [h:2h] of every member's weight, group=K — and the traced
+  `Shape→Gather→Add→Div→Slice` chunk chain is deleted. The two halves'
+  existing quantizers are rewired onto the new convs; they reuse fc1's output
+  scale, so requantization is idempotent and the member arithmetic unchanged.
+- **Decoder skips**: `cat([x, enc], 1)` folds to segment-major member layout;
+  the consuming convs are bd-dense (v2 rule), so member blocks are *placed* at
+  segment-local offsets in the dense weight (permuted block layout, exact
+  zeros elsewhere) — standard shapes, zero extra nodes. Segment widths come
+  from ONNX shape inference on the member graph, not name heuristics.
+- **Tail**: the `apply_mask` channel Gathers become stride-2 Slices (members'
+  mask[0::2], mask[1::2]) and a keep-dims Slice for the noisy mag; `est_mag`
+  widens to **(B, K, 1, F)** — one enhanced magnitude per member, so the mean
+  *and* the disagreement D are one axis-op away for the caller.
+- **Head**: `conv_1` is 1x1 on the 3 shared feat channels → members stack on
+  its *out* axis only. No `feat` replication, no head Concat — the v2
+  "replicate feat before the FP32 prologue" SW cost (0.28→0.44→0.85 ms with K)
+  is deleted structurally, closing that open thread.
+
+Op census is K-invariant (60 Conv + 3 CT + 68 Slice; no Gather/Shape/Div
+left), IO stays 26-in/26-out at every K, no empty-Pad atonn blocker.
+
+**Equivalence proof** (`--check`, plus a real-utterance run): fold vs the K
+separate member sessions, streaming with propagated state —
+est_mag and all 25 states **bit-exact (100.000 % of elements, worst diff
+0.0)** over 40 random frames and over a full real utterance (391 frames × 4
+members). The shared-scale Q/DQ chains snap identically, so the fold *is* the
+ensemble, not an approximation of it.
+
+### Streamed SR quality — measured, 824 utts (`sr_stream_ensemble.py`)
+
+Frame-by-frame FIFO streaming (per-member state), members' est_mag averaged
+per frame, noisy phase, paired vs the streamed RTN. Two activation grids on
+the same weights: the deploy percentile grid, and a MinMax grid (only the
+calibration method differs).
+
+| config | PESQ | Δ vs same-grid RTN |
+|---|---:|---|
+| **percentile grid** (deployed recipe) | | |
+| RTN | 3.0117 | — |
+| FP32 (grid-free cap) | 3.0682 | +0.0565 ± 0.0054 |
+| all weights exact | 3.0041 | −0.0077 ± 0.0071 (co-calibration, again) |
+| SR K=1 | 3.0051 | −0.0067 ± 0.0065 |
+| SR K=2 | 3.0132 | +0.0015 ± 0.0063 |
+| SR K=4 | 3.0217 | +0.0100 ± 0.0051 |
+| SR K=8 | 3.0240 | +0.0123 (22 % of the gap) |
+| **MinMax grid** (same weights, same protocol) | | |
+| RTN | **3.0354** | — (+0.0237 over percentile RTN!) |
+| SR K=2 | 3.0418 | +0.0064 (20 % of its 0.0328 gap) |
+| SR K=4 | **3.0523** | **+0.0169 (52 % of its gap)** |
+
+Readings, in causal order:
+
+1. **The offline recovery does not transfer as-is to the deployed streaming
+   grid.** Offline: K=4 = +0.0153, saturated by K=8, 37 % of a 0.0413 gap.
+   Streamed percentile: a *single* SR draw now hurts (−0.0067 vs +0.0014
+   offline), K=2 barely breaks even, and the curve is still climbing at K=8
+   (+0.0123, 22 % of a larger 0.0565 gap) — the same mechanism, lagged by
+   roughly one octave of K.
+2. **The lag is the percentile calibration, not state recirculation.** The
+   streaming recipe clips activation tails (percentile 99.999); clipping error
+   is deterministic and SR draws cannot dither it away. On a MinMax grid the
+   same draws recover offline-like fractions at K=2. The recirculation
+   hypothesis (member state trajectories decorrelating badly) is not needed.
+3. **The calibration method itself is worth more than the ensemble.** MinMax
+   RTN beats the deployed percentile RTN by **+0.0237** on this graph — a free
+   recalibration, no weight change. MinMax + SR K=2 (3.0418) ≈ percentile
+   K=8 + 0.018.
+4. **On the MinMax grid the ensemble over-performs the offline study**: K=4
+   recovers 52 % of its gap (offline 37 %). Combined, recalibration + K=4 SR
+   = **+0.0405 over the deployed grid** — 72 % of the streamed PTQ gap closed,
+   0.016 short of FP32. Fold-vs-separate PESQ identity checked: 3.1276 ==
+   3.1276 on the 64-utt subset (bit-exact upstream, so equality is exact).
+
+### Deployment picture (updated)
+
+Ship candidate: **recalibrate the streaming graph MinMax, fold K SR members
+member-correct**. Host-measured: MinMax K=2 = 3.0418, K=4 = 3.0523 (vs
+deployed 3.0117 baseline). Latency is weight- and scale-independent (July-14 result),
+so the v2 bd-fold numbers carry: K=2 ≈ +45 %, K=4 ≈ extrapolated ~7 ms on the
+nc20-shaped graph — relu6-deep's own K-curve is exactly what the laptop still
+needs to measure. The (B,K,1,F) est_mag also hands the app per-member masks,
+so the UQ/adaptive results apply unchanged on-device.
+
+### Artifacts + the laptop's TODO
+
+Tracked in `paper/data/tmp_quant/ens_graphs/`:
+`ens_memb_k{1,2,4}.onnx` (percentile grid) and `ens_memb_mm_k{2,4}.onnx`
+(MinMax grid; the quality candidates). `ens_memb_k1` is the restructured K=1
+twin — same arithmetic as the deployed RTN graph (bit-exact, checked), new op
+structure — so **K=1-twin vs baseline is the A/B that isolates the
+fc1-split/tail-slice cost**. SR members regenerate deterministically
+(`sr_stream_ensemble.py` builds them on demand; seeds 0..K−1, CRC-per-tensor).
+
+Laptop steps (per `profile_one.sh`, adapt `$SP`):
+1. `stedgeai generate` (4.0.1, `n6-noextmem@user_neuralart.json`) on the five
+   graphs + `relu6deep_streaming_int8_signed.onnx` as the true baseline.
+2. `n6_loader` + `npu_profiler -b 1`/`-b 4` (never `-b 16` on folds; never
+   kill mid-load). Risk: these are 26-in/26-out — npu_profiler bound 18/18
+   fine, the E801 threshold is unknown; if it rejects, profile the K=1 twin
+   first to size the IO problem before touching the folds.
+3. Expected: epochs ≈ v2 bd-fold ± a few (+3 grouped fc1 convs, −3 chunk
+   chains, −1 head Concat, tail Slices for Gathers); the K=1-twin delta
+   prices the restructure.
+
+Open threads after this session: board latency of the v3 folds (above);
+streaming frame-escalation with state-copy (the K=4 fold + a state copy
+between member slices is now buildable); seed-member folds — note
+`fold_members.py` asserts shared activation scales, so genuinely different
+seeds need a joint recalibration pass first; layer-resolved D unchanged.
