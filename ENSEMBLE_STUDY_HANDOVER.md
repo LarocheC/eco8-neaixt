@@ -81,6 +81,19 @@ weights, no retraining.
   `paper/data/tmp_quant/ens_graphs/ens_memb{_mm,}_k*.onnx` + streaming base
   graphs; the K=1 twin isolates the restructure cost. Laptop TODO + expected
   epochs: lab-log §"Artifacts + the laptop's TODO".
+- **Acting-on-D experiments** (`sr_gating.py`, `sr_asr_gate.py` + results
+  JSONs; lab-log §"Acting on D"): do-no-harm mask gating is a *negative* on
+  ID (5/824 victims, every gate pays mean PESQ) and on spectrally-novel OOD
+  (the enhancer handles white noise fine — D flags novelty, not failure);
+  it is a real win only on level-shifted inputs (gentle per-bin gate:
+  gain+12 tail flips positive; per-bin D partially survives the gain−12
+  variance collapse, +0.18 mean). Downstream-ASR gating is the strong
+  result: enhancement *hurts* whisper-tiny in every pool (up to **+16 WER
+  points** on white noise while PESQ/DNSMOS improve!), D fires on 100 % of
+  white-noise utterances (feature-domain level check: 0 % — exact
+  complements) and the D+level bypass keeps the recognizer within ~1 pt of
+  raw everywhere. Ship shape: enhanced stream for ears, D+level-gated bypass
+  for the machine consumer.
 
 ## What's in this branch
 

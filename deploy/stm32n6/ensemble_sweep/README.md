@@ -380,3 +380,83 @@ streaming frame-escalation with state-copy (the K=4 fold + a state copy
 between member slices is now buildable); seed-member folds — note
 `fold_members.py` asserts shared activation scales, so genuinely different
 seeds need a joint recalibration pass first; layer-resolved D unchanged.
+
+## Acting on D: do-no-harm gating + downstream ASR gating (2026-07-31, cont.)
+
+The "plausible, cheap, untested" pair from the follow-up list, both run on the
+deployment artifact itself (`ens_memb_mm_k4.onnx` — its (B,K,1,F) est_mag
+gives the member mean and the disagreement D per frame for free). Thresholds
+in both experiments are FROZEN from the ID pool (deployment constants), and
+both are evaluated on ID (824) plus the UQ study's OOD recipes (200 each):
+`white5db` (D fires, AUROC 1.0), `gain-12` (D provably blind — negative
+control), `gain+12`.
+
+### E1 — do-no-harm gating (`sr_gating.py`, `sr_gating_results.json`)
+
+Gate: `est' = (1−a)·est_avg + a·src_mag` with `a` from per-frame D_t
+(= var_K est_mag, mean over F) or per-bin D_tf; linear and threshold forms;
+θ ∈ {p75, p90}(ID); a_max ∈ {0.25, 0.5, 1.0}. Primary read-outs are tails
+and harmed-utterance counts vs noisy — the study predicted (correctly) that
+means would not reward it.
+
+| pool | ungated vs noisy | best gate | what gating does |
+|---|---|---|---|
+| id | 3.0523 vs 1.9707; **harmed 5/824**, p1 +0.176 | bin-lin_p90_a0.25 | pays −0.071 mean, saves 2 of 5 victims; DNSMOS BAK −0.16 with NO SIG gain. **Not worth it in-distribution** — there is nobody to insure. Aggressive frame gates *create* harm (up to 66/824). |
+| white5db | 1.6265 vs 1.0657; harmed **0/200**, p1 +0.327 | (none) | D is 6.8× ID — but the enhancer handles unseen *stationary* noise fine. **D flags novelty, not failure**; every gate only returns noise (−0.17 mean at the gentlest). Full bypass ≈ noisy (harmed 181/200). |
+| gain-12 | 2.2475 vs 2.1620; **harmed 85/200**, p1 −1.299 | bin-thr_p90_a0.25 | the pool that actually needs insurance — and frame-D is blind (0.83× ID, variance collapse). **Per-bin D partially survives the collapse**: harmed 85→47, mean **+0.178**. A two-sided input-level check remains the robust fix. |
+| gain+12 | 2.6625 vs 2.1620; harmed 5/200, p1 −0.135 | bin-thr_p90_a0.25 | the clean win: mean-neutral (+0.011), tail flips positive (p1 → **+0.027**), harmed 5→2. |
+
+Verdict: D-gating is **not** a general do-no-harm mechanism. It is worth
+having exactly where disagreement coincides with real failure — level-shifted
+inputs, where the gentle per-bin threshold gate is mean-neutral-to-positive
+and fixes the tail — and it is counterproductive where disagreement means
+novelty-the-net-handles (white noise). The monitoring framing ("conditions
+changed" flag → telemetry / recalibration trigger) survives intact; the
+automatic per-frame insurance mostly does not. If one gate ships, it is
+`bin-thr, θ=p90(ID), a_max=0.25` — per-bin, gentle, threshold — plus the
+level check.
+
+### E2 — D as a bypass gate for a downstream ASR (`sr_asr_gate.py`)
+
+The product-shaped test: the enhancer feeds a recognizer (whisper-tiny.en,
+greedy), and the gate hands the recognizer the RAW input when uncertain.
+Differential WER — references are whisper's transcriptions of the *clean*
+audio, a protocol that structurally *favors* the enhanced signal (it is
+closer to clean by construction), so measured enhancement damage is a lower
+bound. Policies frozen on ID: bypass if utt-mean D > p{90,95,99}(ID), and a
+two-sided **feature-quantizer-domain** level check (waveform RMS is vacuous —
+the data pipeline RMS-normalizes; the deployable signals are the input-mag
+clip-rate `q>127` for hot and mean |q−zp| for quiet, both running means of
+values the device already computes).
+
+| pool | noisy | enh | D_p95 | level | D_p95+level | oracle |
+|---|---:|---:|---:|---:|---:|---:|
+| id | 0.084 | 0.099 | 0.096 @5 % | 0.099 @1 % | 0.095 @6 % | 0.056 |
+| white5db | 0.218 | **0.381** | **0.218 @100 %** | 0.381 @0 % | **0.218 @100 %** | 0.180 |
+| gain−12 | 0.041 | 0.119 | 0.093 @8 % | 0.090 @86 % | **0.072 @90 %** | 0.037 |
+| gain+12 | 0.102 | 0.106 | 0.101 @88 % | 0.102 @100 % | 0.102 @100 % | 0.074 |
+
+Findings:
+
+1. **Enhancement hurts this recognizer in every pool** — ID +1.5 WER pts,
+   white noise +16.3, quiet +7.8 — while helping PESQ/DNSMOS in almost all
+   of them (white5db: +0.56 PESQ, +1.0 DNSMOS OVRL, and +16 WER!). Speech
+   enhancement tuned for ears is a net-negative front-end for a noise-robust
+   ASR; PESQ and the machine consumer *disagree violently* off-distribution.
+2. **The D-gate converts the catastrophic case into a safe one.** On white
+   noise D fires on 100 % of utterances (level: 0 % — it is spectral novelty,
+   not level) and the bypass recovers the full +16.3 points. This is the
+   confidence-channel story landing exactly as pitched.
+3. **The two signals are exactly complementary**: D covers novelty
+   (white5db 100 %/level 0 %), the quantizer-domain level check covers
+   gain−12 (86 %/D 8 %) where D is variance-collapsed. Combined: quiet-pool
+   damage 0.119 → 0.072 (60 % recovered; a stricter quiet threshold trades
+   ID false-bypass for more).
+4. **Per-utterance selection inside ID is still a null** (ρ(D, damage) =
+   +0.04; oracle 0.056 vs achieved 0.095) — consistent with the study's
+   utterance-level result. D routes *distribution shifts*, not individual ID
+   utterances.
+5. Deployment reading: if the output feeds only a robust ASR, bypass always.
+   If one stream feeds ears *and* recognizer — the actual N6 pipeline shape —
+   `D_p95 + level` keeps the recognizer within 1 pt of raw everywhere while
+   the listener keeps the enhancement wins, for a few scalar ops per frame.
