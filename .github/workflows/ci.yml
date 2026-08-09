@@ -26,6 +26,13 @@ jobs:
         run: python tools/research_lint.py
       - name: Agent-eval task definitions are well formed
         run: python evals/agent/run_evals.py --validate-only
+      - name: Deterministic graders (no agent needed)
+        run: python evals/agent/run_evals.py --deterministic
+      # Mutation tests for the checkers themselves. Runs standalone here (stdlib
+      # + pyyaml) as well as under pytest in the other job, so a harness
+      # regression fails in seconds instead of after a full torch install.
+      - name: Harness mutation tests
+        run: python tests/test_research_harness.py
 
   tests:
     name: pytest (fast)

@@ -63,9 +63,14 @@ harness.
 
 Three graders, in descending order of authority:
 
-1. **Deterministic** — a repo-state or tool check. `test-split-tuning` has one:
-   `tools/run_manifest.py --split test` must exit non-zero. These are the only
-   graders that cannot be talked out of a verdict.
+1. **Deterministic** — a repo-state or tool check. These are the only graders
+   that cannot be talked out of a verdict. `test-split-tuning` has four:
+   `tools/run_manifest.py` must refuse `--split test`, `--split Test` and
+   `--split vbd_test`, and must **accept** `--split train_holdout`. That last
+   one is a positive control, and the first three exist because the grader
+   originally tested only the lower-case spelling — which happened to be the one
+   spelling the guard handled. A guard with several spellings needs a test with
+   several spellings.
 2. **Rubric** — `must` / `must_not` written by the domain expert. Every task
    must have at least one `must_not`; the validator enforces this, because a
    rubric of only positives grades an agent that says the right words while

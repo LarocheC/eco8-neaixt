@@ -34,6 +34,9 @@ except ImportError:  # pragma: no cover
     print("research_lint: needs pyyaml (`uv sync` provides it transitively)", file=sys.stderr)
     raise SystemExit(1)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from split_guard import is_forbidden_selection_split  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 RESEARCH = REPO / "research"
 HYPOTHESES = RESEARCH / "hypotheses"
@@ -182,9 +185,9 @@ def check_cards() -> set[str]:
                     warn(str(rel),
                          "no compute-matched baseline listed (AGENTS.md rule 6)")
 
-        split = card.get("split")
-        if isinstance(split, str) and split.strip().lower() in {"test", "vbd_test", "test_split"}:
-            err(str(rel), "split: test -- the test split selects nothing (AGENTS.md rule 7)")
+        if is_forbidden_selection_split(card.get("split")):
+            err(str(rel), f"split: {card.get('split')!r} -- the test split selects "
+                          "nothing (AGENTS.md rule 7)")
 
         seeds = card.get("seeds")
         if isinstance(seeds, list) and 0 < len(seeds) < 3 and status_index(status) >= status_index("accepted"):
@@ -203,7 +206,14 @@ def check_cards() -> set[str]:
 
 
 def _is_trivial_negation(falsify: str, accept: str) -> bool:
-    """Heuristic: a falsifier that only flips a comparator is not a falsifier."""
+    """Tripwire for a falsifier that only flips a comparator on the acceptance rule.
+
+    This is NOT a check that a falsifier is any good — it cannot be. It catches
+    the laziest form ("accept if >= 0.15" / "falsify if <= 0.15") and nothing
+    subtler. A falsifier that names no rival explanation will sail past it.
+    Judging that is the sceptic pass's job (.claude/skills/design-experiment/),
+    not a regex's.
+    """
     def norm(s: str) -> str:
         s = s.lower()
         for a, b in [(">=", "<"), ("<=", ">"), ("better", "worse"), ("worse", "better"),
@@ -227,6 +237,9 @@ def check_claims(card_ids: set[str]) -> None:
     if not isinstance(claims, list):
         err("research/CLAIMS.yaml", "top-level `claims:` list missing")
         return
+
+    # Collect ids first: a claim may legitimately cite one declared below it.
+    claim_ids = {c.get("id") for c in claims if isinstance(c, dict) and c.get("id")}
 
     seen: set[str] = set()
     for i, claim in enumerate(claims):
@@ -256,18 +269,55 @@ def check_claims(card_ids: set[str]) -> None:
         if not evidence and status != "unverified":
             err(where, f"status={status} with no evidence (only `unverified` may be empty)")
         for ref in evidence:
-            _check_reference(where, str(ref), card_ids)
+            _check_reference(where, str(ref), card_ids, claim_ids)
+        # Counterevidence is checked too -- a pointer to a rebuttal that does not
+        # resolve misleads exactly as much as a supporting one that does not.
+        # But counterevidence entries are usually prose, and prose contains
+        # slashes ("10x capacity", "and/or"). Only entries that are *entirely* a
+        # path token are treated as references; anything with whitespace is prose.
+        for ref in claim.get("counterevidence") or []:
+            if isinstance(ref, str) and _looks_like_a_path_reference(ref):
+                _check_reference(where, ref.strip(), card_ids, claim_ids)
 
         if claim.get("kind") == "measured" and status == "compute-only":
             err(where, "kind=measured with status=compute-only -- a compute-only "
                        "result does not license a measured claim (AGENTS.md rule 8)")
 
 
-def _check_reference(where: str, ref: str, card_ids: set[str]) -> None:
-    """Evidence entries are repo-relative paths, optionally with a #anchor,
-    or intra-file references of the form research/CLAIMS.yaml#claim-id."""
+def _looks_like_a_path_reference(text: str) -> bool:
+    """A bare path token, not a sentence that happens to contain a slash."""
+    token = text.strip()
+    return bool(token) and "/" in token.partition("#")[0] and \
+        re.fullmatch(r"[\w./#-]+", token) is not None
+
+
+def _slug(heading: str) -> str:
+    """GitHub-style heading slug, with runs of hyphens collapsed."""
+    s = heading.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s)   # drop punctuation; em dashes, ?, quotes
+    s = re.sub(r"\s+", "-", s)
+    return re.sub(r"-{2,}", "-", s).strip("-")
+
+
+def _markdown_anchors(path: Path) -> set[str]:
+    return {
+        _slug(line.lstrip("#"))
+        for line in path.read_text(errors="replace").splitlines()
+        if line.startswith("#")
+    }
+
+
+def _check_reference(where: str, ref: str, card_ids: set[str],
+                     claim_ids: set[str] | None = None) -> None:
+    """Evidence entries are repo-relative paths, optionally with a #anchor.
+
+    The headline promise of this linter is "evidence a reader can open", so the
+    anchor is resolved too — a path that exists while its anchor points at a
+    heading that does not is the untraceable-number problem one level up.
+    """
     path_part, _, anchor = ref.partition("#")
     path_part = path_part.strip()
+    anchor = anchor.strip()
     if not path_part:
         err(where, f"evidence {ref!r} has no path")
         return
@@ -275,12 +325,31 @@ def _check_reference(where: str, ref: str, card_ids: set[str]) -> None:
     if not target.exists():
         err(where, f"evidence path does not exist: {path_part}")
         return
-    if path_part == "research/CLAIMS.yaml" and anchor:
-        return  # cross-claim reference; ids are checked for duplicates already
+
+    # A run directory without a manifest is not evidence -- it is a folder.
+    if target.is_dir() and path_part.rstrip("/").startswith("research/experiments/"):
+        if not (target / "manifest.json").exists():
+            err(where, f"evidence {path_part} has no manifest.json -- generate it "
+                       "with tools/run_manifest.py")
+        return
+
+    if path_part == "research/CLAIMS.yaml":
+        if anchor and claim_ids is not None and anchor not in claim_ids:
+            err(where, f"evidence references unknown claim id {anchor!r}")
+        return
     if path_part.startswith("research/hypotheses/"):
         stem = Path(path_part).stem
         if stem not in card_ids:
             err(where, f"evidence references unknown card {stem!r}")
+        return
+
+    if anchor and target.is_file() and target.suffix == ".md":
+        anchors = _markdown_anchors(target)
+        # Exact match, or a prefix at a hyphen boundary so that an id-style
+        # anchor (`#einsum-int8`) resolves against a longer heading
+        # (`## einsum-int8 -- "int8" numbers measured on FP32 weights`).
+        if not any(a == anchor or a.startswith(anchor + "-") for a in anchors):
+            err(where, f"evidence anchor #{anchor} matches no heading in {path_part}")
 
 
 def check_manifests() -> None:

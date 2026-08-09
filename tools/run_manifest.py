@@ -43,6 +43,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from split_guard import is_forbidden_selection_split  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPERIMENTS = REPO_ROOT / "research" / "experiments"
 
@@ -255,9 +258,9 @@ def main(argv: list[str] | None = None) -> int:
     if not command and not a.no_run:
         ap.error("give a command after `--`, or pass --no-run")
 
-    if a.split == "test":
+    if is_forbidden_selection_split(a.split):
         print(
-            "refusing: --split test. The test split selects nothing "
+            f"refusing: --split {a.split!r}. The test split selects nothing "
             "(AGENTS.md rule 7). Use a train holdout.",
             file=sys.stderr,
         )

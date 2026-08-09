@@ -27,6 +27,29 @@ The session-scoped autouse fixture in `tests/conftest.py` enables
 `conftest.py` BEFORE `import torch` — see "If a test fails with
 CUBLAS_WORKSPACE_CONFIG error" below.
 
+## Harness tests (`test_research_harness.py`)
+
+Tests the agent-control checkers — `tools/research_lint.py`,
+`tools/run_manifest.py`, `evals/agent/run_evals.py` — rather than the models.
+
+They are **mutation tests**: take the real repository, break exactly one thing,
+and assert the checker rejects it *and names the right problem*. For a checker,
+the dangerous bug is a false negative — a silent pass is invisible forever,
+while a noisy false positive gets fixed the same morning. `test_clean_repo_passes`
+pins the other direction, so a checker that rejects everything cannot score well.
+
+Runs standalone as well as under pytest, because the harness is deliberately
+dependency-light (stdlib + pyyaml) so it can run in a board-measurement venv or
+a bare CI container:
+
+```bash
+uv run pytest tests/test_research_harness.py -q   # normal
+python tests/test_research_harness.py             # no pytest, no torch
+```
+
+The fast CI job uses the second form. If you add a rule to the linter, add the
+mutation that proves it fires — an untested rule is a rule you are hoping about.
+
 ## Tolerance buckets (parity test)
 
 The parity test (`tests/test_streaming_parity.py::test_parity_strict_tolerance`)

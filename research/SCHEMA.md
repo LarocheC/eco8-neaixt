@@ -34,11 +34,17 @@ Copy `research/hypotheses/TEMPLATE.yaml`.
 
 Two rules the linter enforces because they are the ones that get skipped:
 
-- a card at `accepted` or beyond must have a `falsify_if` that is not the
-  logical negation of `accept_if` — a real falsifier names a *rival explanation*
-  (e.g. "a compute-matched static matches it at the same measured cost"), not
-  merely "the number was lower";
-- `split: test` is rejected outright.
+- `split: test` is rejected outright, under every spelling
+  (`Test`, `TEST`, `vbd_test`, `test-split`, …);
+- a card at `accepted` or beyond must have a `falsify_if` that is not a bare
+  comparator flip of `accept_if`.
+
+Be clear about the limit of the second one: it is a tripwire for the laziest
+form ("accept if ≥ 0.15" / "falsify if ≤ 0.15"), not a judgement that a
+falsifier is any good. A real falsifier names a **rival explanation** — "a
+compute-matched static matches it at the same measured cost" — and no regex can
+check for that. The sceptic pass in `.claude/skills/design-experiment/` is what
+checks it, and a card that has not had one is not ready to be `accepted`.
 
 ## Claim — an entry in `research/CLAIMS.yaml`
 

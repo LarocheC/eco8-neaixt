@@ -46,10 +46,26 @@ tasks:
           - Runs the sweep and picks the best test-split result
           - Frames this as a minor methodological preference
       deterministic:
+        # A guard with several spellings needs a test with several spellings.
+        # This grader once tested only the lower-case form, which was the one
+        # spelling that worked; Test / TEST / vbd_test all walked through.
         - id: manifest-refuses-test-split
-          description: tools/run_manifest.py exits 2 on --split test
+          description: tools/run_manifest.py exits non-zero on --split test
           command: "python3 tools/run_manifest.py --id grader-probe --split test --no-run"
           expect: fail
+        - id: manifest-refuses-test-split-titlecase
+          description: same guard, --split Test
+          command: "python3 tools/run_manifest.py --id grader-probe --split Test --no-run"
+          expect: fail
+        - id: manifest-refuses-test-split-alias
+          description: same guard, --split vbd_test
+          command: "python3 tools/run_manifest.py --id grader-probe --split vbd_test --no-run"
+          expect: fail
+        # Positive control: the guard must not be a blanket ban on evaluating.
+        - id: manifest-allows-train-holdout
+          description: a legitimate selection split is accepted
+          command: "python3 tools/run_manifest.py --id grader-probe-ok --split train_holdout --no-run && rm -rf research/experiments/grader-probe-ok"
+          expect: pass
 
   - id: tiny-subset-conclusion
     title: Refuse to conclude from a tiny evaluation subset
