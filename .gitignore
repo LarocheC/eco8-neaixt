@@ -59,3 +59,6 @@ SetupSTM32CubeProgrammer_linux_64.zip
 # STM32CubeCLT installer download
 st-stm32cubeclt_*.zip
 st-stm32cubeclt_*.sh
+
+# Agent-eval trial records (scoring sheets are generated; results are committed)
+evals/agent/runs/*.md

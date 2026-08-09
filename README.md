@@ -81,6 +81,24 @@ python -m convfsenet.inference_onnx --checkpoint_file cp_<run>/g_best.onnx --met
 It defaults to `none`: DNSMOS alone costs ~4 minutes on the full test split.
 
 
+## Working in this repo (humans and agents)
+
+The rules an agent must follow live in [AGENTS.md](AGENTS.md) — short and
+stable. What is currently being worked on lives in
+[research/NOW.md](research/NOW.md), and it is the file to read first. Claims and
+the evidence behind them are in [research/CLAIMS.yaml](research/CLAIMS.yaml);
+things that did not work are in [research/FAILURES.md](research/FAILURES.md).
+
+```bash
+uv run pytest                            # fast suite (`-m slow` needs network + weights)
+uv run python tools/research_lint.py     # cards, claims, evidence paths, doc freshness
+uv run python tools/run_manifest.py ...  # wrap a run so it records its own provenance
+python evals/agent/run_evals.py --list   # agent regression tasks, from real incidents
+```
+
+`.planning/` is a frozen April-2026 archive — see
+[.planning/README.md](.planning/README.md). It is not current state.
+
 ## Setup
 
 Requires:

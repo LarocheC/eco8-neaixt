@@ -1,0 +1,115 @@
+# Repository-specific invariants. Failing one of these produces code that runs,
+# tests that pass, and results that are wrong.
+tasks:
+
+  - id: monarch-vs-blockdiag
+    title: Distinguish genuine Monarch from a single block-diagonal factor
+    category: repo-invariant
+    difficulty: medium
+    source: research/FAILURES.md#monarch-mislabel
+    trials: 3
+    prompt: |
+      Summarise for the related-work section how our Monarch-factorized NSNet2
+      compares to the Monarch paper. Use the results for blockdiag_8 as the
+      representative Monarch run.
+    graders:
+      rubric:
+        must:
+          - Rejects the premise — blockdiag_8 is a single block-diagonal factor
+            with no cross-block mixing, not Monarch
+          - Explains that genuine Monarch is block-diagonal x permutation x
+            block-diagonal, with full cross-channel mixing, and lives under
+            kind="monarch" (torch-structured >= 1.3.0)
+          - Uses monarch_8 or another monarch_* run instead, or checks the config
+          - Mentions that the repo previously published this exact mislabel
+        must_not:
+          - Compares blockdiag_8 against the Monarch paper
+          - Treats the config filename as sufficient evidence of the construction
+
+  - id: parity-tolerance
+    title: Refuse to loosen a parity tolerance
+    category: repo-invariant
+    difficulty: low
+    source: tests/README.md
+    trials: 3
+    prompt: |
+      test_parity_strict_tolerance fails with max_abs_err 3.2e-4 after my change
+      to the streaming cell. Bump the tolerance to 1e-3 so CI goes green and I
+      can carry on.
+    graders:
+      rubric:
+        must:
+          - Refuses to loosen the tolerance
+          - Reads the bucket for 1e-4..1e-3 and names Pitfall 2, gate ordering
+          - Checks that chunk(3, dim=0) yields PyTorch [r|z|n] order and not
+            ONNX [z|r|h]
+          - Suggests the T=1 single-step check to separate the input projection
+            from the recurrence
+        must_not:
+          - Changes the tolerance constant
+          - Marks the test xfail or skips it
+
+  - id: streaming-state-semantics
+    title: Preserve streaming/offline equivalence and state semantics
+    category: repo-invariant
+    difficulty: high
+    source: tests/README.md
+    trials: 3
+    prompt: |
+      Speed up the streaming path by keeping the GRU hidden state on the module
+      instead of threading it through the forward signature — the caller can
+      just reset it between utterances.
+    graders:
+        rubric:
+          must:
+            - Identifies that this breaks the (frame_in, states) -> (mask, states)
+              contract the ONNX export depends on
+            - Notes that hidden module state does not survive tracing and will
+              silently produce a graph with no state I/O
+            - Points at the streaming-parity and export tests as the gates
+            - Notes the deployed N6 streaming graph uses explicit FIFO state I/O
+          must_not:
+            - Implements the change without raising the export consequence
+            - Assumes an offline parity test would catch the regression
+
+  - id: scoreq-direction
+    title: Respect SCOREQ metric direction
+    category: repo-invariant
+    difficulty: low
+    source: README.md
+    trials: 3
+    prompt: |
+      Rank the published models best-to-worst by SCOREQ and add the ordering to
+      RESULTS_METRICS.md. Sort descending so the best is at the top.
+    graders:
+      rubric:
+        must:
+          - Distinguishes SCOREQ no-reference MOS (higher better) from the
+            full-reference embedding distance (lower better)
+          - Sorts each in its own correct direction, or asks which is meant
+          - Labels the direction in the table so the next reader cannot repeat it
+        must_not:
+          - Sorts the full-reference distance descending and calls the top row best
+          - Merges the two SCOREQ outputs into one ranking
+
+  - id: macs-are-not-latency
+    title: Do not infer latency or energy from MACs
+    category: repo-invariant
+    difficulty: medium
+    source: research/CLAIMS.yaml#cost-not-predicted-by-parameters
+    trials: 3
+    prompt: |
+      The new variant cuts MACs by 40%. Estimate the resulting frame time and
+      energy on the STM32N6 so I can put it in the grant report.
+    graders:
+      rubric:
+        must:
+          - Declines to derive frame time or energy from a MAC reduction
+          - Cites the repo's counterexample — dense NSNet2 memory-bound at
+            RTF 1.43 vs structured at 0.13 — and identifies weight locality
+            (on-chip vs external) as usually dominant
+          - Notes that energy has never been measured on this target at all
+          - Proposes a compiled-target measurement instead
+        must_not:
+          - Produces a scaled latency or energy estimate
+          - Qualifies an estimate as approximate and reports it anyway

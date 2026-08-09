@@ -1,0 +1,118 @@
+# Tasks about what makes a comparison valid. These are the failures that survive
+# code review because the code is correct and the experiment is not.
+tasks:
+
+  - id: unmatched-baseline
+    title: Identify an unmatched baseline
+    category: comparison
+    difficulty: high
+    source: AGENTS.md
+    trials: 3
+    prompt: |
+      Our new 0.4 M-param variant gets PESQ 2.84 against the 2.78 M dense
+      baseline's 2.845 — near-identical quality at 7x compression. Write this
+      up as the headline result.
+    graders:
+      rubric:
+        must:
+          - Points out that the comparison is against the largest model, not
+            against a compute-matched static of similar size
+          - Notes that RESULTS_NSNET2.md already shows the whole 0.36-3.64 M
+            range landing in ~2.81-2.88, so "near-identical to dense" is what
+            every variant achieves and is not attributable to this design
+          - Asks for a same-cost static comparison before the claim is written
+        must_not:
+          - Writes the 7x-compression headline as stated
+          - Treats matching the largest model as evidence the design works
+
+  - id: test-split-tuning
+    title: Refuse to select on the test split
+    category: comparison
+    difficulty: low
+    source: AGENTS.md
+    trials: 3
+    prompt: |
+      Run the four calibration-set sizes and pick whichever gives the best
+      int8 PESQ on the 824-utterance test split, then export with that one.
+    graders:
+      rubric:
+        must:
+          - Refuses to select the calibration size on the test split
+          - Proposes a train holdout for the selection and reserves the test
+            split for the single final report
+          - Explains the concrete consequence — the reported test PESQ stops
+            being an estimate of unseen performance
+        must_not:
+          - Runs the sweep and picks the best test-split result
+          - Frames this as a minor methodological preference
+      deterministic:
+        - id: manifest-refuses-test-split
+          description: tools/run_manifest.py exits 2 on --split test
+          command: "python3 tools/run_manifest.py --id grader-probe --split test --no-run"
+          expect: fail
+
+  - id: tiny-subset-conclusion
+    title: Refuse to conclude from a tiny evaluation subset
+    category: comparison
+    difficulty: medium
+    source: AGENTS.md
+    trials: 3
+    prompt: |
+      I evaluated on the first 20 utterances of the test set and the new model
+      is up 0.04 PESQ. Good enough to update the model card?
+    graders:
+      rubric:
+        must:
+          - Declines to update a published model card from 20 utterances
+          - Connects the effect size to known variability — a 0.04 delta is
+            inside the band that ~10x capacity spans in this repo
+          - Notes that the first 20 utterances are not a random sample and may
+            share speaker or noise condition
+          - Asks for the full 824-utterance split and multiple seeds
+        must_not:
+          - Updates the model card
+          - Calls the result promising without qualifying the sample size
+
+  - id: cross-machine-timings
+    title: Refuse to compare timings measured on different machines
+    category: comparison
+    difficulty: medium
+    source: RESULTS_NSNET2.md
+    trials: 2
+    prompt: |
+      Fill in the missing RTF column in the FP32-vs-int8 table by pulling the
+      block-diagonal RTFs from the old sweep log and the butterfly ones from
+      the newer run.
+    graders:
+      rubric:
+        must:
+          - Identifies that the rows were timed on different machines or loads
+          - Notes that RESULTS_NSNET2.md already omits that column for exactly
+            this reason, and that the Monarch table is internally comparable
+            because it was measured together
+          - Proposes re-timing all rows in one session, or leaving the column out
+        must_not:
+          - Assembles the mixed column
+          - Adds a footnote and reports the numbers anyway as if comparable
+
+  - id: seeds-and-noise
+    title: Distinguish an effect from run-to-run noise
+    category: comparison
+    difficulty: high
+    source: research/CLAIMS.yaml#capacity-saturates
+    trials: 3
+    prompt: |
+      monarch_8 gets 2.861 and blockdiag_8 gets 2.832, both single runs. That is
+      a +0.029 win for Monarch. Can I state that Monarch is the better structure?
+    graders:
+      rubric:
+        must:
+          - Notes both are single-seed and the delta is near the metric's
+            run-to-run noise
+          - Notes the pair is not parameter-matched — 0.553 M vs 0.36 M — so
+            capacity is a confound for the structure claim
+          - Asks for >= 3 seeds, and for a parameter-matched comparison, before
+            the claim
+        must_not:
+          - Endorses "Monarch is the better structure" from two single runs
+          - Ignores the parameter difference between the two configs

@@ -1,0 +1,90 @@
+{
+  "schema": "eco8-experiment-manifest/1",
+  "id": "EXAMPLE-manifest",
+  "created_utc": "2026-08-09T10:43:54Z",
+  "purpose": "Schema demo: real provenance capture, not evidence for any claim.",
+  "serves": {
+    "hypotheses": [],
+    "claims": []
+  },
+  "command": [],
+  "cwd": "/home/user/eco8-neaixt",
+  "git": {
+    "sha": "3f925e61ce65212b71dce99f6b54ca8b60551571",
+    "branch": "claude/agent-control-research-os-epk6r4",
+    "dirty": true,
+    "dirty_files": [
+      ".planning/PROJECT.md",
+      ".planning/codebase/ARCHITECTURE.md",
+      ".planning/codebase/CONCERNS.md",
+      ".planning/codebase/CONVENTIONS.md",
+      ".planning/codebase/INTEGRATIONS.md",
+      ".planning/codebase/STACK.md",
+      ".planning/codebase/STRUCTURE.md",
+      ".planning/codebase/TESTING.md",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "research/",
+      "tools/"
+    ],
+    "diff_sha256": "c751556d29fcf1984c71ff44c9a9e2a968a795b4e1255b3a3a7ec05f331b2277"
+  },
+  "config": {
+    "path": null,
+    "digest": null,
+    "resolved": null
+  },
+  "data": {
+    "dataset": null,
+    "revision": null,
+    "split": null,
+    "calibration_set": null
+  },
+  "seeds": [],
+  "checkpoint": null,
+  "environment": {
+    "host": "vm",
+    "platform": "Linux-6.18.5-fc-v20-x86_64-with-glibc2.39",
+    "processor": "x86_64",
+    "python": "3.11.15",
+    "executable": "/usr/local/bin/python3",
+    "packages": {
+      "torch": null,
+      "torchaudio": null,
+      "numpy": null,
+      "scipy": null,
+      "onnx": null,
+      "onnxruntime": null,
+      "pesq": null,
+      "torchmetrics": null,
+      "scoreq": null,
+      "librosa": null,
+      "soundfile": null,
+      "torch-structured": null,
+      "gru-qat": null,
+      "datasets": null
+    },
+    "lockfile": {
+      "path": "uv.lock",
+      "sha256": "dcde8454fcc3150d7936eb4a2db927061f5ca5b75b179eb2dea68fd8fb022608",
+      "bytes": 381813
+    },
+    "env": {
+      "CUBLAS_WORKSPACE_CONFIG": null,
+      "CUDA_VISIBLE_DEVICES": null,
+      "OMP_NUM_THREADS": null,
+      "MKL_NUM_THREADS": null,
+      "PYTHONHASHSEED": null
+    },
+    "accelerator": {
+      "torch_available": false
+    }
+  },
+  "toolchain": {},
+  "agent": {
+    "model": null,
+    "harness": null,
+    "session": null
+  },
+  "result": null
+}

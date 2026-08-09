@@ -1,0 +1,40 @@
+id: short-kebab-id-001
+question: One sentence, answerable yes or no.
+status: proposed          # proposed|critiqued|accepted|running|complete|refuted|abandoned
+created: YYYY-MM-DD
+
+mechanism: >
+  Why this should work, in terms of the model/hardware — not "it might help".
+prediction: >
+  The expected effect, with a number.
+
+# Required from `accepted` onward.
+falsify_if: >
+  The result that kills the idea. Name the rival explanation, not just
+  "the number was lower".
+accept_if: >
+  The result that would justify a claim.
+
+baselines:
+  - name: compute_matched_static
+    why: same measured cost, so a win is attributable to the mechanism
+  - name: always_full
+    why: upper bound
+controls:
+  - identical training data
+  - identical optimisation budget
+  - identical calibration set
+  - all timings on one box
+
+primary_metric: paired_quality_delta
+secondary_metrics: [energy, p50_latency, p99_latency]
+split: train_holdout      # never `test`
+seeds: [13, 37, 71]
+budget: 12_gpu_hours
+
+critique: >
+  Filled by the sceptic pass, in a fresh context, from this card alone:
+  confounders, prior art, simpler explanations that predict the same result.
+
+experiments: []           # ids under research/experiments/
+outcome: null             # accepted_hypothesis|refuted|inconclusive + one paragraph

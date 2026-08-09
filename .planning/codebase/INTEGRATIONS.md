@@ -1,5 +1,15 @@
 # External Integrations
 
+> **ARCHIVE — frozen 2026-04-27. Not current state.**
+> A snapshot analysis of the codebase as it was in April 2026, under its former
+> `sparse-nsnet2` layout (root-level `train.py`, `models/`, no `tests/`). The
+> current layout is per-family packages (`nsnet2/`, `convfsenet/`, `lisennet/`,
+> `common/`, `benchmarks/`) with a pytest suite. **Where this file and the code
+> disagree, the code wins.** Kept for the rationale, not the facts.
+>
+> Current state: [`research/NOW.md`](../../research/NOW.md). Rules:
+> [`AGENTS.md`](../../AGENTS.md).
+
 **Analysis Date:** 2026-04-27
 
 This is a speech-enhancement research repo: there is no web service, no auth provider, no application database, no webhook surface. The only external systems it touches are (a) the HuggingFace Hub (datasets + model checkpoints), (b) NVIDIA CUDA on the local machine, (c) PyPI/PyTorch wheel mirrors at install time, and (d) a local TensorBoard log directory. This document catalogues those.

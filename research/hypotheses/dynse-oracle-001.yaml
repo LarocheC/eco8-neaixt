@@ -1,0 +1,54 @@
+id: dynse-oracle-001
+question: >
+  Is there any per-chunk headroom for dynamic capacity at all — i.e. does an
+  oracle that picks the cheapest adequate static model per chunk beat the single
+  best compute-matched static at the same average cost?
+status: proposed
+created: 2026-08-09
+
+mechanism: >
+  Speech-enhancement difficulty is not stationary within an utterance: silence,
+  steady noise and transients need different amounts of capacity. If that
+  variation is real and large, an oracle selecting per chunk among already-trained
+  statics should beat the best single static at matched average MACs. This is a
+  measurement of the *opportunity*, using an oracle with access to the reference
+  signal — no router is trained, and no router could ever exceed this ceiling.
+prediction: >
+  Oracle-over-statics beats the best matched static by >= 0.05 PESQ at equal
+  average MACs per frame, on a train-holdout slice.
+
+falsify_if: >
+  The oracle ceiling is within run-to-run noise of the best single static
+  (< 0.02 PESQ at matched average MACs). The repo's own capacity-saturation
+  result (RESULTS_NSNET2.md, ~10x parameters spanning ~2.81-2.88 PESQ,
+  non-monotonic) is a strong prior that this is the likely outcome; if it holds,
+  the entire dynamic-routing direction is dead and no router should be trained.
+  Also falsified if the apparent gain disappears once the oracle is restricted to
+  information a causal router could actually have.
+accept_if: >
+  Oracle gain >= 0.05 PESQ over the best compute-matched static at equal average
+  MACs, reproduced on all three seeds, on a train-holdout slice.
+
+baselines:
+  - name: best_single_static_at_matched_avg_macs
+    why: the only comparison that isolates dynamism from capacity
+  - name: always_largest
+    why: upper bound on quality, not a fair cost comparison
+  - name: always_smallest
+    why: lower bound; makes the oracle's spread interpretable
+controls:
+  - identical training data and optimisation budget for every static in the pool
+  - identical STFT front-end, hop and chunk boundaries
+  - oracle and statics scored by the same harness (common/quality.py)
+  - MACs counted the same way for every member of the pool
+
+primary_metric: paired_pesq_delta_at_matched_avg_macs
+secondary_metrics: [dnsmos_ovrl, scoreq_nr_mos, macs_per_frame, oracle_selection_entropy]
+split: train_holdout
+seeds: [13, 37, 71]
+budget: 6_gpu_hours
+
+critique: null
+depends_on: []
+experiments: []
+outcome: null

@@ -1,5 +1,16 @@
 # sparse-nsnet2 — Quantization & Streaming Export
 
+> **ARCHIVE — frozen 2026-04-27. Not current state.**
+> This describes the NSNet2 int8-quantization milestone as it was scoped in
+> April 2026, when the repo was still `sparse-nsnet2`. Since then ConvFSENet,
+> LiSenNet, the perceptual-metric suite and the STM32N6 deployment have landed,
+> and the "no existing test infrastructure" note below is false — `tests/` now
+> holds a real pytest suite. Kept because the reasoning and the Key Decisions
+> table are still useful history.
+>
+> **Current state lives in [`research/NOW.md`](../research/NOW.md); rules live in
+> [`AGENTS.md`](../AGENTS.md).**
+
 ## What This Is
 
 sparse-nsnet2 is a research codebase exploring sparse / structured weight matrices in NSNet2 speech-enhancement models (dense, butterfly, monarch GRU/Linear variants, trained on VoiceBank-DEMAND-16k). This milestone adds an **int8 ONNX deployment path** so that any trunk variant can be exported as a streaming, frame-by-frame model with a stable `[frame_in, states] → [mask, states]` interface and evaluated under static quantization both at export time and periodically during training.

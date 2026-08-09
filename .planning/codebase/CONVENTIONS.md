@@ -1,5 +1,15 @@
 # Coding Conventions
 
+> **ARCHIVE — frozen 2026-04-27. Not current state.**
+> A snapshot analysis of the codebase as it was in April 2026, under its former
+> `sparse-nsnet2` layout (root-level `train.py`, `models/`, no `tests/`). The
+> current layout is per-family packages (`nsnet2/`, `convfsenet/`, `lisennet/`,
+> `common/`, `benchmarks/`) with a pytest suite. **Where this file and the code
+> disagree, the code wins.** Kept for the rationale, not the facts.
+>
+> Current state: [`research/NOW.md`](../../research/NOW.md). Rules:
+> [`AGENTS.md`](../../AGENTS.md).
+
 **Analysis Date:** 2026-04-27
 
 This is a research codebase. Conventions are split into two tiers:

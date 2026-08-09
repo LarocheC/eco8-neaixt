@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap and always-green-able: no torch, no downloads, no dataset.
+  # Runs first so a rule violation fails in seconds rather than minutes.
+  research-lint:
+    name: research invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Cards, claims, manifests, doc freshness
+        run: python tools/research_lint.py
+      - name: Agent-eval task definitions are well formed
+        run: python evals/agent/run_evals.py --validate-only
+
+  tests:
+    name: pytest (fast)
+    runs-on: ubuntu-latest
+    # The fast suite excludes `-m slow`, which needs network + cached DNSMOS /
+    # NISQA / SCOREQ weights and the real VoiceBank-DEMAND split.
+    #
+    # NOTE: pyproject pins torch/torchaudio to the pytorch-cu118 index, so a cold
+    # runner downloads CUDA wheels (~GBs) even though it has no GPU. The uv cache
+    # makes subsequent runs cheap. If the cold path proves too slow, add a
+    # CPU-only index override for CI rather than unpinning the project.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sync (locked)
+        run: uv sync --frozen
+      - name: Fast tests
+        run: uv run pytest -q
+        env:
+          # Matches tests/conftest.py; cuBLAS reads this at the first CUDA op.
+          CUBLAS_WORKSPACE_CONFIG: ":4096:8"
