@@ -9,12 +9,46 @@ source. That is the property that makes the suite worth running: a suite of
 invented failure modes measures nothing but its own imagination.
 
 ```bash
-python evals/agent/run_evals.py --list             # 23 tasks
+python evals/agent/run_evals.py --list             # 30 tasks
 python evals/agent/run_evals.py --validate-only    # schema check (CI runs this)
 python evals/agent/run_evals.py --deterministic    # graders needing no agent
 python evals/agent/run_evals.py --sheet runs/2026-08-09.md
 python evals/agent/run_evals.py --score runs/2026-08-09.json
 ```
+
+## Two classes, and why the control class exists
+
+| class | files | correct behaviour | failure measured |
+| ----- | ----- | ----------------- | ---------------- |
+| **careful** (23) | `evidence`, `comparison`, `repo-invariants`, `conduct` | push back | scientific-invariant violation |
+| **control** (7) | `ordinary-work` | do the work | over-refusal |
+
+Without the control class the suite is unfalsifiable: every careful task rewards
+pushing back, so an agent that refuses everything scores 100%. The control tasks
+all fall inside the autonomy `AGENTS.md` explicitly grants, and several sit
+*adjacent* to a rule without triggering it — `final-test-split-report` is next to
+rule 7 (which forbids selecting on the test split, not reporting a final number
+on it), and `update-stale-assertion` is next to the never-loosen-a-tolerance rule
+(which is about parity tolerances, not a coarse param-count sanity band). An
+agent that has over-generalised either rule will refuse them.
+
+Read the two rates together. A falling violation rate alongside a rising
+over-refusal rate means the rules bought caution with paralysis.
+
+## Comparing two configurations (the A/B)
+
+The no-layer arm is already in the history: `3f925e6` is the commit before
+`AGENTS.md` existed. Two worktrees, fresh session per trial, same prompts.
+
+**28 of the 30 tasks are arm-neutral** — the evidence they need (the correction
+notices in `RESULTS_NSNET2.md`, the bucket table in `tests/README.md`, the metric
+directions in `README.md`, the deployment numbers in `deploy/`) exists in both
+arms. Two are not: `stale-memory` and `gate-order` reference `research/` files
+that exist only on the newer arm. Run those on the with-layer arm only, and
+report them separately — they measure whether the layer is *used*, not whether
+behaviour improved.
+
+Grade blind: strip the arm label and shuffle before grading.
 
 ## What is automated and what is not
 
@@ -48,7 +82,8 @@ behaviour that will not generalise to the next task.
 | metric | why |
 | ------ | --- |
 | task success rate | the headline, and the least informative on its own |
-| **scientific-invariant violation rate** | a `must_not` fired. This is the number that matters — a task can pass and still have violated an invariant on the way |
+| **scientific-invariant violation rate** (careful class) | a `must_not` fired. A task can pass and still have violated an invariant on the way |
+| **over-refusal rate** (control class) | the cost side of the same coin. Neither number means anything alone |
 | false-claim rate | asserted something untrue about the repo or the results |
 | human review time | the real cost. Faster-feeling is not faster |
 | rework rate | changes reverted or redone afterwards |
@@ -82,3 +117,27 @@ being read but is not specific enough. A high rate on `conduct` tasks usually
 means the agent is optimising for a satisfying answer, which is a prompt-framing
 and role-separation problem — see `research/README.md` on splitting proposer,
 sceptic, executor and auditor into separate contexts.
+
+A high **over-refusal** rate is a rule-set problem, not an agent problem: a rule
+stated more broadly than it was meant. Both adjacency tasks name the rule they
+sit next to, so a failure there points straight at the sentence to narrow.
+
+## Known limitation: these tasks are contaminated
+
+The careful-class tasks and `AGENTS.md` were written in the same session, and
+several tasks are close to a rule restated — `macs-are-not-latency` is rule 8,
+`monarch-vs-blockdiag` is rule 15. Those will show a large with-layer effect that
+mostly measures whether the agent read the file.
+
+Split the set when interpreting results:
+
+- **taught** — the rule is written in `AGENTS.md`. Worth checking once; does not
+  generalise.
+- **held-out** — a real invariant deliberately *not* written down. This is the
+  set that measures judgement, and it should be written by the domain expert
+  rather than by whoever wrote the rules. Candidates from this repo's history:
+  the calibration-set size as an untracked hyperparameter, `best_pesq` resetting
+  to 0 on resume, `cudnn.benchmark = True` versus reproducibility.
+
+Per-task rows are pointers to transcripts worth reading, not results — 2–3 trials
+resolve nothing on their own. Read the pooled rate per class.
