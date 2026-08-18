@@ -10,7 +10,7 @@ from common.env import AttrDict
 from nsnet2.export_sparse import collect_matrices, dims_table
 from nsnet2.model import NSNet2
 from nsnet2.sparsity import (MaskedLinear, SparsityController, build_mask,
-                             parse_pattern, tail_elements)
+                             parse_pattern, tail_elements, verify_pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +262,86 @@ def test_config_files_load_and_build(baseline_h):
         report = ctrl.report()
         overall = 1 - sum(r["nonzero"] for r in report) / sum(r["numel"] for r in report)
         assert overall == pytest.approx(target, abs=0.01), name
+
+
+# ---------------------------------------------------------------------------
+# Pattern verification (the contract with the generated kernel)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("pattern", ["2:4", "4:8", "1x4:80"])
+def test_verify_accepts_a_conforming_weight(pattern):
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    w = w * build_mask(w, pattern)
+    check = verify_pattern(w, pattern)
+    assert check["ok"] and check["violations"] == 0
+
+
+@pytest.mark.parametrize("pattern", ["2:4", "4:8"])
+def test_verify_rejects_a_dense_weight(pattern):
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    check = verify_pattern(w, pattern)
+    assert not check["ok"]
+    assert check["violations"] == check["groups"]
+
+
+@pytest.mark.parametrize("pattern", ["1x4:80", "unstructured:80"])
+def test_verify_rejects_a_dense_weight_on_density(pattern):
+    """A dense weight trivially satisfies "blocks are whole" — the density
+    claim is the part that catches it."""
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    check = verify_pattern(w, pattern)
+    assert not check["ok"]
+    assert check["violations"] == 0
+    assert check["sparsity_shortfall"] == pytest.approx(0.8)
+
+
+def test_verify_catches_a_single_revived_weight():
+    """One pruned weight drifting off zero breaks the kernel's assumption."""
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    mask = build_mask(w, "2:4")
+    w = w * mask
+    zero_idx = (mask == 0).nonzero()[0]
+    w[zero_idx[0], zero_idx[1]] = 1e-9
+    check = verify_pattern(w, "2:4")
+    assert not check["ok"] and check["violations"] == 1
+
+
+def test_verify_tolerates_an_incidental_zero():
+    """Fewer nonzeros than allowed is fine; more is not."""
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    w = w * build_mask(w, "2:4")
+    kept = (w != 0).nonzero()[0]
+    w[kept[0], kept[1]] = 0.0
+    assert verify_pattern(w, "2:4")["ok"]
+
+
+def test_verify_block_rejects_a_partially_kept_block():
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    w = w * build_mask(w, "1x4:80")
+    block = (w.reshape(16, 16, 4).abs().sum(-1) != 0).nonzero()[0]
+    w.reshape(16, 16, 4)[block[0], block[1], 2] = 0.0
+    assert not verify_pattern(w, "1x4:80")["ok"]
+
+
+def test_trained_checkpoint_survives_a_state_dict_roundtrip(baseline_h, tmp_path):
+    """The saved file is what ships, so verify the file and not the live model."""
+    torch.manual_seed(0)
+    model = NSNet2(baseline_h)
+    ctrl = SparsityController(model, "2:4")
+    ctrl.apply()
+    torch.save({"generator": model.state_dict()}, tmp_path / "g_test")
+
+    reloaded = NSNet2(baseline_h)
+    reloaded.load_state_dict(torch.load(tmp_path / "g_test")["generator"])
+    for name, p in reloaded.named_parameters():
+        if name in ctrl.masks:
+            assert verify_pattern(p.data, "2:4")["ok"], name
 
 
 # ---------------------------------------------------------------------------

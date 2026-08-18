@@ -173,13 +173,40 @@ free choice does. That is the number worth putting in front of the compiler
 side: it is what fine-tuning has to buy back, and it is the reason the pattern
 choice is not a detail.
 
-## Fine-tuning arms (in flight)
+## PESQ after masked fine-tuning
 
-Three arms from the same dense baseline, identical schedule (lr 3e-4, 60 epochs,
-validation every 5 epochs), so the mask is the only variable:
-`ft_dense_control`, `ft_sparse_2to4`, `ft_sparse_4to8`. The dense control matters
-— it separates "what the mask costs" from "what this fine-tune schedule with a
-freshly initialised discriminator does on its own".
+Three arms from the same dense baseline on an identical schedule (lr 3e-4,
+60 epochs, validation every 5), so the mask is the only variable. The dense
+control is not decoration: it separates what the *mask* costs from what this
+fine-tune schedule costs on its own. Same offline PESQ metric throughout;
+`nsnet2.eval_masked` on each `g_best` reproduces the training-log value exactly.
+
+| arm                          |  PESQ | vs dense control | vs 200-epoch baseline |
+| ---------------------------- | ----: | ---------------: | --------------------: |
+| dense baseline (200 epochs)  | 2.845 |                — |                     — |
+| `ft_dense_control` (60 ep)   | 2.762 |                — |                −0.083 |
+| `ft_sparse_4to8`             | 2.760 |           −0.002 |                −0.085 |
+| `ft_sparse_2to4`             | 2.755 |           −0.007 |                −0.090 |
+
+**The headline: 2:4 costs 0.007 PESQ.** Magnitude pruning alone cost 0.378;
+60 epochs of masked fine-tuning recover all but 0.007 of it relative to a dense
+model given the identical schedule. 4:8, the looser constraint, costs 0.002 —
+the ordering the retained-energy screen predicted, but the gap has collapsed to
+noise. Half the weights of every FC and GRU matrix are gone for essentially no
+speech quality.
+
+**Caveat, and it is not a small one.** The dense control lost 0.083 PESQ against
+the published 200-epoch baseline, so this fine-tune schedule is itself harmful:
+60 epochs at lr 3e-4 with a *freshly initialised* MetricDiscriminator does not
+return to the 200-epoch optimum. The absolute 2.755 is therefore not the best
+achievable 2:4 model — warm-starting the discriminator, or simply training the
+masked model for the full recipe, should lift all three arms. What is solid is
+the comparison, because all three arms ate the same penalty.
+
+Both sparse checkpoints were verified against the declared pattern before export
+(`verify_pattern`): every complete group of 4 holds at most 2 nonzeros, in the
+saved file rather than in the live model. Feeding the dense control's checkpoint
+to the exporter under a `2:4` manifest is correctly refused.
 
 ## Open questions for the call
 

@@ -60,6 +60,7 @@ import torch.nn.functional as F
 __all__ = [
     "parse_pattern",
     "build_mask",
+    "verify_pattern",
     "MaskedLinear",
     "SparsityController",
 ]
@@ -206,6 +207,72 @@ def build_mask(weight: torch.Tensor, pattern: str, *, axis: str = "in",
         raise ValueError(f"unhandled family {fam!r}")
 
     return mask if axis == "in" else mask.t().contiguous()
+
+
+@torch.no_grad()
+def verify_pattern(weight: torch.Tensor, pattern: str, *, axis: str = "in",
+                   tail: str = "keep") -> dict:
+    """Check that ``weight``'s zero pattern actually obeys ``pattern``.
+
+    The mask is a contract with the deployment-side kernel: if a group carries
+    one more nonzero than the pattern allows, the generated kernel is wrong, not
+    merely slow. This checks the saved weights directly rather than trusting the
+    mask that produced them, so it catches a checkpoint that was resumed without
+    its sparsity config, saved mid-step, or fine-tuned dense by accident.
+
+    Returns ``{"ok", "violations", "groups", "nonzero", "sparsity",
+    "sparsity_shortfall"}``. ``violations`` counts groups holding more nonzeros
+    than the pattern permits; fewer is fine (a weight may be exactly zero by
+    chance).
+
+    N:M pins the density through the group constraint alone. The block and
+    unstructured families do not — an all-dense weight trivially satisfies
+    "every 1x4 block is kept or dropped whole" — so for those the achieved
+    sparsity is checked against the target as well.
+    """
+    desc = parse_pattern(pattern)
+    w = _as_km(weight, axis)
+    rows, K = w.shape
+    nz = (w != 0)
+    result = {"ok": True, "violations": 0, "groups": 0,
+              "nonzero": int(nz.sum().item()),
+              "sparsity": 1.0 - nz.float().mean().item(),
+              "sparsity_shortfall": 0.0}
+
+    if desc["family"] == "nm":
+        group, n = desc["group"], desc["n"]
+        n_groups = K // group
+        if n_groups:
+            head = nz[:, : n_groups * group].reshape(rows, n_groups, group)
+            counts = head.sum(dim=-1)
+            result["groups"] = rows * n_groups
+            result["violations"] = int((counts > n).sum().item())
+    elif desc["family"] == "block":
+        block = desc["block"]
+        n_blocks = K // block
+        if n_blocks:
+            head = nz[:, : n_blocks * block].reshape(rows, n_blocks, block)
+            counts = head.sum(dim=-1)
+            result["groups"] = rows * n_blocks
+            # a block must be entirely kept or entirely dropped
+            result["violations"] = int(((counts != 0) & (counts != block)).sum().item())
+
+    if tail == "drop" and desc.get("group", desc.get("block")):
+        g = desc.get("group") or desc["block"]
+        if K % g:
+            result["violations"] += int(nz[:, (K // g) * g:].sum().item())
+
+    if desc["family"] in ("block", "unstructured"):
+        # A ragged tail left dense caps how sparse the matrix can get, so
+        # compare against the reachable target rather than the nominal one.
+        reachable = desc["sparsity"]
+        g = desc.get("block")
+        if g and tail == "keep" and K % g:
+            reachable *= (K - K % g) / K
+        result["sparsity_shortfall"] = max(0.0, reachable - result["sparsity"])
+
+    result["ok"] = result["violations"] == 0 and result["sparsity_shortfall"] <= 0.02
+    return result
 
 
 def tail_elements(weight: torch.Tensor, pattern: str, *, axis: str = "in") -> int:

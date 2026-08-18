@@ -38,8 +38,8 @@ import torch
 from common.env import AttrDict
 from common.utils import load_checkpoint
 from nsnet2.model import NSNet2
-from nsnet2.sparsity import (MaskedLinear, SparsityController, build_mask,
-                             parse_pattern, tail_elements)
+from nsnet2.sparsity import (MaskedLinear, build_mask, parse_pattern,
+                             tail_elements, verify_pattern)
 
 
 # Which 2-D parameters are the MatMuls that matter, and a stable human name.
@@ -152,6 +152,7 @@ def main() -> None:
 
     os.makedirs(a.out, exist_ok=True)
     arrays: dict[str, np.ndarray] = {}
+    violations: list[tuple[str, int, int]] = []
     manifest = {
         "model": "nsnet2",
         "config": os.path.abspath(a.config),
@@ -185,6 +186,12 @@ def main() -> None:
             pat = "dense"
 
         w_masked = w * mask
+        # The mask is a contract with the generated kernel: verify the weights
+        # we are about to ship actually obey it, rather than trusting the mask
+        # that built them.
+        check = verify_pattern(w_masked, pat, axis=axis, tail=tail)
+        if not check["ok"]:
+            violations.append((name, check["violations"], check["groups"]))
         arrays[f"{name}.weight"] = w_masked.numpy().astype(np.float32)
         arrays[f"{name}.mask"] = mask.numpy().astype(np.uint8)
         if b is not None:
@@ -199,7 +206,18 @@ def main() -> None:
             "sparsity": round(1.0 - mask.mean().item(), 6),
             "tail_elements": tail_elements(w, pat, axis=axis) if pat != "dense" else 0,
             "has_bias": b is not None,
+            "pattern_verified": check["ok"],
         })
+
+    if violations:
+        for name, n, groups in violations:
+            print(f"PATTERN VIOLATION  {name}: {n}/{groups} groups exceed {pattern}")
+        raise SystemExit(
+            "refusing to export: the weights do not obey the declared pattern. "
+            "Re-check that the checkpoint was trained with the matching sparsity "
+            "config (or pass --pattern to prune it here)."
+        )
+    manifest["pattern_verified"] = True
 
     npz_path = os.path.join(a.out, "weights.npz")
     np.savez(npz_path, **arrays)
