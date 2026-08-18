@@ -149,6 +149,38 @@ fine-tuning, not just pruning.
 
 This is a proxy for ordering candidates only. It says nothing about PESQ.
 
+## PESQ after pruning, before any fine-tuning
+
+Full VBD test split (824 utterances), offline forward, same metric the training
+loop uses to select `g_best` (`python -m nsnet2.eval_masked`). The unmasked
+number reproduces the published 2.845 exactly, so the harness is sound.
+
+| pattern            |  PESQ | Δ vs dense | retained energy |
+| ------------------ | ----: | ---------: | --------------: |
+| dense (baseline)   | 2.845 |          — |           1.000 |
+| unstructured 50%   | 2.799 |     −0.046 |           0.984 |
+| 4:8                | 2.533 |     −0.312 |           0.970 |
+| 2:4                | 2.467 |     −0.378 |           0.959 |
+| 1x4, 80% sparse    | 2.189 |     −0.656 |           0.848 |
+
+The PESQ ordering matches the retained-energy ordering exactly, which is what
+makes the cheap screen usable for triage.
+
+The gap between unstructured 50% (−0.046) and 2:4 (−0.378) is the entire cost of
+the semi-structured *constraint* — not of the sparsity level. At the same 50%
+of weights removed, being forced into 2 per group of 4 costs 8× more PESQ than
+free choice does. That is the number worth putting in front of the compiler
+side: it is what fine-tuning has to buy back, and it is the reason the pattern
+choice is not a detail.
+
+## Fine-tuning arms (in flight)
+
+Three arms from the same dense baseline, identical schedule (lr 3e-4, 60 epochs,
+validation every 5 epochs), so the mask is the only variable:
+`ft_dense_control`, `ft_sparse_2to4`, `ft_sparse_4to8`. The dense control matters
+— it separates "what the mask costs" from "what this fine-tune schedule with a
+freshly initialised discriminator does on its own".
+
 ## Open questions for the call
 
 1. Does "very narrow GEMM" in her test mean N=1 exactly? Which hardware, dtype,
