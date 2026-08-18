@@ -17,6 +17,7 @@ from nsnet2.model import NSNet2
 from common.metrics import pesq_score
 from common.discriminator import MetricDiscriminator, batch_pesq
 from nsnet2.layers import butterfly_ortho_penalty
+from nsnet2.sparsity import SparsityController
 from common.utils import scan_checkpoint, load_checkpoint, save_checkpoint
 
 try:
@@ -59,6 +60,12 @@ def train(rank, a, h):
     if cp_g is None or cp_do is None:
         state_dict_do = None
         last_epoch = -1
+        # Warm-start from a dense checkpoint (the "dense -> prune -> masked
+        # fine-tune" recipe). Weights only: steps/epoch/optimizer stay fresh.
+        if a.init_from:
+            generator.load_state_dict(load_checkpoint(a.init_from, device)['generator'])
+            if rank == 0:
+                print('Warm-started generator from {}'.format(a.init_from))
     else:
         state_dict_g = load_checkpoint(cp_g, device)
         state_dict_do = load_checkpoint(cp_do, device)
@@ -66,6 +73,19 @@ def train(rank, a, h):
         discriminator.load_state_dict(state_dict_do['discriminator'])
         steps = state_dict_do['steps'] + 1
         last_epoch = state_dict_do['epoch']
+
+    # Fixed structured-sparsity masks (h.sparsity). Built here — after the
+    # checkpoint load, before DDP — so magnitude selection sees trained weights
+    # and the controller holds the real Parameter objects (DDP wraps the module
+    # but keeps the same parameter tensors).
+    sparsity = SparsityController.from_config(generator, h.get("sparsity", None))
+    if sparsity is not None:
+        sparsity.apply()
+        if rank == 0:
+            print(sparsity)
+            for row in sparsity.report():
+                print('  {name:<28} {shape} sparsity={sparsity:.3f} '
+                      'tail={tail_elements}'.format(**row))
 
     if h.num_gpus > 1:
         generator = DistributedDataParallel(generator, device_ids=[rank]).to(device)
@@ -210,7 +230,13 @@ def train(rank, a, h):
                     loss_gen_all = loss_gen_all + ortho_lambda * ortho_loss
 
             loss_gen_all.backward()
+            if sparsity is not None:
+                sparsity.mask_grads()
             optim_g.step()
+            if sparsity is not None:
+                # Re-project onto the mask: AdamW's momentum/decay would
+                # otherwise drift pruned weights off exactly zero.
+                sparsity.apply()
 
             if rank == 0:
                 if steps % a.stdout_interval == 0:
@@ -322,6 +348,10 @@ def main():
                         help='Optional cache directory for the HuggingFace dataset.')
     parser.add_argument('--checkpoint_path', default='cp_nsnet2')
     parser.add_argument('--config', default='')
+    parser.add_argument('--init_from', default='',
+                        help='Optional g_* checkpoint to warm-start the generator '
+                             'from when checkpoint_path is empty (dense -> masked '
+                             'fine-tune).')
     parser.add_argument('--training_epochs', default=400, type=int)
     parser.add_argument('--stdout_interval', default=5, type=int)
     parser.add_argument('--checkpoint_interval', default=5000, type=int)

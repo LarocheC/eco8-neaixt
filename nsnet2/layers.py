@@ -8,6 +8,8 @@ Two registries:
     * ``"butterfly"`` — ``torch_structured.Butterfly``       (~O(N log N)).
     * ``"monarch"``   — ``torch_structured.monarch.BlockdiagLinear``
                         block-diagonal linear (~O(N^2 / nblocks)).
+    * ``"masked"``    — ``nsnet2.sparsity.MaskedLinear``: dense weight with a
+                        fixed semi-structured mask ("2:4", "4:8", "1x4:80").
 
 - ``make_gru(input_size, hidden_size, num_layers, *, cfg)`` — same idea for
   the GRU stack. ``cfg["kind"]`` selects:
@@ -38,6 +40,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from nsnet2.sparsity import MaskedLinear
+
 try:
     from torch_structured import Butterfly
     HAVE_BUTTERFLY = True
@@ -66,7 +70,7 @@ except ImportError:
 # Linear factory
 # ---------------------------------------------------------------------------
 
-LINEAR_KINDS = ("linear", "butterfly", "monarch")
+LINEAR_KINDS = ("linear", "butterfly", "monarch", "masked")
 
 
 def make_linear(in_size: int, out_size: int, bias: bool = True, *,
@@ -84,6 +88,15 @@ def make_linear(in_size: int, out_size: int, bias: bool = True, *,
             in_size=in_size, out_size=out_size, bias=bias,
             nblocks=cfg.get("nblocks", 1),
             init=cfg.get("init", "randn"),
+        )
+
+    if kind == "masked":
+        return MaskedLinear(
+            in_size, out_size, bias=bias,
+            pattern=cfg.get("pattern", "2:4"),
+            axis=cfg.get("axis", "in"),
+            tail=cfg.get("tail", "keep"),
+            scope=cfg.get("scope", "matrix"),
         )
 
     if kind == "monarch":
@@ -254,7 +267,8 @@ class TritonGRU(nn.Module):
 # GRU factory
 # ---------------------------------------------------------------------------
 
-GRU_KINDS = ("gru", "butterfly", "monarch", "triton", "triton_monarch", "triton_butterfly")
+GRU_KINDS = ("gru", "butterfly", "monarch", "masked", "triton", "triton_monarch",
+             "triton_butterfly")
 
 
 def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
@@ -321,9 +335,13 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
             pre_batch_input=False,
         )
 
-    if kind not in ("butterfly", "monarch"):
+    if kind not in ("butterfly", "monarch", "masked"):
         raise ValueError(f"Unknown gru kind: {kind!r} (expected one of {GRU_KINDS})")
 
+    # kind="masked" here builds a StructuredGRU whose W_ih/W_hh are
+    # MaskedLinear — needed only when the mask must live inside the module
+    # (e.g. ONNX export of the masked recurrence). For training, prefer the
+    # dense nn.GRU + SparsityController route: same fixed mask, cuDNN speed.
     base = {k: v for k, v in cfg.items() if k not in ("kind", "h_init", "x_init")}
     x_cfg = dict(base, kind=kind)
     h_cfg = dict(base, kind=kind)

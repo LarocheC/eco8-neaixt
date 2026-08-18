@@ -114,9 +114,15 @@ The NSNet2 branch explores whether structured linear transforms can reduce model
 Supported layer types include:
 
 ```json
-"linear": {"kind": "linear" | "butterfly" | "monarch"},
+"linear": {"kind": "linear" | "butterfly" | "monarch" | "masked"},
 "gru": {"kind": "gru" | "butterfly" | "monarch"}
 ```
+
+Semi-structured sparsity (`2:4`, `4:8`, `1x4` blocks) is available as a
+model-wide `"sparsity"` config block that masks the FC *and* GRU matrices while
+leaving the architecture dense-shaped — see
+[SPARSE_MATMUL_COLLAB.md](SPARSE_MATMUL_COLLAB.md) and
+`configs/sparse_*.json`.
 
 The main sweep scripts are:
 
