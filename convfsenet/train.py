@@ -46,6 +46,7 @@ from common.env import AttrDict, build_env
 from common.discriminator import MetricDiscriminator, batch_pesq
 from common.metrics import pesq_score
 from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
+from nsnet2.sparsity import SparsityController
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -86,6 +87,19 @@ def train(a, h):
         init_state = load_checkpoint(a.init_from, device)
         model.load_state_dict(init_state["generator"])
         print(f"Warm-started weights from {a.init_from} (fresh optim + step=0).")
+
+    # Fixed structured-sparsity masks (h.sparsity). Built after the weight load
+    # so magnitude selection sees trained weights. Only pointwise (1x1) convs
+    # are eligible — the depthwise k=3 dconv lowers through im2col, not as a
+    # GEMM, so an N:M group along C_in would not mean anything to a sparse
+    # kernel. That still covers 98% of the parameters.
+    sparsity = SparsityController.from_config(model, h.get("sparsity", None))
+    if sparsity is not None:
+        sparsity.apply()
+        print(sparsity)
+        for row in sparsity.report():
+            print('  {name:<28} {shape} sparsity={sparsity:.3f} '
+                  'tail={tail_elements}'.format(**row))
 
     optim = torch.optim.AdamW(
         model.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2]
@@ -198,7 +212,7 @@ def train(a, h):
                 metrics = _gan_step(
                     model, discriminator, optim, optim_d,
                     noisy_audio, clean_audio, h, metric_lambda,
-                    disc_compress, device,
+                    disc_compress, device, sparsity,
                 )
             else:
                 optim.zero_grad()
@@ -206,7 +220,11 @@ def train(a, h):
                 loss = loss_dict["loss"]
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                if sparsity is not None:
+                    sparsity.mask_grads()
                 optim.step()
+                if sparsity is not None:
+                    sparsity.apply()
                 metrics = {"loss": float(loss.item())}
 
             if steps % a.stdout_interval == 0:
@@ -265,7 +283,7 @@ def train(a, h):
 
 def _gan_step(model, discriminator, optim, optim_d,
               noisy_audio, clean_audio, h,
-              metric_lambda, disc_compress, device):
+              metric_lambda, disc_compress, device, sparsity=None):
     """One metric-GAN training step.
 
     Generator forward is end-to-end (audio -> audio_pred). The discriminator
@@ -315,7 +333,13 @@ def _gan_step(model, discriminator, optim, optim_d,
     loss_gen = base_loss + metric_lambda * loss_metric
     loss_gen.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+    if sparsity is not None:
+        sparsity.mask_grads()
     optim.step()
+    if sparsity is not None:
+        # Re-project onto the mask: AdamW would otherwise drift pruned weights
+        # off exactly zero.
+        sparsity.apply()
 
     return {
         "loss": float(loss_gen.item()),
