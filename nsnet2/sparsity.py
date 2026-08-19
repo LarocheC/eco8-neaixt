@@ -75,6 +75,7 @@ __all__ = [
 _NM_RE = re.compile(r"^(\d+):(\d+)$")
 _BLOCK_RE = re.compile(r"^1x(\d+):(\d+(?:\.\d+)?)$")
 _UNSTRUCT_RE = re.compile(r"^unstructured:(\d+(?:\.\d+)?)$")
+_BLOCKDIAG_RE = re.compile(r"^blockdiag:(\d+)$")
 
 
 def parse_pattern(pattern: str) -> dict:
@@ -105,6 +106,14 @@ def parse_pattern(pattern: str) -> dict:
         return {"family": "block", "pattern": p, "block": block,
                 "sparsity": pct / 100.0}
 
+    m = _BLOCKDIAG_RE.match(p)
+    if m:
+        nblocks = int(m.group(1))
+        if nblocks < 2:
+            raise ValueError(f"blockdiag needs nblocks >= 2, got {pattern!r}")
+        return {"family": "blockdiag", "pattern": p, "nblocks": nblocks,
+                "sparsity": 1.0 - 1.0 / nblocks}
+
     m = _UNSTRUCT_RE.match(p)
     if m:
         pct = float(m.group(1))
@@ -114,7 +123,8 @@ def parse_pattern(pattern: str) -> dict:
 
     raise ValueError(
         f"Unknown sparsity pattern {pattern!r}; expected 'N:M' (e.g. '2:4'), "
-        f"'1xB:PCT' (e.g. '1x4:80'), 'unstructured:PCT', or 'dense'."
+        f"'1xB:PCT' (e.g. '1x4:80'), 'blockdiag:N' (e.g. 'blockdiag:4'), "
+        f"'unstructured:PCT', or 'dense'."
     )
 
 
@@ -227,6 +237,26 @@ def build_mask(weight: torch.Tensor, pattern: str, *, axis: str = "in",
         if K % block and tail == "drop":
             mask[:, n_blocks * block:] = 0.0
 
+    elif fam == "blockdiag":
+        # Block-diagonal: row i keeps only the inputs in its own block. Unlike
+        # every other pattern here this is *value-agnostic* — which entries
+        # survive is fixed by position, not by magnitude — so it discards far
+        # more weight energy at the same sparsity and leans harder on
+        # fine-tuning. It is the mask form of the Monarch / block-diagonal
+        # factorization already in this repo, expressed with explicit zeros so
+        # it trains, exports and packs like the other patterns.
+        nb = desc["nblocks"]
+        if rows < nb or K < nb:
+            raise ValueError(
+                f"blockdiag:{nb} needs both dims >= {nb}, got {(rows, K)}")
+        mask = torch.zeros_like(w)
+        # torch.chunk-style near-equal splits, so dims that are not divisible
+        # by nblocks (e.g. K=257) still work; blocks then differ by one.
+        r_edges = [round(i * rows / nb) for i in range(nb + 1)]
+        k_edges = [round(i * K / nb) for i in range(nb + 1)]
+        for b in range(nb):
+            mask[r_edges[b]:r_edges[b + 1], k_edges[b]:k_edges[b + 1]] = 1.0
+
     else:  # pragma: no cover — parse_pattern already validated
         raise ValueError(f"unhandled family {fam!r}")
 
@@ -282,16 +312,24 @@ def verify_pattern(weight: torch.Tensor, pattern: str, *, axis: str = "in",
             # a block must be entirely kept or entirely dropped
             result["violations"] = int(((counts != 0) & (counts != block)).sum().item())
 
+    if desc["family"] == "blockdiag":
+        nb = desc["nblocks"]
+        expect = build_mask(w, desc["pattern"], axis="in")
+        result["groups"] = nb
+        result["violations"] = int((nz & (expect == 0)).sum().item())
+
     if tail == "drop" and desc.get("group", desc.get("block")):
         g = desc.get("group") or desc["block"]
         if K % g:
             result["violations"] += int(nz[:, (K // g) * g:].sum().item())
 
-    if desc["family"] in ("block", "unstructured"):
+    if desc["family"] in ("block", "unstructured", "blockdiag"):
         # A ragged tail left dense caps how sparse the matrix can get, so
         # compare against the reachable target rather than the nominal one.
         reachable = desc["sparsity"]
         g = desc.get("block")
+        if desc["family"] == "blockdiag":
+            g = None
         if g and tail == "keep" and K % g:
             reachable *= (K - K % g) / K
         result["sparsity_shortfall"] = max(0.0, reachable - result["sparsity"])

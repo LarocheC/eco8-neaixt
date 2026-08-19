@@ -346,6 +346,81 @@ def test_trained_checkpoint_survives_a_state_dict_roundtrip(baseline_h, tmp_path
 
 
 # ---------------------------------------------------------------------------
+# Block-diagonal (the mask form of the repo's old "monarch")
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("nb,sparsity", [(2, 0.5), (4, 0.75), (8, 0.875)])
+def test_blockdiag_sparsity_matches_one_over_nblocks(nb, sparsity):
+    torch.manual_seed(0)
+    w = torch.randn(384, 192)
+    m = build_mask(w, f"blockdiag:{nb}")
+    assert parse_pattern(f"blockdiag:{nb}")["sparsity"] == pytest.approx(sparsity)
+    assert (1 - m.mean().item()) == pytest.approx(sparsity, abs=1e-6)
+
+
+def test_blockdiag_blocks_tile_exactly():
+    """Every row and column belongs to exactly one block — no gaps, no overlap."""
+    torch.manual_seed(0)
+    w = torch.randn(384, 192)
+    m = build_mask(w, "blockdiag:4")
+    assert torch.all(m.sum(dim=1) > 0)          # every row has a block
+    assert torch.all(m.sum(dim=0) > 0)          # every column too
+    # each row's kept columns are one contiguous run
+    for r in (0, 100, 200, 383):
+        cols = m[r].nonzero().flatten()
+        assert torch.equal(cols, torch.arange(cols[0], cols[-1] + 1))
+
+
+def test_blockdiag_handles_a_prime_dimension():
+    """K=257 (n_fft//2+1) is prime, so blocks cannot be equal — they must still
+    tile the matrix exactly."""
+    torch.manual_seed(0)
+    w = torch.randn(192, 257)
+    m = build_mask(w, "blockdiag:4")
+    assert (1 - m.mean().item()) == pytest.approx(0.75, abs=0.01)
+    widths = [int(m[r].sum()) for r in (0, 60, 120, 191)]
+    assert max(widths) - min(widths) <= 1        # near-equal blocks
+    assert verify_pattern(w * m, "blockdiag:4")["ok"]
+
+
+def test_blockdiag_is_value_agnostic():
+    """Unlike every other pattern here, which entries survive does not depend on
+    the weights — so two different matrices get the identical mask."""
+    torch.manual_seed(0)
+    a, b = torch.randn(64, 32), torch.randn(64, 32) * 100
+    assert torch.equal(build_mask(a, "blockdiag:4"), build_mask(b, "blockdiag:4"))
+
+
+def test_blockdiag_verify_rejects_a_coarser_weight_and_strays():
+    """Block counts nest: a blockdiag:4 weight lies entirely inside the
+    blockdiag:2 pattern, so it satisfies the coarser contract with extra zeros
+    (same "at most" semantics as N:M) — a kernel packing 2 blocks just finds
+    some of them empty. The reverse must fail: a blockdiag:2 weight has
+    nonzeros outside the 4-block diagonal."""
+    torch.manual_seed(0)
+    w = torch.randn(64, 32)
+    fine = w * build_mask(w, "blockdiag:4")
+    coarse = w * build_mask(w, "blockdiag:2")
+
+    assert verify_pattern(fine, "blockdiag:4")["ok"]
+    assert verify_pattern(fine, "blockdiag:2")["ok"]         # nests, legal
+    assert not verify_pattern(coarse, "blockdiag:4")["ok"]   # strays outside
+    assert not verify_pattern(w, "blockdiag:4")["ok"]        # dense
+
+    strayed = fine.clone()
+    strayed[0, -1] = 1.0                                     # outside block 0
+    assert not verify_pattern(strayed, "blockdiag:4")["ok"]
+
+
+def test_blockdiag_on_pointwise_conv_keeps_shape():
+    torch.manual_seed(0)
+    w = torch.randn(384, 192, 1)
+    m = build_mask(w, "blockdiag:4")
+    assert m.shape == w.shape
+    assert verify_pattern(w * m, "blockdiag:4")["ok"]
+
+
+# ---------------------------------------------------------------------------
 # Pointwise convolutions (ConvFSENet)
 # ---------------------------------------------------------------------------
 
