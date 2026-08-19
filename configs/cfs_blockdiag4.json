@@ -1,0 +1,46 @@
+{
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0008,
+    "lr_min": 1e-05,
+    "scheduler": "cosine",
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "lr_decay": 0.9985,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "win_length": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "n_features": 257,
+    "n_channels_res": 192,
+    "n_channels_conv": 384,
+    "kernel_size": 3,
+    "n_blocks": 3,
+    "n_stacks": 3,
+    "extractor_type": "mag_compressed",
+    "compress_factor": 0.3,
+    "causal": true,
+    "gan": {
+        "enabled": true,
+        "metric_loss_lambda": 0.05,
+        "disc_compress_factor": 0.3
+    },
+    "num_workers": 3,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    },
+    "sparsity": {
+        "enabled": true,
+        "pattern": "blockdiag:4",
+        "axis": "in",
+        "tail": "keep",
+        "scope": "matrix",
+        "min_numel": 4096,
+        "exclude": []
+    }
+}
