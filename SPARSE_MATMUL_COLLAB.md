@@ -259,6 +259,29 @@ from magnitude pruning alone and 2.770 after fine-tuning — 0.58 PESQ recovered
 Pruning-only numbers are a triage tool for ordering candidates, never a verdict
 on a pattern.
 
+## Hand-off
+
+Weights are published at
+[`claroche1/nsnet2-sparse-rowfusion`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion):
+one directory per pattern, each with the PyTorch checkpoint (`g_best`,
+`config.json`) and a numpy export (`weights.npz` with explicit zeros, uint8
+masks, biases and per-matrix golden vectors, plus `manifest.json`). A
+numpy-only `verify.py` at the repo root checks shapes, mask/weight agreement,
+structural pattern conformance and the golden vectors.
+
+Rebuild the bundle with:
+
+```bash
+python -m nsnet2.package_handoff \
+    --arm dense=cp_ov_dense_control --arm 2:4=cp_ov_2to4 --arm 4:8=cp_ov_4to8 \
+    --arm 1:4=cp_ov_1to4 --arm 1x4:80=cp_ov_block1x4_80 \
+    --arm unstructured:80=cp_ov_unstruct_80 --out nsnet2_sparse_handoff
+```
+
+The golden vectors are the part a kernel author actually needs: `ref_y = W @
+ref_x + b` per matrix, so a generated kernel can be validated one GEMV at a time
+without PyTorch or the surrounding model.
+
 ## Open questions for the call
 
 1. Does "very narrow GEMM" in her test mean N=1 exactly? Which hardware, dtype,

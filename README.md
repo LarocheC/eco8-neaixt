@@ -180,6 +180,7 @@ The GRU model above is the quality reference but does not compile to the STM32N6
 Some trained checkpoints and exported ONNX models are mirrored on Hugging Face:
 
 * [`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints)
+* [`claroche1/nsnet2-sparse-rowfusion`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion) — NSNet2 under fixed semi-structured masks (2:4, 4:8, 1:4, 1x4:80, unstructured:80 + dense control), each with a PyTorch checkpoint and a numpy export (weights with explicit zeros, masks, golden vectors) for sparse-kernel work
 * [`claroche1/convfsenet`](https://huggingface.co/claroche1/convfsenet)
 * [`claroche1/LiSenNet`](https://huggingface.co/claroche1/LiSenNet) — both variants in one repo: `gru/` (quality reference: PyTorch `g_best`, FP32 + static int8 ONNX) and `conv/` (NPU-deployable variant: adds the frame-by-frame streaming ONNX `g_best_streaming_fp32.onnx`, the stedgeai target)
 
