@@ -345,6 +345,65 @@ def test_trained_checkpoint_survives_a_state_dict_roundtrip(baseline_h, tmp_path
 
 
 # ---------------------------------------------------------------------------
+# int8 orientation logic
+# ---------------------------------------------------------------------------
+
+def test_int8_violations_detects_the_right_orientation():
+    """ONNX stores Gemm weights (M,K) and MatMul weights (K,M), so the checker
+    tests both ways and passes if either conforms."""
+    from nsnet2.verify_int8_sparsity import _violations
+
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    w = (w * build_mask(w, "2:4")).numpy()
+    desc = parse_pattern("2:4")
+
+    assert _violations(w, desc, 1) == 0        # groups along the last axis
+    assert _violations(w, desc, 0) > 0         # wrong axis: does not conform
+    assert _violations(w.T, desc, 0) == 0      # transposed: now axis 0 is right
+
+
+def test_int8_extra_zeros_never_violate_nm():
+    """Quantization rounds small weights to zero; N:M allows *at most* N, so
+    extra zeros must stay legal."""
+    from nsnet2.verify_int8_sparsity import _violations
+
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    w = w * build_mask(w, "2:4")
+    kept = (w != 0).nonzero()
+    for idx in kept[:20]:
+        w[idx[0], idx[1]] = 0.0
+    assert _violations(w.numpy(), parse_pattern("2:4"), 1) == 0
+
+
+@pytest.mark.parametrize("pattern", ["1x4:80", "unstructured:80"])
+def test_int8_block_and_unstructured_need_a_density_check(pattern):
+    """A dense matrix trivially satisfies "every block is whole", so structure
+    alone cannot catch it — density is what does."""
+    from nsnet2.verify_int8_sparsity import check_matrix
+
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    desc = parse_pattern(pattern)
+
+    sparse = (w * build_mask(w, pattern)).numpy()
+    assert check_matrix(sparse, desc)[1] is True
+    assert check_matrix(w.numpy(), desc)[1] is False
+
+
+def test_int8_block_rejects_a_split_block():
+    from nsnet2.verify_int8_sparsity import check_matrix
+
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    w = w * build_mask(w, "1x4:80")
+    kept = (w.reshape(16, 16, 4).abs().sum(-1) != 0).nonzero()[0]
+    w.reshape(16, 16, 4)[kept[0], kept[1], 1] = 0.0        # break one block open
+    assert check_matrix(w.numpy(), parse_pattern("1x4:80"))[1] is False
+
+
+# ---------------------------------------------------------------------------
 # Export metadata
 # ---------------------------------------------------------------------------
 
