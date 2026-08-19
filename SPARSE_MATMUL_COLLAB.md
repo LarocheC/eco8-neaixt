@@ -259,6 +259,48 @@ from magnitude pruning alone and 2.770 after fine-tuning — 0.58 PESQ recovered
 Pruning-only numbers are a triage tool for ordering candidates, never a verdict
 on a pattern.
 
+## int8: free for every pattern, and the mask survives exactly
+
+Static int8 PTQ (QDQ, per-channel symmetric weights, MinMax calibration on 200
+utterances) applied to all six arms, then PESQ on the full test split through
+onnxruntime. Δ is int8 − FP32, so positive means int8 scored *higher*.
+
+| arm                | sparsity |  FP32 |  int8 |      Δ | int8 RTF |
+| ------------------ | -------: | ----: | ----: | -----: | -------: |
+| `ov_dense_control` |       0% | 2.777 | 2.783 | +0.006 |    0.121 |
+| `ov_2to4`          |      50% | 2.779 | 2.781 | +0.002 |    0.125 |
+| `ov_4to8`          |      50% | 2.779 | 2.790 | +0.011 |    0.122 |
+| `ov_1to4`          |      75% | 2.781 | 2.784 | +0.003 |    0.123 |
+| `ov_block1x4_80`   |      80% | 2.770 | 2.779 | +0.009 |    0.124 |
+| `ov_unstruct_80`   |      80% | 2.776 | 2.774 | −0.002 |    0.121 |
+
+**Sparsity does not make quantization harder.** Every Δ is within the ±0.01
+noise band, at every sparsity level, and five of six are positive — matching the
+published dense baseline, which also gained (+0.012) under int8. The open
+question from the FP32 sweep is closed: 80% sparsity is free at int8 too.
+
+**The mask survives int8 bit-exactly.** Symmetric per-channel weight
+quantization maps 0.0 to exactly 0. Verified in the int8 graphs themselves
+(`nsnet2.verify_int8_sparsity`), not assumed:
+
+* `2:4`, `4:8`, `1:4` — every matrix conforms; int8 sparsity lands slightly
+  *above* the FP32 target (0.5016 / 0.5011 / 0.7510) because a few surviving
+  small weights round to zero, which N:M permits.
+* `1x4:80` — block support exactly 0.2000 live against a 0.2000 budget.
+  Quantization does zero the occasional value *inside* a kept block, which a
+  block-packed kernel absorbs: the block is still stored whole.
+
+So her packer can target the int8 graph, not only FP32 — which matters, since
+the deployment targets here are int8 on the M55 and RT595.
+
+**And the punchline: the sparsity buys nothing today.** int8 RTF is 0.121-0.125
+across *every* arm — dense and 80%-sparse alike, indistinguishable. We have
+removed 80% of the multiplies mathematically and 0% of the latency in practice,
+because onnxruntime stores the zeros explicitly and multiplies by them like any
+other weight. The int8 file is 2.78 MiB whether or not four fifths of it is
+zero. That gap — real zeros, no speedup — is exactly what Row Fusion exists to
+close, and it is now measured rather than argued.
+
 ## Hand-off
 
 Weights are published at

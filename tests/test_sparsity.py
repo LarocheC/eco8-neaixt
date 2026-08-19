@@ -378,29 +378,45 @@ def test_int8_extra_zeros_never_violate_nm():
 
 
 @pytest.mark.parametrize("pattern", ["1x4:80", "unstructured:80"])
-def test_int8_block_and_unstructured_need_a_density_check(pattern):
+def test_int8_density_shortfall_catches_a_dense_graph(pattern):
     """A dense matrix trivially satisfies "every block is whole", so structure
     alone cannot catch it — density is what does."""
-    from nsnet2.verify_int8_sparsity import check_matrix
+    from nsnet2.verify_int8_sparsity import density_shortfall
 
-    torch.manual_seed(0)
-    w = torch.randn(16, 64)
     desc = parse_pattern(pattern)
+    assert density_shortfall(0.80, desc) == pytest.approx(0.0)
+    assert density_shortfall(0.02, desc) == pytest.approx(0.78)
+    # N:M pins density through its group constraint, so it is exempt
+    assert density_shortfall(0.02, parse_pattern("2:4")) == 0.0
 
-    sparse = (w * build_mask(w, pattern)).numpy()
-    assert check_matrix(sparse, desc)[1] is True
-    assert check_matrix(w.numpy(), desc)[1] is False
 
-
-def test_int8_block_rejects_a_split_block():
-    from nsnet2.verify_int8_sparsity import check_matrix
+def test_int8_block_support_tolerates_a_split_block():
+    """Quantization zeroing a value inside a kept block must not fail the check:
+    a block-packed kernel still stores that block whole."""
+    from nsnet2.verify_int8_sparsity import block_support
 
     torch.manual_seed(0)
     w = torch.randn(16, 64)
     w = w * build_mask(w, "1x4:80")
+    desc = parse_pattern("1x4:80")
+    before = block_support(w.numpy(), desc)
+
     kept = (w.reshape(16, 16, 4).abs().sum(-1) != 0).nonzero()[0]
-    w.reshape(16, 16, 4)[kept[0], kept[1], 1] = 0.0        # break one block open
-    assert check_matrix(w.numpy(), parse_pattern("1x4:80"))[1] is False
+    w.reshape(16, 16, 4)[kept[0], kept[1], 1] = 0.0
+    assert block_support(w.numpy(), desc) == before      # support is unchanged
+
+
+def test_int8_block_support_counts_a_dense_matrix_as_fully_live():
+    from nsnet2.verify_int8_sparsity import block_support
+
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    desc = parse_pattern("1x4:80")
+    live, total = block_support(w.numpy(), desc)
+    assert live == total                                  # nothing is dropped
+    sparse = (w * build_mask(w, "1x4:80")).numpy()
+    live_s, total_s = block_support(sparse, desc)
+    assert live_s / total_s == pytest.approx(0.2, abs=0.02)
 
 
 # ---------------------------------------------------------------------------
