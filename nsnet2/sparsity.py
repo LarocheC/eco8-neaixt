@@ -61,6 +61,8 @@ __all__ = [
     "parse_pattern",
     "build_mask",
     "verify_pattern",
+    "is_pointwise",
+    "as_matrix",
     "MaskedLinear",
     "SparsityController",
 ]
@@ -120,14 +122,36 @@ def parse_pattern(pattern: str) -> dict:
 # Mask construction
 # ---------------------------------------------------------------------------
 
+def is_pointwise(weight: torch.Tensor) -> bool:
+    """True for a conv weight whose spatial kernel is 1x1 (or 1).
+
+    A pointwise convolution is a GEMM applied at each position: its weight
+    ``(C_out, C_in, 1[, 1])`` multiplies a ``C_in`` vector per frame, exactly
+    like a linear layer, so the same N:M mask along ``C_in`` means the same
+    thing to a kernel. A conv with kernel > 1 is not this shape at all — it
+    lowers through im2col — so it is deliberately out of scope.
+    """
+    return weight.dim() in (3, 4) and all(d == 1 for d in weight.shape[2:])
+
+
+def as_matrix(weight: torch.Tensor) -> torch.Tensor:
+    """View a 2-D weight or a pointwise conv weight as ``(C_out, C_in)``."""
+    if weight.dim() == 2:
+        return weight
+    if is_pointwise(weight):
+        return weight.reshape(weight.shape[0], weight.shape[1])
+    raise ValueError(
+        f"expected a 2-D weight or a pointwise conv weight, got shape "
+        f"{tuple(weight.shape)}")
+
+
 def _as_km(weight: torch.Tensor, axis: str) -> torch.Tensor:
     """View the weight as ``(rows, K)`` with the grouped axis last."""
-    if weight.dim() != 2:
-        raise ValueError(f"expected a 2-D weight, got shape {tuple(weight.shape)}")
+    w = as_matrix(weight)
     if axis == "in":
-        return weight
+        return w
     if axis == "out":
-        return weight.t()
+        return w.t()
     raise ValueError(f"axis must be 'in' or 'out', got {axis!r}")
 
 
@@ -206,7 +230,8 @@ def build_mask(weight: torch.Tensor, pattern: str, *, axis: str = "in",
     else:  # pragma: no cover — parse_pattern already validated
         raise ValueError(f"unhandled family {fam!r}")
 
-    return mask if axis == "in" else mask.t().contiguous()
+    mask = mask if axis == "in" else mask.t().contiguous()
+    return mask.reshape(weight.shape)
 
 
 @torch.no_grad()
@@ -389,8 +414,10 @@ class SparsityController:
         self.masks: dict[str, torch.Tensor] = {}
         self._params: dict[str, nn.Parameter] = {}
         for name, p in model.named_parameters():
-            if p.dim() != 2 or p.numel() < min_numel:
+            if p.numel() < min_numel:
                 continue
+            if p.dim() != 2 and not is_pointwise(p):
+                continue                      # skip biases, norms, k>1 convs
             if any(name.startswith(pre + ".") for pre in masked_linear_prefixes):
                 continue
             if not self.include.search(name) or any(e.search(name) for e in self.exclude):

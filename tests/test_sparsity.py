@@ -9,8 +9,9 @@ import torch.nn as nn
 from common.env import AttrDict
 from nsnet2.export_sparse import collect_matrices, dims_table
 from nsnet2.model import NSNet2
-from nsnet2.sparsity import (MaskedLinear, SparsityController, build_mask,
-                             parse_pattern, tail_elements, verify_pattern)
+from nsnet2.sparsity import (MaskedLinear, SparsityController, as_matrix,
+                             build_mask, is_pointwise, parse_pattern,
+                             tail_elements, verify_pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +343,71 @@ def test_trained_checkpoint_survives_a_state_dict_roundtrip(baseline_h, tmp_path
     for name, p in reloaded.named_parameters():
         if name in ctrl.masks:
             assert verify_pattern(p.data, "2:4")["ok"], name
+
+
+# ---------------------------------------------------------------------------
+# Pointwise convolutions (ConvFSENet)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("shape", [(384, 192, 1), (64, 32, 1, 1)])
+def test_pointwise_conv_is_recognised(shape):
+    assert is_pointwise(torch.empty(*shape))
+    assert as_matrix(torch.empty(*shape)).shape == shape[:2]
+
+
+@pytest.mark.parametrize("shape", [
+    (384, 384, 3),      # dilated conv, kernel 3
+    (384, 1, 3),        # depthwise, kernel 3
+    (64, 32, 1, 3),     # 2-D conv, 1x3
+])
+def test_non_pointwise_conv_is_rejected(shape):
+    """A conv with kernel > 1 lowers through im2col, not as a GEMM — masking it
+    with an N:M pattern would not mean the same thing to a kernel."""
+    w = torch.empty(*shape)
+    assert not is_pointwise(w)
+    with pytest.raises(ValueError):
+        as_matrix(w)
+
+
+@pytest.mark.parametrize("pattern,n", [("2:4", 2), ("4:8", 4)])
+def test_pointwise_mask_groups_along_input_channels(pattern, n):
+    """C_in is the reduction axis of a pointwise conv, so it is the analogue of
+    a GEMM's K axis and the one the groups must run along."""
+    torch.manual_seed(0)
+    w = torch.randn(384, 192, 1)
+    group = parse_pattern(pattern)["group"]
+    m = build_mask(w, pattern)
+    assert m.shape == w.shape                       # mask keeps the conv shape
+    counts = m.reshape(384, 192).reshape(384, 192 // group, group).sum(-1)
+    assert torch.all(counts == n)
+
+
+def test_pointwise_mask_survives_verify_and_state_dict(tmp_path):
+    torch.manual_seed(0)
+    conv = nn.Conv1d(192, 384, 1)
+    mask = build_mask(conv.weight.data, "2:4")
+    with torch.no_grad():
+        conv.weight.mul_(mask)
+    torch.save(conv.state_dict(), tmp_path / "conv.pt")
+    reloaded = nn.Conv1d(192, 384, 1)
+    reloaded.load_state_dict(torch.load(tmp_path / "conv.pt"))
+    assert verify_pattern(reloaded.weight.data, "2:4")["ok"]
+
+
+def test_controller_masks_pointwise_but_not_dilated_convs():
+    """Mirrors a TCMBlock: two pointwise convs plus a k=3 dilated conv."""
+    torch.manual_seed(0)
+    block = nn.Sequential(
+        nn.Conv1d(192, 384, 1),                     # pointwise -> masked
+        nn.Conv1d(384, 384, 3, dilation=2, groups=384),   # depthwise k=3 -> not
+        nn.Conv1d(384, 192, 1, bias=False),         # pointwise -> masked
+    )
+    ctrl = SparsityController(block, "2:4", min_numel=1024)
+    assert set(ctrl.masks) == {"0.weight", "2.weight"}
+    ctrl.apply()
+    for name in ctrl.masks:
+        w = dict(block.named_parameters())[name]
+        assert verify_pattern(w.data, "2:4")["ok"], name
 
 
 # ---------------------------------------------------------------------------
