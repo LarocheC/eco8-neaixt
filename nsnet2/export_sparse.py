@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import zlib
 
 import numpy as np
 import torch
@@ -121,6 +122,13 @@ def main() -> None:
                     help="Override the config's sparsity pattern (e.g. '2:4').")
     ap.add_argument("--dims-only", action="store_true",
                     help="Print the GEMM shape table and exit.")
+    ap.add_argument("--compress", action="store_true",
+                    help="Write a compressed .npz (a 50-80%% sparse matrix stored "
+                         "with explicit zeros compresses well).")
+    ap.add_argument("--reference", action="store_true",
+                    help="Add per-matrix golden vectors: a fixed pseudo-random "
+                         "x of shape (K,) and y = W @ x + b, so a generated "
+                         "kernel can be checked one matrix at a time.")
     a = ap.parse_args()
 
     with open(a.config) as f:
@@ -219,8 +227,28 @@ def main() -> None:
         )
     manifest["pattern_verified"] = True
 
+    if a.reference:
+        # Deterministic per-matrix golden vectors. The seed comes from a CRC of
+        # the matrix name (NOT hash(), which is salted per process) so the same
+        # x is regenerated on any machine, in any export order.
+        for entry in manifest["matrices"]:
+            name = entry["name"]
+            w = torch.from_numpy(arrays[f"{name}.weight"])
+            rng = np.random.default_rng(zlib.crc32(name.encode()))
+            x = rng.standard_normal(entry["K"]).astype(np.float32)
+            y = w.numpy() @ x
+            if f"{name}.bias" in arrays:
+                y = y + arrays[f"{name}.bias"]
+            arrays[f"{name}.ref_x"] = x
+            arrays[f"{name}.ref_y"] = y.astype(np.float32)
+        manifest["reference_vectors"] = {
+            "present": True,
+            "definition": "ref_y = weight @ ref_x + bias, float32, N=1",
+            "x_seed": "numpy default_rng(zlib.crc32(matrix_name)), standard_normal",
+        }
+
     npz_path = os.path.join(a.out, "weights.npz")
-    np.savez(npz_path, **arrays)
+    (np.savez_compressed if a.compress else np.savez)(npz_path, **arrays)
     with open(os.path.join(a.out, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
