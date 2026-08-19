@@ -372,15 +372,41 @@ def test_blockdiag_blocks_tile_exactly():
 
 
 def test_blockdiag_handles_a_prime_dimension():
-    """K=257 (n_fft//2+1) is prime, so blocks cannot be equal — they must still
-    tile the matrix exactly."""
+    """K=257 (n_fft//2+1) is prime. Blocks must follow torch.chunk exactly —
+    ceil-sized with a short final block (65/65/65/62), NOT balanced rounding
+    (64/64/65/64). Same density either way, but the seams differ, and only the
+    chunk layout matches BlockdiagLinear."""
     torch.manual_seed(0)
     w = torch.randn(192, 257)
     m = build_mask(w, "blockdiag:4")
     assert (1 - m.mean().item()) == pytest.approx(0.75, abs=0.01)
     widths = [int(m[r].sum()) for r in (0, 60, 120, 191)]
-    assert max(widths) - min(widths) <= 1        # near-equal blocks
+    assert widths == [t.shape[0] for t in torch.arange(257).chunk(4)]
     assert verify_pattern(w * m, "blockdiag:4")["ok"]
+
+
+@pytest.mark.parametrize("K,R,nb", [
+    (192, 384, 4),
+    (400, 1200, 4),
+    (257, 400, 4),        # prime K — the case balanced rounding got wrong
+    (257, 400, 8),
+])
+def test_blockdiag_mask_equals_the_factorization(K, R, nb):
+    """The mask is only a legitimate stand-in for BlockdiagLinear if it computes
+    the same function. It does — including where the dim is not divisible."""
+    pytest.importorskip("torch_structured")
+    from torch_structured.monarch.blockdiag_linear import BlockdiagLinear
+
+    torch.manual_seed(0)
+    bd = BlockdiagLinear(in_features=K, out_features=R, nblocks=nb, bias=False)
+    dense = bd.forward_matmul(torch.eye(K)).T.detach()
+
+    masked = nn.Linear(K, R, bias=False)
+    with torch.no_grad():
+        masked.weight.copy_(dense * build_mask(dense, f"blockdiag:{nb}"))
+
+    x = torch.randn(32, K)
+    assert torch.allclose(masked(x), bd(x), atol=1e-5)
 
 
 def test_blockdiag_is_value_agnostic():

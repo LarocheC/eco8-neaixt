@@ -250,10 +250,19 @@ def build_mask(weight: torch.Tensor, pattern: str, *, axis: str = "in",
             raise ValueError(
                 f"blockdiag:{nb} needs both dims >= {nb}, got {(rows, K)}")
         mask = torch.zeros_like(w)
-        # torch.chunk-style near-equal splits, so dims that are not divisible
-        # by nblocks (e.g. K=257) still work; blocks then differ by one.
-        r_edges = [round(i * rows / nb) for i in range(nb + 1)]
-        k_edges = [round(i * K / nb) for i in range(nb + 1)]
+        # Block edges MUST match torch.chunk / BlockdiagLinear, which both use
+        # ceil-sized blocks with a short final block -- not balanced rounding.
+        # On a dim that is not divisible (K=257, nb=4) chunk gives 65/65/65/62
+        # while balanced rounding gives 64/64/65/64: same density, seams shifted
+        # by 1-2 columns, so ~4% of the kept weights land where the
+        # factorization has a structural zero. A mask built the other way cannot
+        # be loaded into a BlockdiagLinear, which is the whole point of using
+        # the mask as a stand-in for it.
+        def _edges(n: int) -> list[int]:
+            blk = -(-n // nb)                       # ceil(n / nb)
+            return [min(i * blk, n) for i in range(nb + 1)]
+
+        r_edges, k_edges = _edges(rows), _edges(K)
         for b in range(nb):
             mask[r_edges[b]:r_edges[b + 1], k_edges[b]:k_edges[b + 1]] = 1.0
 
