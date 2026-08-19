@@ -208,6 +208,57 @@ Both sparse checkpoints were verified against the declared pattern before export
 saved file rather than in the live model. Feeding the dense control's checkpoint
 to the exporter under a `2:4` manifest is correctly refused.
 
+## Overnight sweep: six patterns, 120 epochs each
+
+Same recipe extended to 120 epochs across the pattern space, run in two waves of
+three (`run_sparsity_overnight.sh`). Every `g_best` was verified against its
+declared pattern and its PESQ independently recomputed with `nsnet2.eval_masked`
+— every arm reproduced its training-log value exactly.
+
+| arm                | pattern         | sparsity |  best | last-5 mean | last-5 sd |
+| ------------------ | --------------- | -------: | ----: | ----------: | --------: |
+| `ov_dense_control` | dense           |       0% | 2.777 |       2.766 |     0.010 |
+| `ov_4to8`          | 4:8             |    50.0% | 2.779 |       2.771 |     0.009 |
+| `ov_2to4`          | 2:4             |    50.0% | 2.779 |       2.768 |     0.011 |
+| `ov_1to4`          | 1:4             |    75.0% | 2.781 |       2.766 |     0.016 |
+| `ov_unstruct_80`   | unstructured    |    80.0% | 2.776 |       2.770 |     0.006 |
+| `ov_block1x4_80`   | 1x4 blocks      |    80.0% | 2.770 |       2.759 |     0.011 |
+
+**Every pattern is free, and the experiment has hit its resolution limit.** The
+spread across all six arms is 0.012 PESQ. The typical *within-arm* variation
+across its own last five validations is 0.010 sd / 0.026 range. The differences
+between masks are smaller than the noise of a single arm, so these six are
+statistically indistinguishable — including 80% sparsity, and including 1:4,
+which posted the single highest number (2.781) purely by luck of which
+validation happened to land last.
+
+Do not read an ordering into this table. The correct statement is that at 120
+epochs of this recipe, mask choice does not move PESQ.
+
+Three things follow:
+
+1. **Pattern choice is entirely hers.** If Row Fusion prefers 4:8 over 2:4, or
+   1×4 blocks over N:M, there is no quality argument on our side to weigh
+   against it. That is a much stronger position than the 50%-only result, which
+   still showed a measurable (if tiny) 2:4-vs-4:8 gap.
+2. **The recipe, not the mask, is the binding constraint.** Every arm sits
+   ~0.07 below the 200-epoch dense baseline (2.845), the dense control included.
+   That gap is the shortened fine-tune with a freshly initialised discriminator,
+   not the sparsity. All six curves were still rising at epoch 120 — the last
+   validation is the maximum for four of the six — so none has converged.
+3. **It is consistent with what this repo already knew.** `monarch_8` reaches
+   2.832 FP32 at 0.36 M parameters. NSNet2 is heavily over-parameterised for
+   VoiceBank-DEMAND, so 80% sparsity costing nothing is the expected result
+   rather than a surprising one.
+
+What this does *not* establish: that 80% is free at int8, or that any of it is
+free at deeper sparsity than 80%. Both are open.
+
+Fine-tuning recovery, end to end, for the deepest pattern: `1x4:80` scored 2.189
+from magnitude pruning alone and 2.770 after fine-tuning — 0.58 PESQ recovered.
+Pruning-only numbers are a triage tool for ordering candidates, never a verdict
+on a pattern.
+
 ## Open questions for the call
 
 1. Does "very narrow GEMM" in her test mean N=1 exactly? Which hardware, dtype,
