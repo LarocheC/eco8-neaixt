@@ -15,6 +15,7 @@
 #   RUNS="baseline blockdiag_fc"    ./run_sweep.sh   # original first batch
 #   RUNS="$ORIGINAL_RUNS $NEW_RUNS" ./run_sweep.sh   # everything (block-diagonal)
 #   RUNS="$MONARCH_RUNS"            ./run_sweep.sh   # genuine 2-factor Monarch
+#   RUNS="$MONARCH_NBLOCK_RUNS"     ./run_sweep.sh   # Monarch nblocks 5/10/20
 #
 # TRITON=1 reproduces the SAME nine architectures using the Triton GRU
 # kernel from gru-qat (>=0.4.0) + the structured-matrix primitives from
@@ -60,6 +61,15 @@ NEW_RUNS="blockdiag_8 butterfly_ortho butterfly_2blocks wide_blockdiag"
 # comparison of block-diagonal vs true-Monarch structure. Opt in explicitly:
 #   RUNS="$MONARCH_RUNS" ./run_sweep.sh
 MONARCH_RUNS="monarch_8 monarch_full monarch_fc wide_monarch"
+
+# Monarch block-count sweep at the monarch_8 shape (hidden 400 / fc 600, both
+# the FCs and BOTH GRU projections structured) -- only `nblocks` varies, so the
+# arm is a pure capacity axis: 0.880M (5) / 0.553M (8, existing) / 0.443M (10) /
+# 0.225M (20). MonarchLinear pads the 257-wide input up internally, so block
+# counts that do not divide 257 are fine; block sizes need not be powers of two
+# for the fused Triton scan (verified fwd+bwd at 5/10/20). Opt in with:
+#   TRITON=1 EPOCHS=200 RUNS="$MONARCH_NBLOCK_RUNS" ./run_sweep.sh
+MONARCH_NBLOCK_RUNS="monarch_5 monarch_10 monarch_20"
 
 # Default: full 9-run sweep (5 originals + 4 follow-ups), all at n_fft=512.
 RUNS="${RUNS:-$ORIGINAL_RUNS $NEW_RUNS}"
