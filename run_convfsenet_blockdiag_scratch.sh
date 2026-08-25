@@ -23,7 +23,10 @@ EPOCHS="${EPOCHS:-200}"
 ARMS=(cfs_dense cfs_blockdiag2 cfs_blockdiag4 cfs_blockdiag8)
 
 # Wait for any in-flight convfsenet training to finish before adding load.
-while pgrep -f "convfsenet.train" > /dev/null 2>&1; do
+# The bracket trick keeps this from matching unrelated shells whose command
+# line merely mentions the module name -- including a status check typed while
+# the runner is polling, which would otherwise stall it indefinitely.
+while pgrep -f "python.* -m [c]onvfsenet\.train" > /dev/null 2>&1; do
     echo "$(date +%H:%M:%S)  waiting for in-flight convfsenet training to finish..."
     sleep 120
 done
