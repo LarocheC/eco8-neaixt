@@ -70,6 +70,26 @@ does survive the fix — but it had never actually been tested before it.
 | `monarch_fc`   | 2.38 M |     2.843 |     2.831 |        +0.012 |
 | `monarch_full` | 1.10 M |     2.838 |     2.846 |        −0.009 |
 
+#### Monarch block-count sweep (`nblocks` 5 / 8 / 10 / 20)
+
+Same architecture as `monarch_8` — hidden 400, fc 600, both FCs and both GRU
+projections Monarch — with **only `nblocks` varying**, so parameters move
+without any other change. RTF is int8 on CPU; the three new runs were measured
+together on an idle box.
+
+| run          | nblocks | params | FP32 PESQ | int8 PESQ | Δ (FP32→int8) | int8 RTF |
+| ------------ | ------: | -----: | --------: | --------: | ------------: | -------: |
+| `monarch_5`  |       5 | 0.88 M |     2.852 |     2.858 |        −0.007 |    0.017 |
+| `monarch_8`  |       8 | 0.55 M | **2.861** |     2.856 |        +0.005 |    0.027 |
+| `monarch_10` |      10 | 0.44 M |     2.849 |     2.842 |        +0.007 |    0.014 |
+| `monarch_20` |      20 | 0.23 M |     2.849 |     2.854 |        −0.005 |    0.013 |
+
+**4× parameters, 0.012 PESQ spread** — the 0.23 M `monarch_20` matches the
+0.88 M `monarch_5`, and int8 stays loss-free (|Δ| ≤ 0.007) even at the smallest
+size. `monarch_20` is the cheapest model in the family. The `monarch_8` RTF was
+measured in an earlier session under different load, so it is not comparable to
+the other three.
+
 ### Block-diagonal, dense, butterfly
 
 | run                 | params | FP32 PESQ | int8 PESQ | Δ (FP32→int8) |
@@ -94,7 +114,9 @@ does survive the fix — but it had never actually been tested before it.
   NSNet2 predicts a magnitude mask and reuses the noisy phase, which caps PESQ
   regardless of how expressive the mask predictor is. **The dense model was
   already over-parameterized** — which is exactly why aggressive structuring is
-  nearly free. For deployment, take the smallest (`blockdiag_8` / `monarch_8`).
+  nearly free. For deployment, take the smallest (`blockdiag_8` / `monarch_20`).
+  The block-count sweep extends this: 4× parameters across `nblocks` 5→20 moves
+  PESQ by 0.012, within run-to-run noise.
 - **Genuine Monarch beats block-diagonal, but marginally** (+0.011…+0.038 FP32 at
   matched `nblocks`) and it costs parameters — its second factor makes it larger.
   Consistent with the saturation above.
@@ -113,7 +135,8 @@ static int8 ONNX, and the exact `config.json` it was trained with.
 baseline/          blockdiag_8/     monarch_8/       butterfly_fc/
 blockdiag_fc/      blockdiag_full/  monarch_fc/      butterfly_full/
 wide_blockdiag/    monarch_full/    wide_monarch/    butterfly_ortho/
-                                                     butterfly_2blocks/
+                   monarch_5/       monarch_10/      butterfly_2blocks/
+                   monarch_20/
 
   each: {g_best, g_best_fp32.onnx, g_best.onnx, config.json}
 ```

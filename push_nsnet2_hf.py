@@ -70,6 +70,10 @@ def main():
                         "Use '--only g_best.onnx' for an int8-only refresh.")
     p.add_argument("--cp-prefix", default="cp_",
                    help="Local dir prefix for each run (default: 'cp_', i.e. cp_<run>).")
+    p.add_argument("--cp-suffix", default="",
+                   help="Local dir suffix for each run (default: none). The Triton "
+                        "sweeps land in cp_<run>_triton/ but publish under the plain "
+                        "<run>/ name on the Hub, so use --cp-suffix _triton for those.")
     p.add_argument("--readme", default=None,
                    help="Optional path to a top-level README.md (model card) to upload. "
                         "If omitted, the existing repo README is left untouched.")
@@ -89,7 +93,7 @@ def main():
     to_upload = []          # list of (repo_path, local_path)
     missing = []
     for run in a.runs:
-        cp_dir = base / f"{a.cp_prefix}{run}"
+        cp_dir = base / f"{a.cp_prefix}{run}{a.cp_suffix}"
         for fname in a.only:
             local = cp_dir / fname
             if local.is_file():
@@ -107,7 +111,7 @@ def main():
     # Sanity-check each run's config so we don't push a mislabeled model.
     if "config.json" in a.only:
         for run in a.runs:
-            cfg_path = base / f"{a.cp_prefix}{run}" / "config.json"
+            cfg_path = base / f"{a.cp_prefix}{run}{a.cp_suffix}" / "config.json"
             with open(cfg_path) as f:
                 cfg = json.load(f)
             gru = (cfg.get("gru") or {}).get("kind", "?")
