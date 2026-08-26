@@ -77,7 +77,18 @@ MONARCH_NBLOCK_RUNS="monarch_5 monarch_10 monarch_20"
 # blockdiag_5 (0.563M) lands within 2% of monarch_8 (0.553M), which is the
 # param-matched monarch-vs-blockdiag comparison EXPERIMENT_MONARCH.md leaves
 # open -- structure isolated from capacity, rather than at matched nblocks.
-#   TRITON=1 EPOCHS=200 RUNS="$BLOCKDIAG_NBLOCK_RUNS" ./run_sweep.sh
+# Run these with TRITON=0, NOT 1, for two independent reasons:
+#   1. Every published blockdiag row (blockdiag_8/full/fc, wide_blockdiag) was
+#      trained on the native "blockdiag" path, so TRITON=1 here would not be
+#      comparable to the rows these arms exist to extend.
+#   2. gru-qat's triton_blockdiag persistent scan refuses to launch when
+#      ceil(batch/BLOCK_B) * nblocks exceeds the GPU's SM count (it would
+#      deadlock on its spin-wait barrier). BLOCK_B is hardwired to 16, so at
+#      batch 256 the grid is 16*nblocks and anything past nblocks=8 dies on a
+#      128-SM card: nblocks=10 -> 160, nblocks=20 -> 320.
+# The native path costs ~6% of a training step here (0.11s vs 0.043s fwd+bwd,
+# against a ~1.1s step), i.e. nothing measurable.
+#   TRITON=0 EPOCHS=200 RUNS="$BLOCKDIAG_NBLOCK_RUNS" ./run_sweep.sh
 BLOCKDIAG_NBLOCK_RUNS="blockdiag_5 blockdiag_10 blockdiag_20"
 
 # Default: full 9-run sweep (5 originals + 4 follow-ups), all at n_fft=512.
