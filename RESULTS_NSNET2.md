@@ -61,6 +61,10 @@ exports emit no `Einsum`) and carry their original figures.
 loss-free (|Δ| ≤ 0.018) **even with the structured weights genuinely quantized** —
 the pre-fix "loss-free" claim happened to survive the correction, because these
 block weights quantize cleanly rather than because they were being skipped.
+**That bound holds only for `nblocks ≤ 8`**, the range these rows cover: at
+`nblocks` 20 and 40 the block-diagonal int8 penalty is 0.092 and 0.153 (see the
+block-count sweep below). Narrow blocks and int8 interact badly; Monarch shows no
+such interaction at any block count.
 Butterfly with randn init remains the outlier (Δ up to 0.64).
 
 RTF is omitted from this table: the block-diagonal rows were re-timed on a
@@ -99,19 +103,68 @@ quantization-free comparison):
 **Genuine Monarch is consistently but marginally better than block-diagonal**
 (+0.011…+0.038 FP32), and it costs parameters to get there — Monarch's second
 factor makes it larger at equal `nblocks`. It is also **genuinely int8-loss-free**
-(|Δ| ≤ 0.012 with the weights actually quantized), matching block-diagonal's
-quantization robustness.
+(|Δ| ≤ 0.012 with the weights actually quantized). At these block counts it
+matches block-diagonal's quantization robustness — but that parity ends past
+`nblocks` 8, as the block-count sweep below shows.
 
-### Quality is capacity-bound? No — it saturates
+### Block-count sweep — where the two families separate
+
+The tables above sample `nblocks` 4 and 8 only. Pushing the block count to 40
+(hidden blocks just 10 wide) separates the families completely. Both were
+trained on the identical recipe; blockdiag on the native GRU path, monarch on
+gru-qat's fused Triton path (see the connectivity note below).
+
+| nblocks | blockdiag params | FP32 | int8 | Δint8 | monarch params | FP32 | int8 | Δint8 |
+| ------: | ---------------: | ---: | ---: | ----: | -------------: | ---: | ---: | ----: |
+|       5 |          0.563 M | 2.826 | 2.793 | +0.033 |        0.880 M | 2.852 | 2.858 | −0.007 |
+|       8 |          0.355 M | 2.832 | 2.825 | +0.007 |        0.553 M | 2.861 | 2.856 | +0.005 |
+|      10 |          0.285 M | 2.772 | 2.744 | +0.028 |        0.443 M | 2.849 | 2.842 | +0.007 |
+|      20 |          0.146 M | 2.719 | 2.627 | +0.092 |        0.225 M | 2.849 | 2.854 | −0.005 |
+|      40 |          0.077 M | 2.608 | 2.455 | +0.153 |        0.117 M | 2.837 | 2.837 |  0.000 |
+
+**Block-diagonal collapses; Monarch does not.** Across nblocks 5→40 blockdiag
+loses **0.218 PESQ** in FP32 and its int8 penalty grows from 0.033 to 0.153 — a
+0.338 fall in int8 terms. Monarch moves 0.015 in FP32 and its int8 penalty never
+leaves the noise, hitting exactly 0.000 at nblocks 40.
+
+The separating variable is connectivity, not capacity:
+
+- **At matched parameters** (not matched `nblocks`): `blockdiag_5` (0.563 M)
+  scores 2.826 against `monarch_8` (0.553 M) at 2.861 — **+0.035 for Monarch at
+  equal size**. This is the comparison `EXPERIMENT_MONARCH.md` left open; every
+  earlier pair was matched on `nblocks`, where Monarch is always the bigger model
+  and structure is confounded with capacity.
+- **Monarch wins while being smaller**: `monarch_40` (0.117 M) beats
+  `blockdiag_20` (0.146 M) by 0.130 FP32 and 0.227 int8.
+- **`monarch_40` reaches dense parity at 24× fewer parameters** — 2.837 against
+  the 2.78 M baseline's 2.845, inside metric noise, and loss-free in int8 where
+  the dense baseline itself gives up 0.012.
+
+A block-diagonal factor has zero cross-block mixing, so raising `nblocks`
+partitions the network into ever-narrower non-communicating bands. Monarch's
+permutation between its two factors restores full cross-channel reach in one
+step, and that is what the mask predictor turns out to need — not parameters.
+
+Convergence behaviour corroborates it: `monarch_40` peaked at step 5200 of 9038
+and plateaued, while `blockdiag_40` was still improving at its final validation
+(step 8800). The Monarch model saturated; the block-diagonal model was starved.
+
+### Quality is capacity-bound? No — it saturates (with one exception)
 
 The most useful result here is a negative one. Across **three structure families
 and ~10× parameters**, every configuration lands in a narrow band:
 
-| family          | param range    | FP32 PESQ band |
-| --------------- | -------------- | -------------- |
-| dense           | 2.78 M         | 2.845          |
-| block-diagonal  | 0.36 – 2.36 M  | 2.81 – 2.86    |
-| genuine Monarch | 0.55 – 3.64 M  | 2.84 – 2.88    |
+| family                      | param range     | FP32 PESQ band |
+| --------------------------- | --------------- | -------------- |
+| dense                       | 2.78 M          | 2.845          |
+| block-diagonal, nblocks ≤ 8 | 0.36 – 2.36 M   | 2.81 – 2.86    |
+| block-diagonal, nblocks > 8 | 0.077 – 0.285 M | 2.61 – 2.77    |
+| genuine Monarch             | 0.117 – 3.64 M  | 2.84 – 2.88    |
+
+The exception is the third row. Saturation is **not** a property of the task
+alone — block-diagonal falls out of the band once its blocks get narrow. It is
+Monarch that saturates across a 31× parameter range, and the block-count sweep
+above is where that distinction shows up.
 
 It is not even monotonic in capacity: the 0.553 M `monarch_8` (2.861) beats both
 the 1.099 M `monarch_full` (2.838) and the 2.379 M `monarch_fc` (2.843). Going
@@ -127,8 +180,11 @@ is also small enough to impose its own ceiling. Consequences:
 - **The dense model was already over-parameterized for this task**, which is
   precisely why aggressive structuring costs ~nothing — the compression story
   holds because capacity was never the binding constraint.
-- **For deployment take the smallest/fastest** (`blockdiag_8` / `monarch_8`): no
-  quality penalty, best RTF.
+- **For deployment take the smallest/fastest** — `monarch_40` (0.117 M, 2.837
+  FP32 *and* int8, RTF 0.013 vs the dense baseline's 0.121). `blockdiag_8`
+  remains the block-diagonal pick; do not go past nblocks 8 in that family.
+  Caveat: on embedded targets this ordering has not held — Monarch measured ~3×
+  *slower* than dense on the RT595, and more blocks made the STM32N6 NPU slower.
 - **To move PESQ you must change the architecture** (phase-aware / complex mask,
   or lean harder on the GAN path) **or the data** — not scale the linear layers.
   Chasing structure or width within this architecture is not where the gains are.
@@ -198,12 +254,14 @@ MAX_UTTERANCES=100 ./run_eval_sweep.sh       # quick directional read
 
 Three findings worth flagging:
 
-* **Block-diagonal and Monarch variants quantize loss-free** — |Δ| ≤ 0.018
-  (block-diagonal) and ≤ 0.012 (Monarch), **re-measured with the structured
-  weights genuinely quantized** (see the int8 correction at the top; the earlier
-  figures were taken on models whose `Einsum` weights were still FP32). The block
-  factors survive per-channel int8 on their own merits: the claim happens to hold
-  after the fix, but it was not *tested* before it.
+* **Monarch quantizes loss-free at every block count tested** (|Δ| ≤ 0.012 over
+  nblocks 4–40, exactly 0.000 at 40). **Block-diagonal does so only up to
+  `nblocks` 8** (|Δ| ≤ 0.018); past that the penalty grows sharply — 0.092 at 20,
+  0.153 at 40. Both re-measured with the structured weights genuinely quantized
+  (see the int8 correction at the top; earlier figures came from models whose
+  `Einsum` weights were still FP32). The original "block-diagonal quantizes
+  loss-free" claim was true but under-scoped: it was only ever tested on wide
+  blocks, and it does not survive narrow ones.
 * **Butterfly with `init=ortho` is the right choice for int8 deployment**.
   The cumulative log\_n-stage transform's stage-by-stage activation
   magnitude stays bounded when twiddles are spectrally constrained; randn
@@ -347,10 +405,13 @@ side-by-side spectrograms and audio.
 
 ## Trained checkpoints
 
-The 9 best-PESQ generators (`g_best`), the streaming FP32 ONNX
+The best-PESQ generators (`g_best`), the streaming FP32 ONNX
 (`g_best_fp32.onnx`), the static int8 ONNX (`g_best.onnx`), and the
 exact configs they were trained with are mirrored on HuggingFace at
-[`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints).
+[`claroche1/sparse-nsnet2-checkpoints`](https://huggingface.co/claroche1/sparse-nsnet2-checkpoints)
+— 21 runs: `baseline`, `blockdiag_{5,8,10,20,40,full,fc}`,
+`monarch_{5,8,10,20,40,full,fc}`, `wide_blockdiag`, `wide_monarch`, and the four
+`butterfly_*` variants.
 
 PyTorch:
 

@@ -70,25 +70,39 @@ does survive the fix — but it had never actually been tested before it.
 | `monarch_fc`   | 2.38 M |     2.843 |     2.831 |        +0.012 |
 | `monarch_full` | 1.10 M |     2.838 |     2.846 |        −0.009 |
 
-#### Monarch block-count sweep (`nblocks` 5 / 8 / 10 / 20)
+#### Block-count sweep, both families (`nblocks` 5 → 40)
 
-Same architecture as `monarch_8` — hidden 400, fc 600, both FCs and both GRU
-projections Monarch — with **only `nblocks` varying**, so parameters move
-without any other change. RTF is int8 on CPU; the three new runs were measured
-together on an idle box.
+One knob varies. Every run below is the `*_8` architecture — hidden 400, fc 600,
+both FCs and both GRU projections structured — with **only `nblocks` changed**,
+so parameters move and nothing else does. Dense baseline for reference:
+**2.845 FP32 / 2.834 int8 at 2.78 M**.
 
-| run          | nblocks | params | FP32 PESQ | int8 PESQ | Δ (FP32→int8) | int8 RTF |
-| ------------ | ------: | -----: | --------: | --------: | ------------: | -------: |
-| `monarch_5`  |       5 | 0.88 M |     2.852 |     2.858 |        −0.007 |    0.017 |
-| `monarch_8`  |       8 | 0.55 M | **2.861** |     2.856 |        +0.005 |    0.027 |
-| `monarch_10` |      10 | 0.44 M |     2.849 |     2.842 |        +0.007 |    0.014 |
-| `monarch_20` |      20 | 0.23 M |     2.849 |     2.854 |        −0.005 |    0.013 |
+| nblocks | blockdiag params | FP32 | int8 | Δint8 | monarch params | FP32 | int8 | Δint8 |
+| ------: | ---------------: | ---: | ---: | ----: | -------------: | ---: | ---: | ----: |
+|       5 |          0.563 M | 2.826 | 2.793 | +0.033 |        0.880 M | 2.852 | 2.858 | −0.007 |
+|       8 |          0.355 M | 2.832 | 2.825 | +0.007 |        0.553 M | **2.861** | 2.856 | +0.005 |
+|      10 |          0.285 M | 2.772 | 2.744 | +0.028 |        0.443 M | 2.849 | 2.842 | +0.007 |
+|      20 |          0.146 M | 2.719 | 2.627 | +0.092 |        0.225 M | 2.849 | 2.854 | −0.005 |
+|      40 |          0.077 M | 2.608 | 2.455 | +0.153 |        0.117 M | 2.837 | 2.837 |  0.000 |
 
-**4× parameters, 0.012 PESQ spread** — the 0.23 M `monarch_20` matches the
-0.88 M `monarch_5`, and int8 stays loss-free (|Δ| ≤ 0.007) even at the smallest
-size. `monarch_20` is the cheapest model in the family. The `monarch_8` RTF was
-measured in an earlier session under different load, so it is not comparable to
-the other three.
+**Block-diagonal collapses as blocks narrow; Monarch does not.** Over nblocks
+5→40 blockdiag loses 0.218 PESQ in FP32, and its int8 penalty grows from 0.033 to
+0.153 (0.338 total in int8 terms). Monarch moves 0.015 in FP32 and stays
+int8-loss-free throughout — exactly 0.000 at nblocks 40.
+
+The separating variable is connectivity, not capacity. A block-diagonal factor
+never mixes across blocks, so raising `nblocks` splits the network into narrower
+non-communicating bands; Monarch's permutation restores full cross-channel reach
+in one step. Two checks:
+
+- **At matched parameters**: `blockdiag_5` (0.563 M) 2.826 vs `monarch_8`
+  (0.553 M) 2.861 — +0.035 for Monarch at equal size.
+- **Monarch wins while smaller**: `monarch_40` (0.117 M) beats `blockdiag_20`
+  (0.146 M) by 0.130 FP32 and 0.227 int8.
+
+**`monarch_40` reaches dense parity with 24× fewer parameters** (2.837 vs 2.845,
+inside metric noise) and is loss-free in int8, where the dense baseline itself
+gives up 0.012. It is the model to take unless you have a reason not to.
 
 ### Block-diagonal, dense, butterfly
 
@@ -120,7 +134,10 @@ the other three.
 - **Genuine Monarch beats block-diagonal, but marginally** (+0.011…+0.038 FP32 at
   matched `nblocks`) and it costs parameters — its second factor makes it larger.
   Consistent with the saturation above.
-- **Block-diagonal and Monarch quantize loss-free** (|Δ| ≤ 0.018 and ≤ 0.012),
+- **Monarch quantizes loss-free at every block count tested** (|Δ| ≤ 0.012 over
+  nblocks 4–40). **Block-diagonal only up to `nblocks` 8** (|Δ| ≤ 0.018) — at 20
+  and 40 the penalty is 0.092 and 0.153. The older unqualified "block-diagonal
+  quantizes loss-free" claim was tested only on wide blocks,
   *with the weights genuinely quantized*.
 - **Butterfly with randn init degrades catastrophically under int8** (Δ up to
   0.644). Use `init=ortho`: `butterfly_ortho` loses 0.203 to int8 vs 0.644 for
@@ -132,11 +149,12 @@ One subdirectory per run: the generator (`g_best`), the streaming FP32 ONNX, the
 static int8 ONNX, and the exact `config.json` it was trained with.
 
 ```
-baseline/          blockdiag_8/     monarch_8/       butterfly_fc/
-blockdiag_fc/      blockdiag_full/  monarch_fc/      butterfly_full/
-wide_blockdiag/    monarch_full/    wide_monarch/    butterfly_ortho/
-                   monarch_5/       monarch_10/      butterfly_2blocks/
-                   monarch_20/
+baseline/          blockdiag_5/     monarch_5/       butterfly_fc/
+blockdiag_fc/      blockdiag_8/     monarch_8/       butterfly_full/
+blockdiag_full/    blockdiag_10/    monarch_10/      butterfly_ortho/
+wide_blockdiag/    blockdiag_20/    monarch_20/      butterfly_2blocks/
+wide_monarch/      blockdiag_40/    monarch_40/
+monarch_fc/
 
   each: {g_best, g_best_fp32.onnx, g_best.onnx, config.json}
 ```
