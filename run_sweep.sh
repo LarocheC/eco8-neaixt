@@ -91,6 +91,22 @@ MONARCH_NBLOCK_RUNS="monarch_5 monarch_10 monarch_20"
 #   TRITON=0 EPOCHS=200 RUNS="$BLOCKDIAG_NBLOCK_RUNS" ./run_sweep.sh
 BLOCKDIAG_NBLOCK_RUNS="blockdiag_5 blockdiag_10 blockdiag_20"
 
+# Param-matched DENSE controls for the block-count sweep. The structured arms
+# only show that structure beats *other structure* at a given size; these answer
+# the question that actually matters -- would a plain, narrower dense NSNet2 do
+# just as well at the same parameter count? Same architecture, no structured
+# matrices, hidden and fc widths scaled together at the original 1.5 ratio
+# (400/600), each within ~1% of its structured counterpart:
+#   dense_h216 = 0.877M  ~ monarch_5   (0.880M)
+#   dense_h168 = 0.555M  ~ monarch_8   (0.553M) and blockdiag_5 (0.563M)
+#   dense_h148 = 0.443M  ~ monarch_10  (0.443M)
+#   dense_h100 = 0.224M  ~ monarch_20  (0.225M)
+#   dense_h68  = 0.118M  ~ monarch_40  (0.117M)
+#   dense_h52  = 0.077M  ~ blockdiag_40 (0.077M)
+# Dense GRU, so TRITON is irrelevant here -- run them with TRITON=0.
+#   TRITON=0 EPOCHS=200 RUNS="$DENSE_MATCHED_RUNS" ./run_sweep.sh
+DENSE_MATCHED_RUNS="dense_h216 dense_h168 dense_h148 dense_h100 dense_h68 dense_h52"
+
 # Default: full 9-run sweep (5 originals + 4 follow-ups), all at n_fft=512.
 RUNS="${RUNS:-$ORIGINAL_RUNS $NEW_RUNS}"
 EPOCHS="${EPOCHS:-30}"
