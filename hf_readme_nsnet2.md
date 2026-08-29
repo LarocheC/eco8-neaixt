@@ -104,6 +104,61 @@ in one step. Two checks:
 inside metric noise) and is loss-free in int8, where the dense baseline itself
 gives up 0.012. It is the model to take unless you have a reason not to.
 
+#### Param-matched dense controls
+
+Structured-vs-structured comparisons cannot tell "Monarch's mixing is what
+matters" apart from "any model of this width would do". The control is a plain
+narrower **dense** NSNet2 at the same parameter count (`dense_h*`, hidden and fc
+scaled together at the original 1.5 ratio, each within ~1% of its pair):
+
+| params | block-diagonal | dense | Monarch | dense−monarch |
+| -----: | -------------: | ----: | ------: | ------------: |
+| 0.88 M |              — | 2.783 | **2.852** | −0.069 |
+| 0.55 M |          2.826 | 2.840 | **2.861** | −0.021 |
+| 0.44 M |              — | 2.815 | **2.849** | −0.034 |
+| 0.23 M |          2.719 | 2.784 | **2.849** | −0.065 |
+| 0.12 M |              — | 2.751 | **2.837** | −0.086 |
+| 0.08 M |          2.608 | 2.749 |         — |      — |
+
+**Monarch beats dense at all five matched sizes** (mean −0.055), and the gap
+widens as models shrink. The small-end ordering is **Monarch > dense >
+block-diagonal** — so `blockdiag_40` does not fail because 0.077 M is too small
+for the task; a dense model of that exact size scores 2.749 against its 2.608.
+
+Dense quantizes cleanly at every width (|Δ| ≤ 0.017), so int8 robustness does not
+separate dense from Monarch; that failure is specific to narrow block-diagonal.
+
+Caveat: one seed per arm, and dense scatters in a 0.089 band across these sizes
+(the 0.55 M dense arm beats the 0.88 M one) while Monarch holds 0.024. The
+aggregate direction is solid; individual gaps are not quotable as measured
+quantities.
+
+#### Latency: the trade-off runs the other way
+
+All seven small-model arms below were re-timed **back-to-back in one session on
+an idle box**, so these RTFs are directly comparable (the RTF figures elsewhere
+in this file were collected across different days and are not).
+
+| params | model | int8 PESQ | int8 RTF |
+| -----: | ----- | --------: | -------: |
+| 0.12 M | `monarch_40` | **2.837** |    0.013 |
+| 0.12 M | `dense_h68`  |     2.754 | **0.007** |
+| 0.23 M | `monarch_20` | **2.854** |    0.013 |
+| 0.23 M | `dense_h100` |     2.794 | **0.011** |
+| 0.08 M | `blockdiag_40` |   2.455 |    0.008 |
+| 0.08 M | `dense_h52`  |     2.745 | **0.005** |
+
+**At matched parameters the dense model is faster at every small size** — 1.9×
+at 0.12 M, 1.2× at 0.23 M. Monarch's Einsum lowering carries a fixed overhead
+that stops paying for itself as the models shrink; parameter count and latency
+are not the same axis.
+
+So the deployment choice at 0.12 M is a real trade, not a free win: **+0.083 PESQ
+(Monarch) against ~1.9× lower CPU latency and no torch-structured / gru-qat
+dependency (dense)**. On embedded targets the case is worse still — Monarch
+measured ~3× slower than dense on the RT595, and raising the block count made the
+STM32N6 NPU slower. Monarch wins the science; dense may well win the product.
+
 ### Block-diagonal, dense, butterfly
 
 | run                 | params | FP32 PESQ | int8 PESQ | Δ (FP32→int8) |
