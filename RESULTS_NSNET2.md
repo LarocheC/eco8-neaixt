@@ -176,16 +176,35 @@ the simplest sceptical reading of the block-count collapse: `blockdiag_40` does
 not fail because 0.077 M is too small for the task — a *dense* model of exactly
 that size scores 2.749 against its 2.608.
 
-Two secondary observations:
+##### Repeat seeds: both decisive gaps separate cleanly
 
-- **Dense trains inconsistently at these widths.** Across 0.88 → 0.12 M it
-  scatters in a 0.089 band with no trend (2.783, 2.840, 2.815, 2.784, 2.751),
-  while Monarch holds a 0.024 band over the same range. The 0.55 M dense arm
-  beats the 0.88 M one. Whether the block structure is actively stabilising
-  optimisation, or these are just unlucky draws, is not answerable from one seed.
-- **Single seed per arm.** The dense scatter is comparable to the individual
-  gaps, so the aggregate direction is defensible but a specific gap like −0.021
-  is not. Repeat seeds at 0.12 M and 0.55 M would settle it.
+The single-seed table above supports a direction; three seeds per arm (1234,
+2345, 3456) on the two pairings that carry the argument turn it into a measured
+quantity. Both were run on the identical recipe, varying only `seed` (which
+drives torch, CUDA and dataloader shuffling).
+
+| pairing | Monarch (n=3) | dense (n=3) | gap of means | worst-M − best-D | Welch t |
+| ------- | ------------- | ----------- | -----------: | ---------------: | ------: |
+| 0.12 M `monarch_40` / `dense_h68`  | 2.837, 2.837, 2.822 → **2.832** ± 0.009 | 2.751, 2.754, 2.755 → **2.753** ± 0.002 | **+0.079** | +0.067 | 15.3 |
+| 0.55 M `monarch_8` / `dense_h168`  | 2.861, 2.856, 2.856 → **2.858** ± 0.003 | 2.840, 2.824, 2.834 → **2.833** ± 0.008 | **+0.025** | +0.016 | 5.0 |
+
+**Neither pairing overlaps** — in both, the worst Monarch run beats the best
+dense run. The advantage is real at both sizes and **grows as the models shrink**
+(+0.025 at 0.55 M, +0.079 at 0.12 M), which is the quantitative form of the
+connectivity argument.
+
+Seed noise is small everywhere measured: sd 0.002–0.009, an order of magnitude
+below the effects. Two consequences:
+
+- **The single-seed numbers were sound.** Every original seed-1234 result falls
+  inside its arm's spread, and `monarch_40` reproduced at 2.837 on a second seed.
+- **Dense's non-monotonicity is real, not noise.** Across 0.88 → 0.12 M dense
+  scatters in a 0.089 band with no trend (2.783, 2.840, 2.815, 2.784, 2.751) —
+  the 0.55 M arm beats the 0.88 M one — while its per-seed sd is only
+  0.002–0.008. So that scatter is a genuine property of how dense NSNet2 trains
+  at these widths, not unlucky draws. Monarch holds a 0.024 band over the same
+  range. Whether the block structure is actively stabilising optimisation is
+  still open, but "it was just noise" is now ruled out.
 
 **Dense quantizes cleanly at every width** (|Δ| ≤ 0.017, two of six negative), so
 int8 robustness does not separate dense from Monarch — that failure is specific

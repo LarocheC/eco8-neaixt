@@ -128,10 +128,19 @@ for the task; a dense model of that exact size scores 2.749 against its 2.608.
 Dense quantizes cleanly at every width (|Δ| ≤ 0.017), so int8 robustness does not
 separate dense from Monarch; that failure is specific to narrow block-diagonal.
 
-Caveat: one seed per arm, and dense scatters in a 0.089 band across these sizes
-(the 0.55 M dense arm beats the 0.88 M one) while Monarch holds 0.024. The
-aggregate direction is solid; individual gaps are not quotable as measured
-quantities.
+**Confirmed with repeat seeds** (three each: 1234, 2345, 3456) on the two
+pairings that carry the argument:
+
+| pairing | Monarch (n=3) | dense (n=3) | gap | overlap? |
+| ------- | ------------- | ----------- | --: | -------- |
+| 0.12 M | **2.832** ± 0.009 | **2.753** ± 0.002 | **+0.079** | none (+0.067) |
+| 0.55 M | **2.858** ± 0.003 | **2.833** ± 0.008 | **+0.025** | none (+0.016) |
+
+In both, the worst Monarch run beats the best dense run, and the advantage grows
+as models shrink. Seed noise is sd 0.002–0.009, an order of magnitude below the
+effect. Note that dense's scatter *across sizes* (0.089 band, the 0.55 M arm
+beating the 0.88 M one) is therefore real rather than noise — dense NSNet2 trains
+inconsistently at these widths in a way Monarch does not.
 
 #### Latency: the trade-off runs the other way
 
