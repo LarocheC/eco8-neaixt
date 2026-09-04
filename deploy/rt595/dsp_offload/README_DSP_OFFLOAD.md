@@ -60,12 +60,12 @@ Reused verbatim from `../app/`: `model_se_stream.{cpp,h}`, `model_ops_micro.cpp`
    license-gated and cannot be obtained without an authenticated account. `sdk/cmake/
    toolchain/xtensa.cmake` needs exactly these env vars:
    - `XCC_DIR`      — XtensaTools install (`xt-clang`), version **≥ 10.0.1** (per
-     `default_tool_version.cmake`; the build host's **RI-2023.11** satisfies this).
+     `default_tool_version.cmake`; **RI-2023.11** satisfies this).
    - `XTENSA_CORE`  — **`nxp_rt600_RI2021_8_newlib`** (the RT500/RT600 HiFi4 core config;
      RT595 == RT500 family. This is the name the SDK's DSP examples export — grep confirmed).
    - `XTENSA_SYSTEM`— the config registry dir that has that core registered.
 
-   The build host has the *tools* (RI-2023.11) but its registered core is **AIR/HiFi5**, not
+   A HiFi5 build host has the *tools* (RI-2023.11) but its registered core is HiFi5, not
    this RT500 HiFi4 core, and its license may be core-locked. To reuse it:
    ```
    xt-run --show-config=configs          # list registered cores; is nxp_rt600_RI2021_8_newlib there?
@@ -81,12 +81,12 @@ Reused verbatim from `../app/`: `model_se_stream.{cpp,h}`, `model_ops_micro.cpp`
    procurement step. If that box is SSH-reachable, the DSP target can be built there once the
    core+license gap is closed.
 
-   **Toolchain env is pre-adapted: `env_rt595_hifi4.sh`.** It's the a HiFi5 vendor overlay's
-   `build/env.sh` (an internal vendor-overlay repository) with the core swapped from the
-   HiFi5 HiFi5 (`<hifi5-core-config>`) to the RT500 HiFi4 (`nxp_rt600_RI2021_8_newlib`).
+   **Toolchain env is pre-adapted: `env_rt595_hifi4.sh`.** It is a standard Cadence
+   RI-2023.11 environment with the core set to the RT500 HiFi4
+   (`nxp_rt600_RI2021_8_newlib`). Supply your own `XTENSA_LICENSE_FILE`; the script
+   requires it and has no default.
    Source it on the machine that has the Cadence tools + a running FlexLM daemon
-   (`6677@$HOSTNAME` — the license runs LOCALLY on the build host in that setup, there is no
-   central server address), then run the west build above. The three prerequisites it can't
+   then run the west build above. The three prerequisites it can't
    create (tools install, license daemon, RT500 core registered+entitled) are listed in the
    file, plus the RI-2021.8-core-vs-RI-2023.11-tools version check.
 
