@@ -115,7 +115,7 @@ Reuse existing code; new code is the stateless-windowed export wrapper.
   `native_dilation` flag idea (reverted — wash).
 - **`convfsenet/export_onnx.py`** — `export_windowed_fp32(base, out, T, L)`; fixed-shape window I/O,
   `dynamic_axes` only on batch, `opset 17`, `dynamo=False`. Mirror the structure of
-  `export_streaming_fp32` and `deploy/stm32n6/host/export_monarch_npu.py` (the stateless-export pattern).
+  `export_streaming_fp32` and `deploy/stm32n6/host/export_blockdiag_npu.py` (the stateless-export pattern).
 - **`convfsenet/quant.py`** — reuse `quantize_fp32_onnx` verbatim (QDQ, per-channel MinMax,
   `skip_optimization`, prologue `Pow/Add/Unsqueeze` excluded). The windowed graph quantizes the same way.
 - **256-bin alignment** — drop the Nyquist bin at the host STFT→feature boundary (`257→256`), pad the
@@ -197,5 +197,5 @@ Reuse existing code; new code is the stateless-windowed export wrapper.
 - `configs/convfsenet.json` → `configs/convfsenet_win.json` (+ small-STFT variant); `common/dataset.py`
   (`mag_pha_stft` STFT params, Nyquist drop).
 - `tests/test_convfsenet_streaming_parity.py` (extend for windowed parity).
-- `deploy/stm32n6/host/export_monarch_npu.py` (stateless-export reference pattern),
+- `deploy/stm32n6/host/export_blockdiag_npu.py` (stateless-export reference pattern),
   `deploy/stm32n6/ONBOARD_MEASUREMENT.md` (Gate-2 flow), `deploy/stm32n6/TODO.md` (lever-2-closed context).
