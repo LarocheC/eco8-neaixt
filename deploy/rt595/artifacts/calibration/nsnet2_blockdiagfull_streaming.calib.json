@@ -1,0 +1,38 @@
+{
+  "mode": "vbd",
+  "quality_valid": true,
+  "arch": "nsnet2",
+  "checkpoint": "cp_blockdiag_full/g_best",
+  "dataset": "JacobLinCool/VoiceBank-DEMAND-16k",
+  "split": "train",
+  "utterance_indices": [
+    474,
+    3121,
+    3561,
+    5913,
+    7368,
+    9839
+  ],
+  "n_utts": 6,
+  "n_frames": 192,
+  "warmup": 0,
+  "seed": 0,
+  "stft": {
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "compress_factor": 0.3
+  },
+  "calib_sha256": "4a4fc7aceba5e4c0815fae322f63f314e9583af8f5be1a88b91b72f47ce684a8",
+  "per_state": [
+    {
+      "input": "args_1",
+      "min": -1.0,
+      "max": 1.0,
+      "std": 0.5993928909301758,
+      "frac_nonzero": 0.9895833333333334
+    }
+  ],
+  "artifact": "deploy/rt595/host_out/nsnet2_blockdiagfull_streaming.tflite",
+  "artifact_bytes": 737400
+}
