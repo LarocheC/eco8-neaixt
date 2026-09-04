@@ -45,6 +45,35 @@ def _blockdiag_multiply_export(x, weight):
     return out.reshape(-1, nblocks * q)                  # (B, nblocks*q)
 
 
+def _blockdiag_butterfly_multiply_export(x, w1_bfly, w2_bfly):
+    """ONNX-export-friendly two-factor Monarch multiply (block-diagonal x
+    permutation x block-diagonal) for the 2D streaming path.
+
+    Numerically identical to torch_structured.monarch.BlockdiagButterflyMultiply
+    (== blockdiag_butterfly_multiply_reference version 2), but every Reshape
+    target uses a `-1` batch placeholder and the intermediate permutation is a
+    plain reshape+transpose instead of einops.rearrange, so ORT's
+    symbolic_shape_infer succeeds (same rationale as _blockdiag_multiply_export).
+
+    The permutation between the two factors is exactly what makes this a genuine
+    Monarch rather than a block-diagonal — it is preserved in the exported graph,
+    so the deployed model keeps full cross-channel mixing and the two-factor
+    parameter savings.
+
+    x:       (B, n) where n == k * p
+    w1_bfly: (k, q, p)
+    w2_bfly: (l, s, r)   with l * r == k * q
+    returns: (B, s * l)
+    """
+    k, q, p = w1_bfly.shape
+    l, s, r = w2_bfly.shape
+    x_r = x.reshape(-1, k, p)                             # b (k p) -> b k p
+    out1 = torch.einsum('kqp,bkp->bkq', w1_bfly, x_r)    # b k q
+    out1 = out1.reshape(-1, r, l).transpose(1, 2)        # b (r l) -> b l r
+    out2 = torch.einsum('lsr,blr->bsl', w2_bfly, out1)   # b s l
+    return out2.reshape(-1, s * l)                        # b (s l)
+
+
 def _butterfly_export_forward(self, input, transpose=False, conjugate=False, subtwiddle=False):
     """Structure-preserving export-friendly replacement for Butterfly.forward.
 
@@ -124,15 +153,20 @@ def _patch_structured_for_export(model):
     that PRESERVE structure.
 
     torch.onnx.export(dynamo=False) cannot trace:
-      - torch_structured.monarch.BlockdiagMultiply (custom torch.autograd.Function
-        whose forward calls torch.bmm with the out= kwarg — emits prim::PythonOp,
-        then trips _jit_pass_onnx_graph_shape_type_inference).
+      - torch_structured.monarch.BlockdiagMultiply / BlockdiagButterflyMultiply
+        (custom torch.autograd.Functions whose forward calls torch.bmm with the
+        out= kwarg — emit prim::PythonOp, then trip
+        _jit_pass_onnx_graph_shape_type_inference).
       - torch.ops.torch_structured.butterfly_multiply (custom registered C++ op).
 
     Strategy per variant:
-      - Monarch: substitute the module-level blockdiag_multiply with
-        _blockdiag_multiply_export (constant-target Reshape + Einsum). Preserves
-        the structured weight layout in the exported graph.
+      - Block-diagonal ("blockdiag"): substitute the module-level
+        blockdiag_multiply with _blockdiag_multiply_export (constant-target
+        Reshape + Einsum). Preserves the single block-diagonal weight layout.
+      - Monarch ("monarch", genuine 2-factor): substitute the module-level
+        blockdiag_butterfly_multiply with _blockdiag_butterfly_multiply_export.
+        Preserves both factors AND the permutation between them (the thing that
+        makes it a real Monarch, not a block-diagonal).
       - Butterfly: substitute Butterfly.forward with _butterfly_export_forward
         — same math as butterfly_multiply_torch + pre/post_process, but every
         Reshape/expand target uses -1 for the batch dim so ORT's symbolic
@@ -149,11 +183,21 @@ def _patch_structured_for_export(model):
     """
     patches = []
 
-    # --- Monarch: function-level swap on the module namespace ----------------
+    # --- Block-diagonal: function-level swap on the module namespace ---------
     try:
         from torch_structured.monarch import blockdiag_linear as _bd_mod
         patches.append((_bd_mod, "blockdiag_multiply", _bd_mod.blockdiag_multiply))
         _bd_mod.blockdiag_multiply = _blockdiag_multiply_export
+    except ImportError:
+        pass
+
+    # --- Monarch (genuine 2-factor): swap blockdiag_butterfly_multiply -------
+    try:
+        from torch_structured.monarch import monarch_linear as _mon_mod
+        patches.append(
+            (_mon_mod, "blockdiag_butterfly_multiply", _mon_mod.blockdiag_butterfly_multiply)
+        )
+        _mon_mod.blockdiag_butterfly_multiply = _blockdiag_butterfly_multiply_export
     except ImportError:
         pass
 
@@ -200,12 +244,12 @@ def export_streaming(checkpoint_file, output_path=None):
     output_path: optional override; defaults to <ckpt_dir>/g_best_fp32.onnx (D-13).
 
     Returns the resolved output path (pathlib.Path).
-    Structured-variant GRUs (gru_kind in {'butterfly','monarch'}) flow through
-    NSNet2Streaming._forward_step_structured, which delegates to the
-    StructuredGRU's Python time-loop. Each StructuredGRUCell's W_ih and W_hh
-    projections are BlockdiagLinear or Butterfly modules — both substituted by
-    _patch_structured_for_export, so the trace contains only standard ONNX
-    primitives. No separate gru_kind guard needed here.
+    Structured-variant GRUs (gru_kind in {'butterfly','blockdiag','monarch'})
+    flow through NSNet2Streaming._forward_step_structured, which delegates to
+    the StructuredGRU's Python time-loop. Each StructuredGRUCell's W_ih and W_hh
+    projections are BlockdiagLinear, MonarchLinear, or Butterfly modules — all
+    substituted by _patch_structured_for_export, so the trace contains only
+    standard ONNX primitives. No separate gru_kind guard needed here.
     """
     streaming = NSNet2Streaming.from_checkpoint(checkpoint_file)
 

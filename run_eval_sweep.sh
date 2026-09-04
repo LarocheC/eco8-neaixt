@@ -7,14 +7,14 @@
 #
 # Override: RUNS, MAX_UTTERANCES (default: full split = unset).
 #   MAX_UTTERANCES=100 ./run_eval_sweep.sh
-#   RUNS="baseline monarch_fc" ./run_eval_sweep.sh
+#   RUNS="baseline blockdiag_fc" ./run_eval_sweep.sh
 
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-ALL_RUNS="baseline monarch_fc butterfly_fc monarch_full butterfly_full \
-          monarch_8 butterfly_ortho butterfly_2blocks wide_monarch"
+ALL_RUNS="baseline blockdiag_fc butterfly_fc blockdiag_full butterfly_full \
+          blockdiag_8 butterfly_ortho butterfly_2blocks wide_blockdiag"
 
 RUNS="${RUNS:-$ALL_RUNS}"
 MAX_UTTERANCES="${MAX_UTTERANCES:-}"

@@ -288,7 +288,7 @@ def test_int8_vs_fp32_within_sanity_bound(
     Not a parity test — quantization is lossy by design. We're just checking
     that int8 didn't catastrophically destroy the model (saturated to 0/1).
     With a random-init model + synthetic calib data the diff floor is loose;
-    a real-trained model would land much tighter. NSNet2 monarch variants
+    a real-trained model would land much tighter. NSNet2 block-diagonal variants
     quantize loss-free (PESQ delta < 0.021).
     """
     fp32_sess = _make_session(fp32_onnx_path)

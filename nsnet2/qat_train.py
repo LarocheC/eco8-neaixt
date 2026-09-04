@@ -7,10 +7,10 @@ checkpoint; only the quant scaffold + LR + epoch count differ.
 Usage:
 
     python -m nsnet2.qat_train \\
-        --init_from cp_tr_monarch_8/g_best \\
+        --init_from cp_tr_blockdiag_8/g_best \\
         --w_bits 4 --a_bits 8 \\
         --epochs 5 --lr 3e-4 \\
-        --checkpoint_path cp_qat_w4a8_monarch_8
+        --checkpoint_path cp_qat_w4a8_blockdiag_8
 
 Note this trains on the magnitude-domain reconstruction losses only:
 0.9 * mag + 0.1 * com + 0.1 * stft + 0.2 * time. The original GAN
@@ -119,10 +119,12 @@ def _save_qat_checkpoint(model: NSNet2, ckpt_path: str, a) -> None:
     for mod in model.modules():
         if mod._forward_pre_hooks:
             # Only clear if we recognise the module type as one we hook
-            # (Linear / BlockdiagLinear / Butterfly / GRU).
-            from common.quant_fake import _is_blockdiag_linear, _is_butterfly
+            # (Linear / BlockdiagLinear / MonarchLinear / Butterfly / GRU).
+            from common.quant_fake import (
+                _is_blockdiag_linear, _is_monarch_linear, _is_butterfly,
+            )
             if isinstance(mod, (torch.nn.Linear, torch.nn.GRU)) or \
-               _is_blockdiag_linear(mod) or _is_butterfly(mod):
+               _is_blockdiag_linear(mod) or _is_monarch_linear(mod) or _is_butterfly(mod):
                 mod._forward_pre_hooks.clear()
                 if hasattr(mod, "_forward_pre_hooks_with_kwargs"):
                     mod._forward_pre_hooks_with_kwargs.clear()

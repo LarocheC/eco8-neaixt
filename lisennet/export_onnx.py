@@ -25,7 +25,7 @@ import onnx
 import torch
 from torch import nn
 
-from lisennet.model import LiSenNet, build_lisennet
+from lisennet.model import DualPathConv, LiSenNet, build_lisennet
 from common.env import AttrDict
 
 
@@ -58,9 +58,16 @@ def _receptive_field(model) -> int:
     enc = model.encoder
     for ds in (enc.conv_2, enc.conv_3, enc.conv_4):                  # DSConv: time kernel 2
         L += ds.low_conv[1].kernel_size[0] - 1
+    if getattr(model, "bottleneck", "rnn") == "hybrid":
+        raise ValueError(
+            "windowed export is undefined for bottleneck='hybrid': its inter-time GRU has "
+            "unbounded lookback, so no finite window reproduces the offline model (the conv "
+            "bottleneck's finite receptive field is exactly what makes stateless recompute "
+            "possible). Export the hybrid with --streaming — recurrence must carry state."
+        )
     for blk in model.blocks:
         dpc = blk.dp_rnn_attn
-        if not hasattr(dpc, "inter"):
+        if not isinstance(dpc, DualPathConv):
             raise ValueError("windowed export requires bottleneck='conv' (DualPathConv)")
         for ct in dpc.inter:                                        # _CausalTimeConv: (kt-1)*dilation
             L += (ct.dw.kernel_size[0] - 1) * ct.dw.dilation[0]
@@ -155,12 +162,19 @@ def export_streaming_fp32(model: LiSenNet, output_path, batch_size: int = 1,
 
     Graph IO (à la ConvFSENet's ``export_streaming_fp32``):
     ``feat (B,3,1,F)`` + N ``state_i_in`` -> ``est_mag (B,1,F)`` + N ``state_i_out``.
-    Only the batch axis is dynamic; the FIFO buffer widths are static (Neural-ART
-    wants fixed state shapes). Requires the conv bottleneck (``bottleneck="conv"``)
-    — the exported graph has no GRU and no 2-axis ``LayerNormalization``, which is
-    asserted here so a regression can't slip a Neural-ART blocker back in. The
-    exported ``Pad`` nodes are normalized by :func:`_strip_empty_pad_value_inputs`
-    (the atonn signo=11 fix); with that, this graph compiles to the NPU.
+    Only the batch axis is dynamic; the state widths are static (Neural-ART wants
+    fixed state shapes).
+
+    Works for both NPU bottlenecks — ``"conv"`` (all states are conv FIFOs) and
+    ``"hybrid"`` (conv FIFOs plus one GRU hidden state per DPR block). In *both*
+    cases the exported graph contains **no GRU op**: the hybrid's recurrence is
+    traced through :class:`~lisennet.model.TimeGRU`'s single-step cell, which is 1x1
+    convolutions over the hidden state, so recurrence reaches the NPU as
+    Conv/Sigmoid/Tanh/Mul. That invariant, and the absence of 2-axis
+    ``LayerNormalization``, are asserted below so a regression can't slip a
+    Neural-ART blocker back in. The exported ``Pad`` nodes are normalized by
+    :func:`_strip_empty_pad_value_inputs` (the atonn signo=11 fix); with that, this
+    graph compiles to the NPU.
     """
     from lisennet.streaming import LiSenNetStreamingONNX      # local: avoids a cycle
 

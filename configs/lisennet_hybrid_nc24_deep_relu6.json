@@ -1,0 +1,36 @@
+{
+    "_comment": "RECURRENT-TIME-AXIS ablation of the CURRENT DEPLOY MODEL (lisennet_conv_hardened_nc24_deep_relu6: FP32 3.084 / int8 3.014, RF 196, 4.83 ms/frame). Single-variable swap: the inter-time stack (3 blocks x dilations [1,2,4,8,16], RF 196 = 3.1 s) becomes a GRU over time (unbounded RF). Everything else identical: n_blocks 3, relu6, batchnorm, convtranspose, intra_kernel 11. hidden_dim 20 keeps params 1.4% BELOW the conv reference (45,600 vs 46,248) so the comparison is conservative — a win here is not a capacity win. This is the head-to-head the paper needs: the conv model buys its 3.1 s of context by recomputing a 196-frame FIFO every frame; the GRU gets unbounded context from a 20-wide state. Train into cp_lisennet_hybrid_deep_relu6.",
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "num_channels": 24,
+    "n_blocks": 3,
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+    "bottleneck": "hybrid",
+    "hidden_dim": 20,
+    "norm": "batchnorm",
+    "act": "relu6",
+    "upsample": "convtranspose",
+    "intra_kernel": 11,
+    "loss": {
+        "complex": 0.1,
+        "mag": 0.9,
+        "adv": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}

@@ -18,7 +18,7 @@ The repo contains three model families. They share the dataset wrapper, training
 
 | family         | architecture                                                                                                                                                           | causal | streaming                               | role                                                         |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | --------------------------------------- | ------------------------------------------------------------ |
-| **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, and Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
+| **NSNet2**     | GRU recurrent enhancer based on Braun & Tashev, ICASSP 2021. FC and GRU layers can be swapped between dense, Butterfly, block-diagonal, and (genuine two-factor) Monarch structured factorizations.         | yes    | yes                                     | Structured-factorization, int8, and int4 quantization study. |
 | **ConvFSENet** | Fully-convolutional ConvTasNet-derived magnitude-mask predictor using stacked Temporal Conv Module blocks. The architecture is based on Miccini *et al.*, ICASSP 2025. | yes    | yes, frame-by-frame with zero lookahead | Fast causal CNN enhancer and int8 quantization study.        |
 | **LiSenNet**   | Lightweight (~37 K-param) sub-band U-Net with a dual-path-recurrent bottleneck and a magnitude-only mask (Griffin-Lim phase). A port of Yan *et al.*, arXiv:2409.13285.   | yes    | yes, frame-by-frame with bounded state  | Ultra-compact real-time enhancer and int8 quantization study. |
 
@@ -31,6 +31,54 @@ Detailed results are kept in separate files:
 * [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
 * [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
 * [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/static-int8 ONNX, and the real-time (noisy-phase) deployment eval.
+* [RESULTS_METRICS.md](RESULTS_METRICS.md): every published model scored on DNSMOS, NISQA and SCOREQ as well as PESQ — a cross-family comparison under one metric harness.
+
+
+## Perceptual metrics
+
+PESQ is the primary number throughout this repo, but it is an intrusive ITU-P.862
+measure designed for codec and telephony degradations, and it under-reflects the
+artefacts neural enhancers actually produce. `common/quality.py` adds three
+learned MOS estimators trained on human listening tests:
+
+| metric     | reference    | predicts                                    | direction |
+| ---------- | ------------ | ------------------------------------------- | --------- |
+| **DNSMOS** | no-reference | ITU P.835 SIG / BAK / OVRL, plus P.808      | higher better |
+| **NISQA**  | no-reference | overall MOS + noisiness / discontinuity / coloration / loudness | higher better |
+| **SCOREQ** | both         | no-reference MOS, and a full-reference embedding distance | MOS higher better; **distance lower better** |
+
+DNSMOS and NISQA come through `torchmetrics`, which wraps the official Microsoft
+DNS-Challenge and NISQA weights. SCOREQ uses its own ONNX backend. Weights are
+downloaded on first use (~380 MB for SCOREQ) and cached.
+
+The `benchmarks/` package scores the published models with all four:
+
+```bash
+python -m benchmarks.enhance                     # published checkpoints -> enhanced audio
+python -m benchmarks.score                       # enhanced audio -> metric JSON (resumable)
+python -m benchmarks.report --md RESULTS_METRICS.md \
+    --json benchmarks/summary.json --audit benchmarks/per_utterance.json.gz
+```
+
+Enhancement and scoring are decoupled through a float32 audio cache, so adding a
+metric later costs a re-score rather than a re-inference.
+
+Two result artefacts are committed so the numbers are auditable rather than
+merely asserted: `benchmarks/summary.json` (all 12 metric columns, means and
+failure counts per condition) and `benchmarks/per_utterance.json.gz` (every
+individual score — 44 conditions × 824 utterances × 12 metrics — which is what
+lets you recompute a mean, chase an outlier, or run a paired test between two
+conditions). Both carry a provenance block: dataset, git commit, and the versions
+of every package that can move a score.
+
+The everyday eval CLIs also take an opt-in `--metrics`:
+
+```bash
+python -m nsnet2.inference_onnx --checkpoint_file cp_<run>/g_best.onnx --metrics all
+python -m convfsenet.inference_onnx --checkpoint_file cp_<run>/g_best.onnx --metrics dnsmos,nisqa
+```
+
+It defaults to `none`: DNSMOS alone costs ~4 minutes on the full test split.
 
 
 ## Setup
@@ -62,12 +110,19 @@ common/                  Shared infrastructure
   env.py                 Config loader
   utils.py               Checkpoint and utility helpers
   metrics.py             PESQ helpers
+  quality.py             DNSMOS / NISQA / SCOREQ metric suite
   discriminator.py       PESQ-based metric discriminator
   quant_fake.py          Eager fake-quantization scaffold for PTQ/QAT
 
+benchmarks/              Cross-family scoring of the published models
+  published.py           Inventory of the HuggingFace-published checkpoints
+  enhance.py             Published checkpoint -> enhanced audio (reuses each family's own path)
+  score.py               Enhanced audio -> metric JSON (resumable)
+  report.py              Metric JSON -> markdown tables
+
 nsnet2/                  GRU recurrent enhancer
   model.py               NSNet2 model wiring
-  layers.py              Dense / Butterfly / Monarch layer factories
+  layers.py              Dense / Butterfly / block-diagonal / Monarch layer factories
   streaming.py           Streaming-shape wrapper for ONNX export
   train.py               Training loop
   export_onnx.py         FP32 ONNX export
@@ -114,9 +169,16 @@ The NSNet2 branch explores whether structured linear transforms can reduce model
 Supported layer types include:
 
 ```json
-"linear": {"kind": "linear" | "butterfly" | "monarch"},
-"gru": {"kind": "gru" | "butterfly" | "monarch"}
+"linear": {"kind": "linear" | "butterfly" | "blockdiag" | "monarch"},
+"gru": {"kind": "gru" | "butterfly" | "blockdiag" | "monarch"
+                | "triton" | "triton_blockdiag" | "triton_monarch" | "triton_butterfly"}
 ```
+
+`blockdiag` is a single block-diagonal factor (no cross-block mixing);
+`monarch` is the genuine two-factor Monarch (block-diagonal × permutation ×
+block-diagonal, full cross-channel mixing — torch-structured ≥ 1.3.0). The runs
+published as `monarch_*` were actually block-diagonal and have been renamed
+`blockdiag_*`; see `EXPERIMENT_MONARCH.md` for the genuine-Monarch study.
 
 The main sweep scripts are:
 
@@ -127,7 +189,7 @@ The main sweep scripts are:
 ./run_qat_sweep.sh
 ```
 
-The results show that Monarch-based variants are particularly friendly to int8 QDQ quantization, while Butterfly variants are more sensitive unless constrained by orthogonal initialization or recovered through QAT.
+The results show that block-diagonal variants (`blockdiag_*`, published earlier under the `monarch_*` name) are particularly friendly to int8 QDQ quantization, while Butterfly variants are more sensitive unless constrained by orthogonal initialization or recovered through QAT.
 
 ## ConvFSENet experiments
 
@@ -192,7 +254,7 @@ This repository also builds on:
 * Miccini, Laroche, Piechowiak & Pezzarossa, *Scalable Speech Enhancement with Dynamic Channel Pruning*, ICASSP 2025, for the ConvFSENet base architecture.
 * ConvTasNet, for the convolutional design principles used by ConvFSENet.
 * Yan, Zhou, Chen & Lu, *LiSenNet: Lightweight Sub-band and Dual-Path Modeling for Real-Time Speech Enhancement*, [arXiv:2409.13285](https://arxiv.org/abs/2409.13285) ([hyyan2k/LiSenNet](https://github.com/hyyan2k/LiSenNet), MIT), for the LiSenNet architecture.
-* Butterfly and Monarch structured matrix factorizations, as packaged in `torch-structured`.
+* Butterfly, block-diagonal, and genuine two-factor Monarch structured matrix factorizations, as packaged in `torch-structured`.
 * JacobLinCool’s resampled VoiceBank-DEMAND-16k dataset.
 
 ## License
