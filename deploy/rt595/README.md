@@ -62,11 +62,11 @@ sudo chmod a+rw /dev/hidraw*
 
 ## HiFi4 track (later)
 
-`xt-clang` (RI-2023.11) is installed, but its registered cores are **AIR/HiFi5** (your
-GN/Jabra part), not the RT595's HiFi4. To target the DSP you need the NXP SDK's **RT500
-HiFi4 core config** registered into XtensaTools, and the Xtensa **license must cover the
-RT500 core** (the AIR license may be core-locked — verify). The M33 int8 graph is
-designed to carry over unchanged.
+`xt-clang` (RI-2023.11) is installed, but a build host set up for a different Xtensa
+target will have that target's core registered, not the RT595's HiFi4. To target the DSP
+you need the NXP SDK's **RT500 HiFi4 core config** registered into XtensaTools, and the
+Xtensa **license must cover the RT500 core** (licenses can be core-locked — verify). The
+M33 int8 graph is designed to carry over unchanged.
 
 ## Layout
 
