@@ -1,0 +1,94 @@
+{
+  "mode": "vbd",
+  "quality_valid": true,
+  "arch": "convfsenet_sliced",
+  "checkpoint": "cp_convfsenet_win/g_best",
+  "dataset": "JacobLinCool/VoiceBank-DEMAND-16k",
+  "split": "train",
+  "utterance_indices": [
+    474,
+    3121,
+    3561,
+    5913,
+    7368,
+    9839
+  ],
+  "n_utts": 6,
+  "n_frames": 192,
+  "warmup": 0,
+  "seed": 0,
+  "stft": {
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "compress_factor": 0.3
+  },
+  "calib_sha256": "3678c8bce85a002795c32fdb26c71d2c534b0af000a19390d9df93d9b12be68b",
+  "per_state": [
+    {
+      "input": "args_1",
+      "min": 0.0,
+      "max": 4.561624526977539,
+      "std": 0.4063582420349121,
+      "frac_nonzero": 0.5408460828993056
+    },
+    {
+      "input": "args_2",
+      "min": 0.0,
+      "max": 5.699694633483887,
+      "std": 0.44742724299430847,
+      "frac_nonzero": 0.4737175835503472
+    },
+    {
+      "input": "args_3",
+      "min": 0.0,
+      "max": 5.508427619934082,
+      "std": 0.4503122568130493,
+      "frac_nonzero": 0.4493340386284722
+    },
+    {
+      "input": "args_4",
+      "min": 0.0,
+      "max": 5.335562229156494,
+      "std": 0.47054678201675415,
+      "frac_nonzero": 0.4574856228298611
+    },
+    {
+      "input": "args_5",
+      "min": 0.0,
+      "max": 5.294822692871094,
+      "std": 0.4878130555152893,
+      "frac_nonzero": 0.4320610894097222
+    },
+    {
+      "input": "args_6",
+      "min": 0.0,
+      "max": 5.4622802734375,
+      "std": 0.4666217267513275,
+      "frac_nonzero": 0.4356282552083333
+    },
+    {
+      "input": "args_7",
+      "min": 0.0,
+      "max": 4.920449733734131,
+      "std": 0.4449447691440582,
+      "frac_nonzero": 0.4544542100694444
+    },
+    {
+      "input": "args_8",
+      "min": 0.0,
+      "max": 5.336325645446777,
+      "std": 0.41608354449272156,
+      "frac_nonzero": 0.4102410210503472
+    },
+    {
+      "input": "args_9",
+      "min": 0.0,
+      "max": 3.667252540588379,
+      "std": 0.39722007513046265,
+      "frac_nonzero": 0.4024539523654514
+    }
+  ],
+  "artifact": "deploy/rt595/host_out/convfsenet_calib_streaming.tflite",
+  "artifact_bytes": 1760200
+}

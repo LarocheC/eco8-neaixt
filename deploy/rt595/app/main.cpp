@@ -36,7 +36,7 @@ int main(void)
     BOARD_Init();     /* pins + clocks + debug console (board overlay) */
     dwt_init();
 
-    PRINTF("\r\n=== RT595 LiSenNet streaming SE (M33 / TFLite-Micro) ===\r\n");
+    PRINTF("\r\n=== RT595 %s streaming SE (M33 / TFLite-Micro) ===\r\n", MODEL_NAME);
 
     if (SE_Init() != kStatus_Success)
     {
