@@ -39,6 +39,32 @@ capture was retained — it survives only as prose in `BENCHMARKS.md` and
 repeated with stdout captured; that rerun takes about 40 seconds and is the single largest
 evidence gap in this target.
 
+### Closing that gap
+
+The exact DSP image that produced the figure is committed under `results/dsp_image/`
+(`dsp_reset.bin` / `dsp_text.bin` / `dsp_data.bin`, with `SHA256SUMS`), so the rerun needs
+no rebuild and therefore no Cadence toolchain or licence — only the board. From the repo
+root, with the EVK on USB:
+
+```bash
+pyocd list          # must print the probe serial ORA2CQKQ before anything else
+python deploy/rt595/scripts/dsp_hw_run.py \
+       --build-dir deploy/rt595/results/dsp_image \
+       2>&1 | tee deploy/rt595/results/silicon_hifi4_nsnet2_blockdiag_full.txt
+```
+
+Then update the table above: move the HiFi4 row from "no capture retained" to the committed
+filename, and check the 16 per-frame checksums against `ONBOARD_MEASUREMENT.md`'s reference
+values — if those match, the rerun is measuring the same graph as the original.
+
+Two things to expect. The script halts the M33 and overwrites its RAM at `0x20040000`, so
+the board must be **reset**, not resumed, afterwards. And if `pyocd list` reports
+`index out of range`, the probe's CMSIS-DAP engine has wedged: that is **only** fixable by
+physically unplugging and replugging the DEBUG USB cable, which de-powers the LPC4322 so it
+reboots its firmware. `USBDEVFS_RESET`, a sysfs unbind/bind, and `udevadm` re-triggers all
+leave the LPC4322 powered and do not clear it — this has been retried and confirmed. See
+`scripts/flash_linux.sh` for the full diagnosis.
+
 ## Simulated (ISS)
 
 Everything in `BENCHMARKS.md` not listed above. Two rows need footnotes:
