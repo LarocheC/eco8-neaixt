@@ -2,9 +2,9 @@
 
 > **Read `results/PROVENANCE.md` first.** It is authoritative on which figures below are
 > measured on silicon, simulated on the ISS, or modelled from datasheet constants, and it
-> withdraws three claims this file still prints: a LiSenNet ~21.2 M cyc/frame M33 figure, a
-> "13.12x speedup / 8080 us" DSP-offload block, and a 9.8 KB dense arena. Those three have no
-> supporting artifact — do not quote them.
+> withdraws two claims this file still prints: a "13.12x speedup / 8080 us" DSP-offload block
+> and a 9.8 KB dense arena. Neither has any supporting artifact — do not quote them. The
+> LiSenNet ~21.2 M cyc/frame M33 figure is real but its console capture was not retained.
 
 
 ## HiFi4 SILICON RESULT (2026-07-29) — real-time confirmed, ISS timing exact to 0.1%
@@ -79,7 +79,7 @@ zero-wait-state local RAM. Only a DSP-side run measures real memory behaviour �
 `ONBOARD_MEASUREMENT.md` Tier 2.
 
 Worth noting for the M33 track: blockdiag NSNet2 at 5.32 M cyc/frame is **4x faster than
-LiSenNet's ~21.2 M (WITHDRAWN — no artifact, see results/PROVENANCE.md)** on the same core, i.e. 1.68x over real-time rather than 6.7x.
+LiSenNet's ~21.2 M (SILICON, observed 2026-07-23 over VCOM; console output not retained — see results/PROVENANCE.md)** on the same core, i.e. 1.68x over real-time rather than 6.7x.
 
 ---
 

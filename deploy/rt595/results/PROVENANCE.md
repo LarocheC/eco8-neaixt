@@ -84,10 +84,19 @@ duty cycle. `POWER.md` is a projection.
 
 ## Withdrawn claims
 
-Removed rather than carried forward, because no artifact supports them:
+Removed rather than carried forward, because no artifact supports them. Note that
+"no artifact in this tree" is not the same as "never measured" — one entry below was
+withdrawn on that confusion and has been reinstated:
 
-- A LiSenNet nc24 Cortex-M33 figure of ~21.2 M cycles/frame. No capture exists anywhere in
-  this tree.
+- ~~A LiSenNet nc24 Cortex-M33 figure of ~21.2 M cycles/frame.~~ **Reinstated 2026-09-04.**
+  Withdrawing this was an over-correction. The run did happen: LiSenNet streaming on the M33
+  at 198 MHz, observed live over the VCOM console on 2026-07-23 ("SE model: 18 IO, 17 states;
+  arena 377,200 / 524,288 B", all 16 frames, ~107 ms/frame ≈ 6.7× over the 16 ms budget).
+  That is a *different model and run* from the NSNet2 capture above, which reports 2 IO,
+  1 state and a 17,096 B arena. Its correct status is the same as the HiFi4 figure:
+  **SILICON with no retained capture** — the console output was watched, not saved. Reproduce
+  it the same way (`cat /dev/ttyACM0` at 115200 *before* toggling nRESET; the board prints in
+  a burst within milliseconds of reset and then idles, so listening late shows nothing).
 - A `dsp_offload` block reporting "13.12× speedup / 8080 µs". These were always labelled
   illustrative in `dsp_offload/README_DSP_OFFLOAD.md` — they show the output format of a
   bench that has never been run — but they read as measurements at a glance, so the block is
