@@ -17,7 +17,8 @@ XT="${XT:-$HOME/toolchains/tools/RI-2023.11-linux/XtensaTools}"
 export XTENSA_SYSTEM="$XT/config"
 export XTENSA_CORE=nxp_rt500_RI23_11_newlib
 export PATH="$XT/bin:$PATH"
-export XTENSA_LICENSE_FILE="${XTENSA_LICENSE_FILE:-/home/clement/eco8-neaixt/RT500SDK.lic}"
+: "${XTENSA_LICENSE_FILE:?set XTENSA_LICENSE_FILE to port@host or a path to your Cadence .lic}"
+export XTENSA_LICENSE_FILE
 export LM_LICENSE_FILE="$XTENSA_LICENSE_FILE"
 
 R="$(cd "$(dirname "$0")/.." && pwd)"                 # deploy/rt595
