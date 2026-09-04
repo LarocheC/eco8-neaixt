@@ -143,7 +143,7 @@ def _strip_empty_pad_value_inputs(model_proto):
     a 3-input node whose third slot is the *empty* name. The Neural-ART compiler
     (atonn 4.0.1) segfaults (signo=11) on that form when the Pad sits in a
     multi-branch subgraph — this was the whole-graph blocker #4 of
-    ``LISENNET_NPU_HANDOVER.md``, isolated by bisection to exactly this. The
+    ``docs/targets/stm32n6-lisennet-npu.md``, isolated by bisection to exactly this. The
     offline/windowed graph is immune only because ``nn.ConstantPad2d`` exports an
     *explicit* constant_value tensor instead. Dropping the empty slot is bit-exact
     (the ONNX default constant_value is 0, which is what "" means).

@@ -26,12 +26,20 @@ All three families export to streaming-shape ONNX and support int8 quantization,
 
 ## Results
 
-Detailed results are kept in separate files:
+**[docs/](docs/README.md) is the results index** — start there. It carries the
+models x targets matrix: which model reaches what quality, and which chip it fits
+and runs in real time on.
 
-* [RESULTS_NSNET2.md](RESULTS_NSNET2.md): structured NSNet2 sweep, int8 quantization, and int4-weight PTQ/QAT experiments.
-* [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md): causal ConvFSENet models, FP32 vs int8 results, and the magnitude-compression fix required for robust int8 deployment.
-* [RESULTS_LISENNET.md](RESULTS_LISENNET.md): ultra-compact LiSenNet, frame-by-frame streaming, FP32/static-int8 ONNX, and the real-time (noisy-phase) deployment eval.
-* [RESULTS_METRICS.md](RESULTS_METRICS.md): every published model scored on DNSMOS, NISQA and SCOREQ as well as PESQ — a cross-family comparison under one metric harness.
+Underneath it:
+
+* [docs/models/](docs/models/) — one page per model family (NSNet2, ConvFSENet, LiSenNet, BASENet): architecture, sweeps, FP32 vs int8, streaming.
+* [docs/targets/](docs/targets/) — one page per deployment target (NXP RT595, ST STM32N6): what ran on the hardware, at what cost, and how to point your own checkpoint at it.
+* [docs/studies/](docs/studies/) — cross-cutting studies: the structured-factorisation work, and every published model scored under one metric harness (DNSMOS, NISQA, SCOREQ, PESQ).
+* [docs/publishing/](docs/publishing/) — the HuggingFace model cards.
+
+Every hardware number carries a provenance marker: **SILICON** (measured on a
+board, raw capture committed), **ISS** (instruction-set simulator), or
+**MODELLED** (computed from datasheet constants, no instrument attached).
 
 
 ## Perceptual metrics
@@ -56,7 +64,7 @@ The `benchmarks/` package scores the published models with all four:
 ```bash
 python -m benchmarks.enhance                     # published checkpoints -> enhanced audio
 python -m benchmarks.score                       # enhanced audio -> metric JSON (resumable)
-python -m benchmarks.report --md RESULTS_METRICS.md \
+python -m benchmarks.report --md docs/studies/cross-family-metrics.md \
     --json benchmarks/summary.json --audit benchmarks/per_utterance.json.gz
 ```
 
@@ -147,11 +155,13 @@ lisennet/                Ultra-compact sub-band + dual-path enhancer
   quant_onnx.py          Static (+ dynamic) int8 quantization
   eval_deploy.py         PESQ (backend × phase) + streaming RTF eval
 
+deploy/                  Hardware deployment targets
+  rt595/                 NXP MIMXRT595-EVK: Cortex-M33 + HiFi4 DSP, TFLite-Micro
+  stm32n6/               ST STM32N6570-DK: Cortex-M55 + Neural-ART NPU
+
 configs/                 Per-run configs for all model families
 tests/                   Pytest suite
-RESULTS_NSNET2.md        NSNet2 results
-RESULTS_CONVFSENET.md    ConvFSENet results
-RESULTS_LISENNET.md      LiSenNet results
+docs/                    Results index -> models / targets / studies
 ```
 
 Scripts are run as modules from the repository root, for example:
@@ -178,7 +188,7 @@ Supported layer types include:
 `monarch` is the genuine two-factor Monarch (block-diagonal × permutation ×
 block-diagonal, full cross-channel mixing — torch-structured ≥ 1.3.0). The runs
 published as `monarch_*` were actually block-diagonal and have been renamed
-`blockdiag_*`; see `EXPERIMENT_MONARCH.md` for the genuine-Monarch study.
+`blockdiag_*`; see `docs/studies/structured-factorisation.md` for the genuine-Monarch study.
 
 The main sweep scripts are:
 
@@ -227,7 +237,7 @@ python -m lisennet.quant_onnx --fp32 cp_lisennet/g_best_fp32.onnx --mode static 
 python -m lisennet.eval_deploy --checkpoint_file cp_lisennet/g_best --n_utts 824
 ```
 
-The reproduction reaches **PESQ 3.006** (full VBD test split, within ~0.06 of the paper's ~3.07). The ONNX export is loss-free, static int8 (the embedded-deployable quantization) costs ~0.086 PESQ, and the full real-time config (static int8 mask + noisy phase) lands at **2.930** at **RTF ≈ 0.13** on a single CPU thread. See [RESULTS_LISENNET.md](RESULTS_LISENNET.md) for the full backend × phase breakdown.
+The reproduction reaches **PESQ 3.006** (full VBD test split, within ~0.06 of the paper's ~3.07). The ONNX export is loss-free, static int8 (the embedded-deployable quantization) costs ~0.086 PESQ, and the full real-time config (static int8 mask + noisy phase) lands at **2.930** at **RTF ≈ 0.13** on a single CPU thread. See [docs/models/lisennet.md](docs/models/lisennet.md) for the full backend × phase breakdown.
 
 The GRU model above is the quality reference but does not compile to the STM32N6 Neural-ART NPU (GRU + 2-axis LayerNorm are compiler blockers). An **NPU-deployable variant** (`configs/lisennet_conv_wide.json`, `bottleneck: "conv"`) replaces the dual-path GRU with a dual-path conv bottleneck — exported graph has 0 GRU / 0 LayerNormalization nodes — and adds a frame-by-frame streaming graph with explicit FIFO state I/O (the stedgeai target). It reaches **PESQ 2.970** FP32 / **2.855** real-time int8.
 

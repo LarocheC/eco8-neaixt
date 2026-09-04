@@ -1,7 +1,7 @@
 # LiSenNet → STM32N6 NPU — Deployment Handover
 
 Context for continuing the LiSenNet NPU-deployment / efficiency effort. Read this
-first, then `RESULTS_LISENNET.md` (model + host results) and `deploy/stm32n6/README.md`
+first, then `../models/lisennet.md` (model + host results) and `deploy/stm32n6/README.md`
 (the compile/flash scaffold).
 
 ## Goal & current status
@@ -30,7 +30,7 @@ HF `conv-hardened/` subfolder) runs on the STM32N6570-DK two ways:
   distributed per-epoch launch + state-plumbing floor (no hot epoch — same regime
   as ConvFSENet).
 
-On-board numbers + breakdowns: `RESULTS_LISENNET.md` and
+On-board numbers + breakdowns: `../models/lisennet.md` and
 `deploy/stm32n6/ONBOARD_MEASUREMENT.md`.
 
 ## The four NPU blockers and their fixes (the core finding)
@@ -145,7 +145,7 @@ cd deploy/stm32n6 && make generate \
   `Gather` layout ops (14.9 ms); the rest is hybrid/runtime overhead. Plenty of
   optimization headroom if ever needed (stride-3 encoder redesign), but at RTF 0.072
   there is no deployment pressure.
-- [x] **Round 3 (training box — see RESULTS_LISENNET.md):** the PTQ loss was localized
+- [x] **Round 3 (training box — see ../models/lisennet.md):** the PTQ loss was localized
   to the **decoder** (seeded sensitivity scan) and mostly recovered. New best model =
   **relu6-deep** (`cp_lisennet_conv_hardened_nc24_deep_relu6/`, 46,248 params,
   `act=relu6`, b3, dil [1,2,4,8,16], RF 196, window 196+64=260), two windowed recipes:

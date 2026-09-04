@@ -52,7 +52,7 @@ datasets:
 
 A causal, fully-convolutional speech enhancer trained on VoiceBank-DEMAND-16k.
 Source: [github.com/LarocheC/sparse-nsnet2](https://github.com/LarocheC/sparse-nsnet2).
-See [RESULTS_CONVFSENET.md](https://github.com/LarocheC/sparse-nsnet2/blob/main/RESULTS_CONVFSENET.md)
+See [docs/models/convfsenet.md](https://github.com/LarocheC/sparse-nsnet2/blob/main/docs/models/convfsenet.md)
 for the full results, architecture description, and the magnitude-compression
 trick that makes int8 deployment essentially loss-free.
 

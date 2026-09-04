@@ -7,7 +7,7 @@
 > [Monarch](https://arxiv.org/abs/2204.00595). Genuine two-factor Monarch
 > (`kind="monarch"`, torch-structured ≥ 1.3.0) has now been trained and measured
 > — see [Genuine two-factor Monarch](#genuine-two-factor-monarch) below, and
-> `EXPERIMENT_MONARCH.md` for the plan.
+> `../studies/structured-factorisation.md` for the plan.
 >
 > **⚠️ int8 correction (Einsum weight-quant bug).** Every int8 PESQ published
 > before 2026-07-11 was measured on a model whose **structured weights were still
@@ -30,8 +30,8 @@ structured factorizations
 (via the [torch-structured](https://pypi.org/project/torch-structured/) PyPI package).
 Built on top of the [MP-SENet](https://github.com/yxlu-0102/MP-SENet) training recipe.
 
-See [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md) for the convolutional
-model family, and the [README](README.md) for setup and repo layout.
+See [../models/convfsenet.md](../models/convfsenet.md) for the convolutional
+model family, and the [README](../../README.md) for setup and repo layout.
 
 ## Headline results — FP32 vs int8
 
@@ -160,7 +160,7 @@ blocks: nblocks 8 vs 4) is a touch slower at 2.89 ms; fewer larger blocks
 map more efficiently to the NPU (88 epochs vs 134).
 
 Two deployment subtleties, both detailed in
-[`deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md`](deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md):
+[`deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md`](../../deploy/stm32n6/NSNET2_DEPLOYMENT_NOTES.md):
 
 * **Dense** doesn't compile as-exported — onnxruntime fuses the GRU
   `MatMul`+`Add` into a `Gemm` with an *activation* `C`, which the

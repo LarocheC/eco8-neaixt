@@ -62,8 +62,10 @@ Removed rather than carried forward, because no artifact supports them:
 
 - A LiSenNet nc24 Cortex-M33 figure of ~21.2 M cycles/frame. No capture exists anywhere in
   this tree.
-- A `dsp_offload` block reporting "13.12× speedup / 8080 µs". Those were placeholder values
-  that were never replaced with real ones.
+- A `dsp_offload` block reporting "13.12× speedup / 8080 µs". These were always labelled
+  illustrative in `dsp_offload/README_DSP_OFFLOAD.md` — they show the output format of a
+  bench that has never been run — but they read as measurements at a glance, so the block is
+  now marked unmistakably. Do not quote them.
 - A 9.8 KB dense arena figure, contradicted by the 17 K measured in the silicon capture
   above.
 

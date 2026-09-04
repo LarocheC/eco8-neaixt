@@ -13,8 +13,8 @@ buffer so the dilated convs stream with zero lookahead. The streaming
 wrapper, FP32/int8 ONNX export and the ORT inference path are all
 parity-checked against the offline model (`tests/test_convfsenet_*`).
 
-See [RESULTS_NSNET2.md](RESULTS_NSNET2.md) for the recurrent model
-family, and the [README](README.md) for setup and repo layout.
+See [../models/nsnet2.md](../models/nsnet2.md) for the recurrent model
+family, and the [README](../../README.md) for setup and repo layout.
 
 ## Headline results
 
@@ -150,7 +150,7 @@ Net: same quality as the deployed streaming model, but the int8 deploy graph has
 **no FIFO/state/Pad** class — the M55-Hybrid floor that capped ConvFSENet at 4.40
 ms. On-board latency (does the per-frame epoch count drop, do the convs fill the
 array at `h:43`?) is the Gate-0/Phase-4 verdict on the deploy box — see
-[deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md](deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md).
+[deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md](../../deploy/stm32n6/WINDOWED_DEPLOY_HANDOFF.md).
 
 ### Track 2 (small-STFT block) — rejected on quality
 

@@ -156,8 +156,8 @@ next to the renamed blockdiag ones in the same HF repo):
 python push_nsnet2_hf.py --runs monarch_8 monarch_full monarch_fc wide_monarch
 ```
 
-Then add a genuine-Monarch results block to `RESULTS_NSNET2.md` and the HF model
-card (`hf_readme_nsnet2.md`).
+Then add a genuine-Monarch results block to `../models/nsnet2.md` and the HF model
+card (`../publishing/hf-nsnet2.md`).
 
 ## Deployment note (STM32N6 NPU) — future work
 

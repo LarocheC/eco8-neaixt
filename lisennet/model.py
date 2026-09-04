@@ -122,7 +122,7 @@ def _make_act(kind, channels):
     :class:`nn.ReLU` (NPU-native); ``"relu6"`` = :class:`nn.ReLU6` (NPU-native Clip),
     which bounds the activation dynamic range so per-tensor int8 can resolve
     long-receptive-field variants (the unbounded-ReLU deep/dil16 models lose ~0.08
-    PESQ to PTQ — see RESULTS_LISENNET.md round 2). ``channels`` is ignored for the
+    PESQ to PTQ — see docs/models/lisennet.md round 2). ``channels`` is ignored for the
     parameter-free kinds."""
     if kind == "relu":
         return nn.ReLU()

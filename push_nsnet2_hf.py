@@ -23,7 +23,7 @@ Full mirror of all 9 runs (first upload / full refresh):
 Minimal-churn refresh — push ONLY the re-quantized int8 ONNX per run plus an
 updated model card (this is the post-calibration-fix refresh):
 
-    python push_nsnet2_hf.py --only g_best.onnx --readme hf_readme_nsnet2.md \\
+    python push_nsnet2_hf.py --only g_best.onnx --readme docs/publishing/hf-nsnet2.md \\
         --commit-message "re-quantize int8 after calibration RMS-norm fix"
 
 Preview without touching HF:
@@ -46,7 +46,7 @@ from pathlib import Path
 from huggingface_hub import HfApi, create_repo
 
 
-# The canonical 9-run sweep (matches run_sweep.sh / RESULTS_NSNET2.md).
+# The canonical 9-run sweep (matches run_sweep.sh / docs/models/nsnet2.md).
 DEFAULT_RUNS = (
     "baseline", "monarch_fc", "butterfly_fc", "monarch_full", "butterfly_full",
     "monarch_8", "butterfly_ortho", "butterfly_2blocks", "wide_monarch",
