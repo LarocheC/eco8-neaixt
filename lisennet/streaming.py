@@ -106,7 +106,8 @@ class LiSenNetStreamer:
         x_ifd = x_if - self._ifd_bias
         ifd = torch.atan2(x_ifd.sin(), x_ifd.cos())
         self._prev_pha = pha
-        return torch.stack([mag, gd / torch.pi, ifd / torch.pi], dim=1)   # (B, 3, 1, F)
+        feat = torch.stack([mag, gd / torch.pi, ifd / torch.pi], dim=1)   # (B, 3, 1, F)
+        return self.model.pad_features(feat)          # widen to in_channels, as offline
 
     @torch.no_grad()
     def step(self, mag_frame, pha_frame):
@@ -232,7 +233,10 @@ class LiSenNetStreamingONNX(nn.Module):
         sub-band frequency size at each stage, so they are not all the same shape.
         """
         reset_streaming(self.model)
-        dummy = torch.zeros(batch_size, 3, 1, self.n_freqs, device=device, dtype=dtype)
+        # in_channels, not a literal 3: the widened variants extend the feature stem
+        # so every conv has a multiple-of-4 input channel count.
+        dummy = torch.zeros(batch_size, self.model.in_channels, 1, self.n_freqs,
+                            device=device, dtype=dtype)
         _ = self.model.predict_mask(dummy)
         states = [torch.zeros_like(getattr(mod, attr)) for mod, attr in self._slots]
         reset_streaming(self.model)

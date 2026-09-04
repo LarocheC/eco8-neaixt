@@ -621,8 +621,36 @@ class MaskDecoder(nn.Module):
 class LiSenNet(nn.Module):
     def __init__(self, num_channels=16, n_blocks=2, n_fft=512, hop_length=256, compress_factor=0.3,
                  bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4),
-                 norm="layernorm", act="prelu", upsample="subpixel", hidden_dim=None):
+                 norm="layernorm", act="prelu", upsample="subpixel", hidden_dim=None,
+                 in_channels=3, out_channel=2, feat_pad="ramp"):
+        """``in_channels`` / ``out_channel`` widen the input stem and the mask head.
+
+        Defaults (3 in, 2 out) reproduce the published model exactly. They exist because
+        several NPU backends offload a convolution only when BOTH its input and output
+        channel counts are multiples of 4. Every interior width here is nc/4, nc/2, 3nc/4,
+        nc, 2nc or 4nc, so a ``num_channels`` that is a multiple of 16 makes all of them
+        legal — leaving only the 3-channel feature stem and the 2-channel mask head
+        illegal. Setting ``in_channels=4, out_channel=4`` fixes those two, after which
+        every convolution in the network satisfies the constraint.
+
+        ``feat_pad`` chooses what fills the extra input channel(s):
+          ``"ramp"``  a normalised frequency index in [0, 1]. Free to compute, gives the
+                      network explicit frequency position (which its sub-band structure
+                      is otherwise only implicitly aware of), and keeps the added weights
+                      alive.
+          ``"zeros"`` strict padding, for a controlled ablation. The stem weights on a
+                      dead channel would never receive gradient, so they are zero-init'd
+                      too -- otherwise their random values would inflate the per-output
+                      channel weight-quantisation scale and waste int8 range on nothing.
+        """
         super().__init__()
+        self.in_channels = int(in_channels)
+        self.out_channel = int(out_channel)
+        self.feat_pad = feat_pad
+        if self.in_channels < 3:
+            raise ValueError(f"in_channels must be >= 3 (mag, GD, IFD); got {in_channels}")
+        if self.out_channel < 2:
+            raise ValueError(f"out_channel must be >= 2; got {out_channel}")
         self.n_fft = n_fft
         self.n_freqs = n_fft // 2 + 1
         self.hop_length = hop_length
@@ -633,7 +661,8 @@ class LiSenNet(nn.Module):
         # conv bottleneck's parameter budget, so the two differ only in the time mixer.
         self.hidden_dim = num_channels // 2 * 3 if hidden_dim is None else int(hidden_dim)
 
-        self.encoder = Encoder(in_channels=3, num_channels=num_channels, norm=norm, act=act)
+        self.encoder = Encoder(in_channels=self.in_channels, num_channels=num_channels,
+                               norm=norm, act=act)
         self.blocks = nn.Sequential(*[
             DPR(emb_dim=num_channels, hidden_dim=self.hidden_dim,
                 n_freqs=self.n_freqs // (2 ** 3), dropout_p=0.1,
@@ -642,8 +671,14 @@ class LiSenNet(nn.Module):
                 norm=norm, act=act)
             for _ in range(n_blocks)
         ])
-        self.decoder = MaskDecoder(self.n_freqs, num_channels=num_channels, out_channel=2, beta=1,
+        self.decoder = MaskDecoder(self.n_freqs, num_channels=num_channels,
+                                   out_channel=self.out_channel, beta=1,
                                    norm=norm, act=act, upsample=upsample)
+        if self.in_channels > 3 and self.feat_pad == "zeros":
+            # dead input channels get no gradient; keep their weights at zero so they
+            # cannot inflate the stem's per-output-channel int8 weight scale
+            with torch.no_grad():
+                self.encoder.conv_1[0].weight[:, 3:].zero_()
 
     # ----- spectral helpers -------------------------------------------------
     def apply_stft(self, x, return_complex=True):
@@ -700,11 +735,31 @@ class LiSenNet(nn.Module):
         return pha
 
     # ----- mask sub-network (the deployable / streamable core) --------------
+    def pad_features(self, feat):
+        """Widen the 3 real feature channels to ``in_channels`` (see __init__).
+
+        Shared by the offline path and by LiSenNetStreamer so the streaming input is
+        built identically to the offline one.
+        """
+        extra = self.in_channels - feat.shape[1]
+        if extra <= 0:
+            return feat
+        b, _, t, f = feat.shape
+        if self.feat_pad == "ramp":
+            ramp = torch.linspace(0.0, 1.0, f, device=feat.device, dtype=feat.dtype)
+            pad = ramp.view(1, 1, 1, f).expand(b, extra, t, f)
+        elif self.feat_pad == "zeros":
+            pad = feat.new_zeros(b, extra, t, f)
+        else:
+            raise ValueError(f"unknown feat_pad {self.feat_pad!r}; use 'ramp' or 'zeros'")
+        return torch.cat([feat, pad], dim=1)
+
     def build_features(self, src_mag, src_pha):
-        """Stack the 3-channel network input: [compressed mag, GD/pi, IFD/pi]."""
+        """Stack the network input: [compressed mag, GD/pi, IFD/pi] (+ padding)."""
         src_gd = self.cal_gd(src_pha)
         src_ifd = self.cal_ifd(src_pha)
-        return torch.stack([src_mag, src_gd / torch.pi, src_ifd / torch.pi], dim=1)  # (B, 3, T, F)
+        feat = torch.stack([src_mag, src_gd / torch.pi, src_ifd / torch.pi], dim=1)
+        return self.pad_features(feat)                        # (B, in_channels, T, F)
 
     def predict_mask(self, feat):
         """Encoder -> DPR blocks -> decoder. feat (B, 3, T, F) -> mask (B, 2, T, F).
@@ -718,10 +773,17 @@ class LiSenNet(nn.Module):
         x = self.blocks(encoder_out_list[-1])
         return self.decoder(x, encoder_out_list)              # (B, 2, T, F)
 
-    @staticmethod
-    def apply_mask(mask, src_mag):
-        """Combine the 2-channel mask with the noisy magnitude (upstream Eq.)."""
-        return (mask[:, 0] + 1e-8) * src_mag + (mask[:, 1] + 1e-8) * src_mag
+    def apply_mask(self, mask, src_mag):
+        """Combine the mask channels with the noisy magnitude (upstream Eq.).
+
+        Upstream sums the two mask channels: ``(m0 + 1e-8)*mag + (m1 + 1e-8)*mag``. With
+        a wider head the sum is rescaled by ``2/out_channel`` so the mask keeps the same
+        range and the same value at initialisation (each sigmoid starts near 0.5, so the
+        combined mask starts near 1.0 whatever the width). At out_channel=2 this is
+        algebraically identical to the original expression.
+        """
+        c = mask.shape[1]
+        return (mask.sum(dim=1) * (2.0 / c) + c * 1e-8) * src_mag
 
     # ----- forward ----------------------------------------------------------
     def forward(self, src, tgt=None):
@@ -770,6 +832,9 @@ def build_lisennet(h=None):
         act=str(g("act", "prelu")),
         upsample=str(g("upsample", "subpixel")),
         hidden_dim=g("hidden_dim", None),
+        in_channels=int(g("in_channels", 3)),
+        out_channel=int(g("out_channel", 2)),
+        feat_pad=str(g("feat_pad", "ramp")),
     )
 
 
