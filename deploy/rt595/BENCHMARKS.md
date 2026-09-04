@@ -1,5 +1,12 @@
 # RT595 cycle benchmarks
 
+> **Read `results/PROVENANCE.md` first.** It is authoritative on which figures below are
+> measured on silicon, simulated on the ISS, or modelled from datasheet constants, and it
+> withdraws three claims this file still prints: a LiSenNet ~21.2 M cyc/frame M33 figure, a
+> "13.12x speedup / 8080 us" DSP-offload block, and a 9.8 KB dense arena. Those three have no
+> supporting artifact — do not quote them.
+
+
 ## HiFi4 SILICON RESULT (2026-07-29) — real-time confirmed, ISS timing exact to 0.1%
 
 `blockdiag_full` run on the **HiFi4 DSP of the EVK itself**, booted entirely over SWD
@@ -72,7 +79,7 @@ zero-wait-state local RAM. Only a DSP-side run measures real memory behaviour �
 `ONBOARD_MEASUREMENT.md` Tier 2.
 
 Worth noting for the M33 track: blockdiag NSNet2 at 5.32 M cyc/frame is **4x faster than
-LiSenNet's 21.2 M** on the same core, i.e. 1.68x over real-time rather than 6.7x.
+LiSenNet's ~21.2 M (WITHDRAWN — no artifact, see results/PROVENANCE.md)** on the same core, i.e. 1.68x over real-time rather than 6.7x.
 
 ---
 
@@ -95,7 +102,7 @@ reason differs per model and the `--mem_model` column should be ignored (sim-LSP
 caveat 1). LiSenNet *fits* local SRAM (250 KB weights + 277 KB arena), so its flat Q16 number
 is the real one: 8.9 M = 2.8x over budget, a compute problem. Dense NSNet2 (2.89 MB) and
 ConvFSENet (1.71 MB) exceed the 1.24 MB DSP data segment, so their flat numbers are
-unrealizable as-linked — a memory problem first. Arena high-water: NSNet2 9.8 KB, ConvFSENet
+unrealizable as-linked — a memory problem first. Arena high-water: NSNet2 9.8 KB (WITHDRAWN — the silicon capture measures 17,096 B; see results/PROVENANCE.md), ConvFSENet
 160 KB, LiSenNet 277 KB.
 
 ## Sparse NSNet2 — the variant that makes NSNet2 deployable

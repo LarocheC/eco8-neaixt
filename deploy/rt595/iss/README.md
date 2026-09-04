@@ -47,10 +47,15 @@ Generate the headers with `../host/gen_model_data.py`, `../host/gen_io_layout_mu
 `resolvers/*_ops.cpp` are the per-family `MicroMutableOpResolver` registrations, derived from each
 model's actual op histogram.
 
-> **These are hand-written and at least one is already wrong.** The committed
-> `app/model_ops_micro.cpp` has no `AddFullyConnected`, so NSNet2 converts and benches here but
-> **cannot run on the board**; the LiSenNet one registers an unused `AddTanh`. Generating the
-> resolver from the flatbuffer is a P4 item — until then, re-derive by hand whenever a graph changes.
+> **Superseded.** This block used to warn that `app/model_ops_micro.cpp` lacks
+> `AddFullyConnected` and that NSNet2 therefore "cannot run on the board". The silicon capture in
+> `../results/silicon_m33_nsnet2_blockdiag_full.txt` refutes that: NSNet2 `blockdiag_full` ran 16
+> frames to completion on the M33 with stable mask checksums. The structured layers lower to
+> `BATCH_MATMUL`, which the resolver does register, so no `FULLY_CONNECTED` appears in that graph.
+> A *dense* NSNet2 graph would need it — check the op histogram before assuming the resolver
+> covers a new model. The LiSenNet resolver does still register an unused `AddTanh` (harmless).
+> Generating the resolver from the flatbuffer is still the right fix; until then, re-derive by
+> hand whenever a graph changes, and let `python -m lane audit` check it for you.
 
 ## Link notes
 

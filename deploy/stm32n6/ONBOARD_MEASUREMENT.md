@@ -94,7 +94,7 @@ per-region memory bandwidth that exposed the external-flash bottleneck.
 On-board, int8, STM32N657 @ MCU 800 MHz / NPU 1 GHz; frame period = hop 256 @ 16 kHz = 16 ms.
 The NSNet2 family needed graph surgery first (see
 [NSNET2_DEPLOYMENT_NOTES.md](NSNET2_DEPLOYMENT_NOTES.md)); the LiSenNet *streaming*
-graph needed the empty-Pad-input export fix (`LISENNET_NPU_HANDOVER.md` blocker #4).
+graph needed the empty-Pad-input export fix (`docs/targets/stm32n6-lisennet-npu.md` blocker #4).
 
 | model (int8) | profile | latency/frame | RTF | weights | on-target mask cos | method |
 |---|---|---:|---:|---:|---:|---|

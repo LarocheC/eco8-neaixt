@@ -131,9 +131,12 @@ Per frame it reports the **M33-observed latency** (DWT cycles + µs — for HiFi
 full RPC round-trip, the number that decides real-time), and for HiFi4 also the **DSP's own
 compute cycles** (CCOUNT) so raw kernel speed is separated from RPC overhead. A per-frame
 output checksum is cross-checked M33-vs-HiFi4 to confirm the offload is numerically faithful.
-Example shape of the output (illustrative):
+Example shape of the output. **Every number in the block below is invented to show the
+format — none of it was measured.** This bench has never been run; see
+`../results/PROVENANCE.md`.
 
 ```
+=== ILLUSTRATIVE FORMAT ONLY — NOT MEASUREMENTS ===
 === M33 int8 (CMSIS-NN) ===
 mean: 21000000 M33-cyc/frame (106060 us observed latency)
 === HiFi4 int8 (xa_nnlib) ===

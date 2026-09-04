@@ -1,7 +1,7 @@
 """Stage 3: metric JSON -> markdown tables.
 
     python -m benchmarks.report                    # to stdout
-    python -m benchmarks.report --md RESULTS_METRICS.md
+    python -m benchmarks.report --md docs/studies/cross-family-metrics.md
 
 Renders one table per family plus the FP32->int8 quantization deltas. Deltas are
 oriented by ``common.quality.HIGHER_IS_BETTER``, because scoreq_ref is a distance

@@ -23,9 +23,9 @@ carries its hidden state. The streaming reference, the FP32 ONNX export, and the
 int8 quantization are all parity-checked against the offline model
 (`tests/test_lisennet_*`).
 
-See [RESULTS_CONVFSENET.md](RESULTS_CONVFSENET.md) and
-[RESULTS_NSNET2.md](RESULTS_NSNET2.md) for the other model families, and the
-[README](README.md) for setup and repo layout.
+See [../models/convfsenet.md](../models/convfsenet.md) and
+[../models/nsnet2.md](../models/nsnet2.md) for the other model families, and the
+[README](../../README.md) for setup and repo layout.
 
 ## Headline results
 
@@ -183,7 +183,7 @@ state tensor — 17 of them for the wide model, static shapes (only batch dynami
 which Neural-ART wants). `lisennet.export_onnx --streaming` produces
 `g_best_streaming_fp32.onnx`; an ONNX Runtime frame loop reproduces the offline
 mask to ~1e-6. The FIFO-state graph initially segfaulted the Neural-ART codegen
-(blocker #4 in `LISENNET_NPU_HANDOVER.md`); this was later root-caused **not** to
+(blocker #4 in `../targets/stm32n6-lisennet-npu.md`); this was later root-caused **not** to
 the state I/O but to the `Pad(data, pads, "")` node form `F.pad` exports (an
 empty optional `constant_value` input), and is now fixed bit-exactly inside the
 export. The hardened variant's streaming graph **compiles and deploys** — see
@@ -192,7 +192,7 @@ the frame-level on-board section below.
 ## NPU-hardened variant (the deploy model)
 
 The conv variant above still crashes the Neural-ART compiler (`atonn`) at
-codegen. Peeling the blockers (see `LISENNET_NPU_HANDOVER.md`) gave a *hardened*
+codegen. Peeling the blockers (see `../targets/stm32n6-lisennet-npu.md`) gave a *hardened*
 recipe — `norm="batchnorm"` (per-channel, folds into the conv), `act="relu"`,
 `upsample="convtranspose"` (4-D tensors only), and a stateless **windowed**
 deploy graph instead of the 17-tensor FIFO state I/O. The windowed hardened int8
@@ -445,7 +445,7 @@ Notes:
 ### Frame-level streaming deployment — 16 ms hop on the NPU (2026-07-03)
 
 Blocker #4 root-caused and fixed (the `F.pad` export form, not the state I/O —
-see `LISENNET_NPU_HANDOVER.md`), so the **17-state FIFO streaming graph** now
+see `../targets/stm32n6-lisennet-npu.md`), so the **17-state FIFO streaming graph** now
 compiles and runs on the board too. This is LiSenNet operating **frame by
 frame** — one 16 ms hop in, one enhanced frame out, bounded state carried
 on-device — the same latency class as ConvFSENet/monarch:
