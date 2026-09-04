@@ -42,7 +42,10 @@ from . import tflm_introspect as _ti
 
 # Where the RI-2023.11 Xtensa tools live on the training box.  Only used as a
 # fallback if xt-nm is not already on $PATH / in $XT_NM.
-_DEFAULT_XT_BIN = "/home/clement/toolchains/tools/RI-2023.11-linux/XtensaTools/bin"
+_DEFAULT_XT_BIN = os.path.join(
+    os.environ.get("XTENSA_BASE", os.path.expanduser("~/toolchains")),
+    "tools", os.environ.get("XTENSA_VER", "RI-2023.11-linux"), "XtensaTools", "bin",
+)
 
 _ACCEL_PREFIX = "xa_nn"
 

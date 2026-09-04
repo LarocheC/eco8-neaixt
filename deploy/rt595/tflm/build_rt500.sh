@@ -1,13 +1,17 @@
 #!/bin/bash
 set -e
-XT=/home/clement/toolchains/tools/RI-2023.11-linux/XtensaTools
-export XTENSA_BASE=/home/clement/toolchains
-export XTENSA_SYSTEM=/home/clement/toolchains/builds/RI-2023.11-linux/nxp_rt500_RI23_11_newlib/config
+XTENSA_BASE="${XTENSA_BASE:-$HOME/toolchains}"
+XTENSA_VER="${XTENSA_VER:-RI-2023.11-linux}"
+XT="$XTENSA_BASE/tools/$XTENSA_VER/XtensaTools"
+export XTENSA_BASE
+export XTENSA_CORE="${XTENSA_CORE:-nxp_rt500_RI23_11_newlib}"
+export XTENSA_SYSTEM="${XTENSA_SYSTEM:-$XTENSA_BASE/builds/$XTENSA_VER/$XTENSA_CORE/config}"
 export XTENSA_CORE=nxp_rt500_RI23_11_newlib
 export XTENSA_TOOLS_VERSION=RI-2023.11-linux
 export PATH="$XT/bin:$PATH"
-export XTENSA_LICENSE_FILE=/home/clement/eco8-neaixt/RT500SDK.lic
-export LM_LICENSE_FILE=/home/clement/eco8-neaixt/RT500SDK.lic
+: "${XTENSA_LICENSE_FILE:?set XTENSA_LICENSE_FILE to port@host or a path to your Cadence .lic}"
+export XTENSA_LICENSE_FILE
+export LM_LICENSE_FILE="${LM_LICENSE_FILE:-$XTENSA_LICENSE_FILE}"
 cd "$(dirname "$0")"
 if [ ! -d tflite-micro ]; then
   git clone --quiet https://github.com/cad-audio/tflite-micro.git tflite-micro

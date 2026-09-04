@@ -2,11 +2,14 @@
 # Build the NSNet2 int8 HiFi4 ISS bench. Same recipe as the LiSenNet iss_build,
 # driven off MODEL_FEATURE_TOTAL for the single-channel feature.
 set -e
-XT=/home/clement/toolchains/tools/RI-2023.11-linux/XtensaTools
+XTENSA_BASE="${XTENSA_BASE:-$HOME/toolchains}"
+XTENSA_VER="${XTENSA_VER:-RI-2023.11-linux}"
+XT="$XTENSA_BASE/tools/$XTENSA_VER/XtensaTools"
 export XTENSA_SYSTEM=$XT/config
 export XTENSA_CORE=nxp_rt500_RI23_11_newlib
 export PATH="$XT/bin:$PATH"
-export XTENSA_LICENSE_FILE=/home/clement/eco8-neaixt/RT500SDK.lic
+: "${XTENSA_LICENSE_FILE:?set XTENSA_LICENSE_FILE to port@host or a path to your Cadence .lic}"
+export XTENSA_LICENSE_FILE
 export LM_LICENSE_FILE=$XTENSA_LICENSE_FILE
 
 SCR="${SCR:-$(cd "$(dirname "$0")" && pwd)/work}"   # override: SCR=/path/to/tflm-tree
