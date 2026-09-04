@@ -1,5 +1,5 @@
 {
-    "_comment": "ReLU6 variant of lisennet_conv_hardened_nc24_deep (FP32 3.069 but int8 rt 2.985 \u2014 long-RF activations lose ~0.08 to per-tensor PTQ; see RESULTS_LISENNET.md round 2). act='relu6' bounds the activation dynamic range by construction (NPU-native Clip) to let per-tensor int8 resolve the long-RF features. Same arch otherwise. Retrain into cp_lisennet_conv_hardened_nc24_deep_relu6; ship gate = int8 real-time > 2.998 (nc24 b2).",
+    "_comment": "ReLU6 variant of lisennet_conv_hardened_nc24_deep (FP32 3.069 but int8 rt 2.985 \u2014 long-RF activations lose ~0.08 to per-tensor PTQ; see docs/models/lisennet.md round 2). act='relu6' bounds the activation dynamic range by construction (NPU-native Clip) to let per-tensor int8 resolve the long-RF features. Same arch otherwise. Retrain into cp_lisennet_conv_hardened_nc24_deep_relu6; ship gate = int8 real-time > 2.998 (nc24 b2).",
     "num_gpus": 0,
     "batch_size": 16,
     "learning_rate": 0.0005,

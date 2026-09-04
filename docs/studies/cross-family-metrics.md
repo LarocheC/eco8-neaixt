@@ -8,7 +8,7 @@ Reproduce with:
 ```bash
 python -m benchmarks.enhance     # published checkpoints -> enhanced audio (~1 h, 5.5 GB)
 python -m benchmarks.score       # enhanced audio -> metric JSON (~2.5 h, resumable)
-python -m benchmarks.report --md RESULTS_METRICS.md \
+python -m benchmarks.report --md ../studies/cross-family-metrics.md \
     --json benchmarks/summary.json --audit benchmarks/per_utterance.json.gz
 ```
 
@@ -53,8 +53,8 @@ All four metrics come out of one harness (`common/quality.py`), and every row is
 the audio path the model actually deploys.
 
 The PESQ column is the harness's own correctness check, and it passes: **every
-FP32 PESQ here reproduces RESULTS_NSNET2.md / RESULTS_CONVFSENET.md /
-RESULTS_LISENNET.md to the last digit** (13/13 models). int8 reproduces exactly
+FP32 PESQ here reproduces ../models/nsnet2.md / ../models/convfsenet.md /
+../models/lisennet.md to the last digit** (13/13 models). int8 reproduces exactly
 for 10 of 13; three differ by ≤0.013 — `wide_blockdiag` (2.848 vs 2.842),
 `blockdiag_full` (2.843 vs 2.848) and LiSenNet `conv-hardened` (2.988 vs 3.001).
 That is not harness drift: int8 quantization is calibration-dependent, and the
@@ -143,7 +143,7 @@ non-causal) for `conv-hardened-deep`: DNSMOS 3.020 vs 2.994, SCOREQ-ref 0.382 vs
 0.403, SCOREQ-nr 3.949 vs 3.875. The 2-iteration Griffin-Lim is *actively hurting*
 relative to just reusing the noisy phase. The deployment choice was already the
 right one; three more metrics now agree, and the "real-time costs us quality"
-framing in RESULTS_LISENNET.md is, on these metrics, backwards.
+framing in ../models/lisennet.md is, on these metrics, backwards.
 
 ## Caveats
 

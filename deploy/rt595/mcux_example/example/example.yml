@@ -1,0 +1,26 @@
+lisennet_se:
+  section-type: application
+  contents:
+    meta_path: examples/eiq_examples/lisennet_se/.
+    project-root-path: boards/${board}/eiq_examples/lisennet_se/${core_id}
+    freestanding_copied_folders:
+    - middleware/eiq/
+    freestanding_extra_args:
+    - -DCONFIG_MCUX_PRJSEG_middleware.eiq.neutron=y
+    - -DCONFIG_MCUX_COMPONENT_middleware.eiq.neutron=n
+    document:
+      name: lisennet_se${core_id_suffix_name}
+      category: eiq_examples
+      brief: LiSenNet streaming speech enhancement (TFLite-Micro, M33)
+      example_readme:
+      - examples/eiq_examples/lisennet_se/readme.md
+      - ${board_root}/${board}/eiq_examples/lisennet_se/example_board_readme.md
+      - ${board_root}/${board}/examples_shared_readme.md
+  boards:
+    evkmimxrt595@cm33:
+    - -armgcc@debug
+    - -armgcc@release
+    - -iar@debug
+    - -iar@release
+    - -mdk@debug
+    - -mdk@release

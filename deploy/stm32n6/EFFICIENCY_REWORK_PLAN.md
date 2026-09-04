@@ -134,7 +134,7 @@ Reuse existing code; new code is the stateless-windowed export wrapper.
   short fine-tune. **Track 2/3 require training** at the new STFT/topology.
 - Train via `convfsenet/train.py` with `gan.enabled=true` (PESQ MetricGAN is **mandatory** — no-GAN
   floor is ~2.77; GAN reaches >2.85). ~200 epochs; FP32 ~22 min + GAN 6–7 h on a 4090 (per
-  `RESULTS_CONVFSENET.md`). `causal=True`.
+  `docs/models/convfsenet.md`). `causal=True`.
 - PTQ: `python -m convfsenet.quant` (un-normalized MinMax — the measured-best calibration; prologue
   excluded; `skip_optimization`).
 

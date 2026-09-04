@@ -38,7 +38,7 @@ class Model:
         return d / self.subfolder if self.subfolder else d
 
 
-# The 13 NSNet2 structured-factorization variants (RESULTS_NSNET2.md).
+# The 13 NSNet2 structured-factorization variants (docs/models/nsnet2.md).
 _NSNET2 = [
     "baseline",
     "blockdiag_8", "blockdiag_fc", "blockdiag_full", "wide_blockdiag",

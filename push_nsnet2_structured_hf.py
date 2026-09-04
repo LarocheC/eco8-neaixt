@@ -61,7 +61,7 @@ def main() -> None:
     p.add_argument("--repo-id", default="claroche1/sparse-nsnet2-checkpoints")
     p.add_argument("--source", default="/home/clement/eco8-neaixt",
                    help="Base dir holding the cp_<run>/ checkpoint dirs.")
-    p.add_argument("--readme", default="hf_readme_nsnet2.md",
+    p.add_argument("--readme", default="docs/publishing/hf-nsnet2.md",
                    help="Model card to upload as README.md (pass '' to skip).")
     p.add_argument("--commit-message",
                    default="rename monarch_*->blockdiag_* (they were single "

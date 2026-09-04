@@ -235,7 +235,7 @@ def main():
             quantize_static_int8(a.fp32, out, reader, per_channel=True, signed=True)
         else:
             # per_channel=False: ORT's per-channel int32-bias scale adjustment trips on the
-            # whole-utterance graph's biases (see module docstring / RESULTS_LISENNET.md).
+            # whole-utterance graph's biases (see module docstring / docs/models/lisennet.md).
             quantize_static_int8(a.fp32, out, VBDCalibrationReader(h, a.calib_utts),
                                  per_channel=False, signed=a.signed)
     print(f"Wrote {out} ({out.stat().st_size / 1e6:.2f} MB, mode={a.mode})")

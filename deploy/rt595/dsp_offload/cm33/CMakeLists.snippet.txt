@@ -1,0 +1,27 @@
+# M33 target changes for the offload (apply to the existing deploy/rt595 M33 CMakeLists).
+#
+# The M33 no longer runs the model, so DROP the local inference sources and ADD the RPC
+# shim + DSP boot. main.cpp, model_se_stream.h, se_test_feats.h, model_io_layout.h stay.
+#
+# -- REMOVE from the M33 sources (these move to the DSP target) --
+#   app/model_se_stream.cpp      # local TFLM interpreter  -> replaced by se_remote.cpp
+#   app/model_ops_micro.cpp      # op resolver             -> DSP only
+#   app/model_data.h             # the model blob          -> DSP only
+#
+# -- ADD to the M33 sources --
+#   dsp_offload/cm33/se_remote.cpp   # SE_* API as DSP RPCs (same header, so main.cpp unchanged)
+#   dsp_offload/cm33/dsp_boot.c      # DSP_Boot() + g_se_ipc placement
+#
+# -- ADD to the M33 include dirs --
+#   dsp_offload/          # se_ipc.h
+#   dsp_offload/cm33/     # dsp_boot.h
+#
+# -- main.cpp: exactly one added line, right after BOARD_Init(): --
+#     #include "dsp_boot.h"
+#     ...
+#     BOARD_Init();
+#     DSP_Boot();          // <-- release the HiFi4 before SE_Init() waits on it
+#     dwt_init();
+#
+# Everything else in main.cpp (the 16 test-frame loop, DWT timing, PRINTF telemetry) is
+# unchanged: SE_Init/SE_ResetStates/SE_ProcessFrame now transparently run on the DSP.
