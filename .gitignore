@@ -59,3 +59,34 @@ SetupSTM32CubeProgrammer_linux_64.zip
 # STM32CubeCLT installer download
 st-stm32cubeclt_*.zip
 st-stm32cubeclt_*.sh
+
+# --- RT595 deploy: external SDK symlink + build/generated artifacts ---------------
+deploy/rt595/sdk
+deploy/rt595/build/
+deploy/rt595/host_out/
+deploy/rt595/host/__pycache__/
+# TFLM source tree + built lib (regenerable: deploy/rt595/tflm/build_rt500.sh)
+deploy/rt595/tflm/tflite-micro/
+deploy/rt595/tflm/*.a
+# ISS scratch builds
+deploy/rt595/iss/work/
+deploy/rt595/iss/**/*.elf
+deploy/rt595/iss/**/*.o
+# lane: pytest + accel-map cache
+deploy/rt595/lane/**/__pycache__/
+deploy/rt595/lane/.pytest_cache/
+# lane: git worktree overlays for checkpoints whose model code lives on another branch
+.lane/
+
+# --- Licences and vendor installers (never redistributable) -----------------------
+# Cadence licence — node-locked, expires 2027-07-28. Obtain per deploy/rt595/tflm/README.md
+RT500SDK.lic
+LinkServer_*.deb.bin
+nxp_rt500_*_linux.tgz
+
+
+# --- Handover tarballs (large, regenerable from the branch they were cut from) -----
+*-handover-*.tar.gz
+*_handover_*.tar.gz
+# --- Paper scratch: regenerable quantisation graphs -------------------------------
+paper/data/tmp_quant/
