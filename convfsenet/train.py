@@ -181,6 +181,15 @@ def train(a, h):
     # Restore best_pesq on resume so a resumed run can't overwrite g_best with
     # an inferior model (the checkpoint persists it; default 0.0 for fresh runs).
     best_pesq = float(state["best_pesq"]) if state is not None and "best_pesq" in state else 0.0
+    # The rolling checkpoint can be up to `checkpoint_interval/validation_interval`
+    # validations stale (3, at the sweep's settings), so resuming from it alone
+    # can restore a best_pesq LOWER than the g_best already on disk — and then
+    # overwrite that g_best with a worse model. Take the max of the two. Older
+    # g_best files carry no score and fall back to 0.0, so nothing regresses.
+    g_best_path = os.path.join(a.checkpoint_path, "g_best")
+    if os.path.isfile(g_best_path):
+        prev = load_checkpoint(g_best_path, device)
+        best_pesq = max(best_pesq, float(prev.get("best_pesq", 0.0)))
 
     # ----- training loop -----------------------------------------------------
     for epoch in range(max(0, last_epoch), a.training_epochs):
@@ -251,7 +260,7 @@ def train(a, h):
                     best_pesq = val_pesq
                     save_checkpoint(
                         f"{a.checkpoint_path}/g_best",
-                        {"generator": model.state_dict()},
+                        {"generator": model.state_dict(), "best_pesq": best_pesq},
                     )
                 model.train()
 

@@ -49,6 +49,7 @@ from convfsenet.calibration import ConvFSENetCalibrationReader
 from convfsenet.model import ConvFSENet_QuantFriendly
 from common.dataset import load_voicebank_demand
 from common.env import AttrDict
+from common.quant_audit import assert_all_weights_quantized
 from convfsenet.streaming import (
     ConvFSENetStreamingFast,
     ConvFSENetStreamingONNX,
@@ -220,6 +221,12 @@ def quantize_fp32_onnx(
         f"produced an unquantized graph. Check that the CalibrationDataReader "
         f"yielded any frames and that exclude_op_patterns didn't skip every op."
     )
+    # Counting QuantizeLinear nodes is NOT enough: a compute op the quantizer
+    # cannot handle keeps its FP32 weights while the graph still looks
+    # quantized. That is how every pre-2026-07-11 structured NSNet2 int8 number
+    # turned out to be a hybrid-precision artifact. Check the weights directly.
+    assert_all_weights_quantized(model_check, exclude_nodes=exclude_list,
+                                 context="quantize_fp32_onnx: ")
 
     fp32_size = fp32_path.stat().st_size
     int8_size = int8_path.stat().st_size
@@ -257,6 +264,7 @@ def _load_offline_from_checkpoint(checkpoint_file: Path) -> tuple[ConvFSENet_Qua
         extractor_type=h.extractor_type, compress_factor=h.compress_factor,
         causal=h.causal,
         loss=None, preproc=None, postproc=None,
+        pointwise_cfg=h.get("pointwise", None),
     )
     ckpt = torch.load(str(checkpoint_file), weights_only=True, map_location="cpu")
     model.load_state_dict(ckpt["generator"], strict=True)

@@ -164,6 +164,185 @@ gate**, ~0.19 below Track 1's 2.913. This is the plan's flagged Config-C risk
 (512/256 windowed) stays the winner; the small-STFT latency win isn't worth the
 PESQ loss.
 
+## Structured pointwise convolutions — Monarch block-count sweep
+
+ConvFSENet spends **92.4% of its per-frame MACs in eighteen 1x1 convolutions**
+(`conv1x1` 192→384 and `conv1x1_out` 384→192 in each of the nine TCM blocks);
+the frontend and backend add 6.9% and the nine depthwise convs 0.7%. That makes
+it the same question `RESULTS_NSNET2.md` asks of NSNet2's FC and GRU
+projections, on a model with no recurrence: **once you take MACs out of the
+pointwise convolutions, is it better to spend what is left on structure at full
+width, or on a plain dense model that is simply narrower?**
+
+A 1x1 conv over `(B, C, T)` is a linear map applied per time step, so every
+structured factorization that applies to `nn.Linear` applies here.
+`convfsenet/layers.py` provides two, selected by a config block
+(`"pointwise": {"kind": "monarch", "nblocks": 8, "scope": "tcm"}`; absent means
+plain `nn.Conv1d`, bit-identical to the dense model):
+
+- **`blockdiag`** — one block-diagonal factor, zero cross-block mixing.
+- **`monarch`** — genuine two-factor Monarch (block-diagonal × permutation ×
+  block-diagonal, [Dao et al. 2022](https://arxiv.org/abs/2204.00595)), whose
+  permutation gives cross-block mixing that `blockdiag` has none of — but *full*
+  mixing only while `nblocks ≤ √in_channels` (see
+  [the reach column](#the-sweep)).
+
+Both are numerically the layers `torch-structured` ships (`MonarchLinear`,
+`BlockdiagLinear`) — same factor shapes, and the same weights bit-for-bit from a
+common seed, asserted in `tests/test_convfsenet_monarch.py`. They are written
+differently: as **two grouped 1x1 convolutions separated by a channel shuffle**
+rather than reshape+einsum on a channels-last tensor. See
+[Lowering](#lowering-grouped-convolutions-not-einsum) below for why that matters.
+
+### Prior art on this model — block-diagonal masks (2026-08-20)
+
+Four 200-epoch arms on the unmodified recipe, from-scratch, seed 1234. These
+used *fixed masks* on the dense weights (`sparsity: {pattern: "blockdiag:N"}`,
+all 20 pointwise matrices including frontend/backend), so the parameter count
+never changes — they measure what the loss of cross-block connectivity costs,
+not what the compression buys. Recorded here because they existed in no tracked
+file. MACs/frame assume the mask is exploited.
+
+| run                 | pattern        | params  | MACs/frame (if exploited) | FP32 PESQ |
+| ------------------- | -------------- | ------: | ------------------------: | --------: |
+| `cfs_dense`         | dense          | 1.454 M |                 1,436,160 | **2.877** |
+| `cfs_blockdiag2`    | blockdiag:2    | 1.454 M |                   723,264 |     2.804 |
+| `cfs_blockdiag4`    | blockdiag:4    | 1.454 M |                   366,816 |     2.783 |
+| `cfs_blockdiag8`    | blockdiag:8    | 1.454 M |                   188,592 |     2.722 |
+
+**Block-diagonal degrades monotonically** — −0.155 PESQ from dense to
+`blockdiag:8` — the same direction NSNet2's block-count sweep found, and the
+reason the Monarch arms are worth training. PESQ is the best of 19 validations
+on the full 824-utterance VBD test split (`convfsenet/train.py` validates on the
+test split, and `convfsenet/eval_ptq.py` re-scores `cp_cfs_dense/g_best` at
+2.877, so the training-loop metric and the headline metric are one scale).
+
+Note `cfs_dense` (2.877) sits 0.054 below the flagship 2.931 at the top of this
+document despite a byte-identical architecture; the configs differ only in
+`num_workers` (3 vs 4). Treat 2.877 — not 2.931 — as the anchor for everything
+below, which is why the sweep reuses that run rather than the flagship.
+
+### The sweep
+
+Two arms, matched on **MACs per frame** (within 1.34%), one knob each. Arm A
+holds the width at 192/384 and raises the Monarch block count; arm B holds the
+structure at none and lowers the width, keeping the model's own 1:2
+res:conv ratio.
+
+| nblocks | Monarch MACs/frame |   params | reach (192→384 / 384→192) | dense control | dense MACs/frame |   params | MAC Δ |
+| ------: | -----------------: | -------: | ------------------------: | ------------- | ---------------: | -------: | ----: |
+|       4 |            855,552 |  873,281 |             100% / 100%   | 146 / 292     |          850,304 |  863,847 | −0.61% |
+|       8 |            482,304 |  500,033 |             100% / 100%   | 108 / 216     |          481,248 |  491,333 | −0.22% |
+|      16 |            295,680 |  313,409 |            **75%** / 100% |  83 / 166     |          295,148 |  302,958 | −0.18% |
+|      32 |            202,368 |  220,097 |         **18.8% / 37.5%** |  67 / 134     |          199,660 |  206,014 | −1.34% |
+
+**Reach** is the fraction of output channels one input channel influences —
+measured, by perturbation. It is 100% only while `nblocks ≤ √in_channels`; past
+that each output channel sees `min(in_channels/nblocks, nblocks)` of the
+`nblocks` input blocks. This is Monarch's own property, not an artifact of the
+implementation here (`torch_structured`'s `MonarchLinear` measures identically),
+and it is why the column exists: **at `nblocks=32` the Monarch arm is not
+holding connectivity fixed while trading MACs** — it is partway toward the
+block-diagonal regime, and a result there is not evidence about "structure at
+full width". Reach still beats block-diagonal's `1/nblocks` by 6× and 12×.
+
+For calibration: NSNet2's published `monarch_40` — the arm that reaches dense
+parity at 24× fewer parameters (2.837 vs the 2.845 dense baseline, against
+`blockdiag_40`'s 2.608) — has reach **25%** on its GRU projection and 17.5% on
+`fc_in`. So partial reach is not disqualifying; it is a variable to report.
+
+Configs `configs/cfs_mon_nb{4,8,16,32}.json` and `configs/cfs_dense_r{146,108,83,67}.json`,
+each derived from `cp_cfs_dense/config.json` so the only difference is the swept
+knob. Driver: `run_convfsenet_monarch_sweep.sh` (`PREFLIGHT=1` checks the
+configs without launching; `WAVE=1` runs the two decisive pairings).
+
+Three things to keep in view when reading the results:
+
+- **The grid starts at 4, not 2.** Monarch's first factor scales with `in²`, so
+  the expanding 192→384 layer compresses `2·nblocks/3` but the contracting
+  384→192 layer only `nblocks/3`. At `nblocks=2` the "compressed" model is
+  **1.12× larger** than the dense one (1,602,048 MACs/frame vs 1,436,160).
+- **Arm A has an un-structured floor.** The frontend and backend stay dense
+  (257 is prime, so any `nblocks` would zero-pad, and the int8 prologue walk and
+  the Nyquist slicing both assume a dense Conv there), so 109,056 MACs/frame are
+  untouched: 12.7% / 22.6% / 36.9% / **53.9%** of the four arms. At `nblocks=32`
+  half the model is not structured, and arm A cannot compress past ~9.2× at all.
+- **MAC-matching hands arm A more parameters** — `params − MACs` is exactly
+  17,729 for every Monarch arm (BN + biases, whose widths structure does not
+  change) while the dense control shrinks that overhead too. The Monarch edge is
+  +1.08 / +1.74 / +3.33 / +6.40%.
+
+### Lowering: grouped convolutions, not Einsum
+
+`MonarchPointwise` computes `blockdiag × permutation × blockdiag` as two grouped
+1x1 convolutions with a channel shuffle between them, which is the same map as
+`MonarchLinear`'s reshape+einsum form (bit-identical init, forward equal to
+1e-16 in fp64) but a materially different ONNX graph:
+
+| graph            | ops                                                    |
+| ---------------- | ------------------------------------------------------ |
+| dense, windowed  | 29 Conv, 19 Relu, 10 Add, 9 Slice                       |
+| Monarch, windowed| 47 Conv, 72 Reshape, 36 Transpose, 19 Relu, 9 Slice     |
+
+No `Einsum`, and — measured — **zero** `Shape` / `Gather` / `Pad` / `If` /
+`BatchNormalization`, so the deploy asserts in `convfsenet/quant_windowed.py`
+pass unchanged. This matters beyond tidiness: onnxruntime ships no QDQ handler
+for `Einsum`, which is exactly how every structured NSNet2 int8 number published
+before 2026-07-11 turned out to be a hybrid-precision artifact (see the
+correction notice in `RESULTS_NSNET2.md`). Grouped convolutions are ordinary
+`Conv` nodes that the static quantizer handles per-channel with no registry
+patching. `common/quant_audit.py` now asserts it directly — every compute node's
+weight must have gone through the quantizer — rather than trusting a
+`QuantizeLinear` count, which is what let that bug through.
+
+Two constraints the lowering imposes, both enforced in code: `nblocks` must
+divide both channel counts (no zero-padding, so the MAC count the sweep matches
+on is exact), and the channel shuffle needs static reshape targets while
+tracing. The dynamic (`unflatten`) form traces to `Shape`/`Slice`/`Concat`
+reshape targets, which are both the ops the windowed deploy path asserts against
+and fatal to quantization: they abort onnxruntime's symbolic shape inference, so
+`quant_pre_process` — which both quant paths call — dies on an `AssertionError`
+and **no int8 model can be built from that graph at all** (measured at T = 1, 4
+and 126; the dynamic graph is numerically correct at any batch size, it just
+cannot be quantized). `convfsenet/layers.py:static_t_sizes` pins the targets for
+export and restores them after.
+
+### Measured: int8 latency does not follow the MACs
+
+Per-frame streaming int8 (QDQ, per-channel, synthetic calibration) under
+onnxruntime CPU, one thread, median of 400 runs after 50 warm-up, on the
+training box. Full-size models, all measured together:
+
+| arm             | MACs/frame | int8 size | ms/frame | vs dense 192/384 |
+| --------------- | ---------: | --------: | -------: | ---------------: |
+| dense 192/384   |  1,436,160 |  1611 KiB |    0.215 |            1.00× |
+| `mon_nb4`       |    855,552 |  1140 KiB |    0.240 |            1.12× |
+| `mon_nb8`       |    482,304 |   775 KiB |    0.237 |            1.10× |
+| `mon_nb16`      |    295,680 |   593 KiB |    0.249 |            1.16× |
+| `mon_nb32`      |    202,368 |   502 KiB |    0.240 |            1.12× |
+| `dense_r146`    |    850,304 |  1009 KiB |    0.201 |            0.94× |
+| `dense_r108`    |    481,248 |   624 KiB |    0.140 |            0.65× |
+| `dense_r83`     |    295,148 |   425 KiB |    0.118 |            0.55× |
+| `dense_r67`     |    199,660 |   321 KiB |    0.121 |            0.56× |
+
+**Monarch latency is flat in `nblocks`** — 0.240 → 0.240 ms while MACs fall 4.2×
+— because the node count is constant (47 Conv + 108 shape ops either way) and
+this graph is overhead-bound, not arithmetic-bound. So a Monarch arm is
+**1.10–1.16× slower than the full dense baseline it compresses up to 7×, and
+1.7–2.0× slower than its own MAC-matched dense control.** The int8 *size* does
+track the MACs (1611 → 502 KiB).
+
+State this before any PESQ number: on the lane this repo deploys, **the only
+claim this sweep can make is quality per MAC and per byte, not latency.** A PESQ
+win is a reason to look at a fused kernel, not a deployment recommendation. The
+direction matches what is already recorded elsewhere — Monarch was ~3× slower
+than block-diagonal on the RT595, and more blocks made the STM32N6 NPU slower.
+
+Training cost is the mirror image and does not bite: a Monarch generator step is
+2.2–2.7× a dense one (7.9 ms vs 3.5 ms at batch 16, RTX 4090), but the real
+training step is ~150–300 ms — dominated by the metric-GAN's CPU PESQ — so the
+sweep pays ~2–3% wall-clock for it.
+
 ## Low-bit weight PTQ study
 
 `convfsenet/eval_ptq.py` sweeps `(w_bits, a_bits)` via the eager

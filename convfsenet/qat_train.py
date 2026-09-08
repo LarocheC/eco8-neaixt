@@ -40,6 +40,7 @@ from torch.nn import Conv1d
 from torch.nn.utils import parametrize
 from torch.utils.data import DataLoader
 
+from convfsenet.layers import is_structured_pointwise
 from convfsenet.model import build_causal_model
 from common.dataset import Dataset, load_voicebank_demand
 from common.env import AttrDict, build_env
@@ -85,8 +86,14 @@ def _save_qat_checkpoint(model, ckpt_path, w_bits, a_bits, source) -> None:
 
     # (2) clear activation hooks + detach the StaticActFakeQuant ModuleList so
     #     the saved state_dict is a plain ConvFSENet (no _act_fake_quant.*).
+    # Every leaf install_static_activation_fake_quant hooks, not just Conv1d:
+    # the structured pointwise layers are hooked too, and a hook that survives
+    # the save gets a SECOND one installed on the next re-install, stacking one
+    # extra fake-quant per checkpoint.
     for mod in model.modules():
-        if isinstance(mod, Conv1d) and mod._forward_pre_hooks:
+        if is_structured_pointwise(mod) or isinstance(mod, Conv1d):
+            if not mod._forward_pre_hooks:
+                continue
             mod._forward_pre_hooks.clear()
             if hasattr(mod, "_forward_pre_hooks_with_kwargs"):
                 mod._forward_pre_hooks_with_kwargs.clear()

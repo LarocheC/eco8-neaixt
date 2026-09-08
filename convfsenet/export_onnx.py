@@ -21,6 +21,7 @@ from pathlib import Path
 import onnx
 import torch
 
+from convfsenet.layers import static_t_sizes
 from convfsenet.model import ConvFSENet_QuantFriendly
 from common.env import AttrDict
 from convfsenet.streaming import (
@@ -67,16 +68,22 @@ def export_streaming_fp32(
     # state shape the trace saw, just with a variable B.
     dynamic_axes = {name: {0: "B"} for name in (input_names + output_names)}
 
-    torch.onnx.export(
-        onnx_view,
-        args,
-        str(output_path),
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
-        opset_version=17,                         # matches NSNet2 export_onnx.py
-        dynamo=False,                             # MANDATORY — Pitfall 10 closure
-    )
+    # Structured pointwise layers need static reshape targets while tracing
+    # (see convfsenet/layers.py). The per-frame graph is always T=1; a
+    # dynamically-shaped trace emits Shape/Slice/Concat reshape targets that
+    # abort quant_pre_process's symbolic shape inference, so the graph could
+    # never be quantized. No-op for a dense model.
+    with static_t_sizes([(onnx_view, 1)]):
+        torch.onnx.export(
+            onnx_view,
+            args,
+            str(output_path),
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=17,                     # matches NSNet2 export_onnx.py
+            dynamo=False,                         # MANDATORY — Pitfall 10 closure
+        )
 
     # Telemetry — mirrors export_onnx.py D-16 print shape.
     model = onnx.load(str(output_path))
@@ -140,16 +147,25 @@ def export_windowed_fp32(
         "mask": {0: "B"},
     }
 
-    torch.onnx.export(
-        onnx_view,
-        (mag_window,),
-        str(output_path),
-        input_names=input_names,
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
-        opset_version=17,                             # matches export_streaming_fp32
-        dynamo=False,                                 # MANDATORY — Pitfall 10 closure
-    )
+    # Each block's valid dilated dconv shrinks the time axis by its trim, so
+    # every structured pointwise layer sees a different (but static) width.
+    t_pairs = []
+    w_cols = W
+    for blk in onnx_view.blocks:
+        t_pairs.append((blk.conv1x1_folded, w_cols))
+        t_pairs.append((blk.conv1x1_out, w_cols - blk.trim))
+        w_cols -= blk.trim
+    with static_t_sizes(t_pairs):
+        torch.onnx.export(
+            onnx_view,
+            (mag_window,),
+            str(output_path),
+            input_names=input_names,
+            output_names=output_names,
+            dynamic_axes=dynamic_axes,
+            opset_version=17,                         # matches export_streaming_fp32
+            dynamo=False,                             # MANDATORY — Pitfall 10 closure
+        )
 
     model = onnx.load(str(output_path))
     # Stamp window geometry so downstream tooling (inference_windowed_onnx
@@ -198,6 +214,7 @@ def _load_offline_from_checkpoint(checkpoint_file) -> ConvFSENet_QuantFriendly:
         extractor_type=h.extractor_type, compress_factor=h.compress_factor,
         causal=h.causal,
         loss=None, preproc=None, postproc=None,
+        pointwise_cfg=h.get("pointwise", None),
     )
     ckpt = torch.load(str(checkpoint_file), weights_only=True, map_location="cpu")
     model.load_state_dict(ckpt["generator"], strict=True)

@@ -144,6 +144,27 @@ def _is_monarch_linear(m: nn.Module) -> bool:
         return False
 
 
+def _is_structured_pointwise(m: nn.Module):
+    """(kind, module) for ConvFSENet's structured 1x1 convs, else (None, m).
+
+    Lazily imported so ``common/`` keeps no hard dependency on the convfsenet
+    package. These carry their factors as ``w1``/``w2`` (Monarch) or ``weight``
+    (block-diagonal) rather than a dense ``.weight`` of conv shape, so the
+    nn.Conv1d branch below cannot see them — and an unrecognised leaf is
+    skipped SILENTLY, which would leave 92% of a structured ConvFSENet's MACs
+    in FP32 while eval_ptq still printed a "w8a8" number.
+    """
+    try:
+        from convfsenet.layers import BlockdiagPointwise, MonarchPointwise
+    except ImportError:
+        return None, m
+    if isinstance(m, MonarchPointwise):
+        return "monarch", m
+    if isinstance(m, BlockdiagPointwise):
+        return "blockdiag", m
+    return None, m
+
+
 def _is_butterfly(m: nn.Module) -> bool:
     try:
         from torch_structured.butterfly.butterfly import Butterfly
@@ -214,6 +235,17 @@ def _quantizable_weight_attrs(m: nn.Module):
         # analogue used for the single block-diagonal factor above.
         yield "w1", 1
         yield "w2", 1
+    elif _is_structured_pointwise(m)[0] == "monarch":
+        # convfsenet.layers.MonarchPointwise — the same two factors as
+        # MonarchLinear above, on the same axis. axis=1 is per-output-row
+        # within a block, which is also the axis onnxruntime quantizes the
+        # grouped-conv lowering on (its reshaped (nblocks*out_blksz, in_blksz, 1)
+        # weight, axis 0) and the axis fold_bn_into_pointwise rescales, so
+        # per-channel symmetric quant still commutes with the BN fold.
+        yield "w1", 1
+        yield "w2", 1
+    elif _is_structured_pointwise(m)[0] == "blockdiag":
+        yield "weight", 1
     elif _is_gru_qat_cell(m):
         for name, axis in _GRU_QAT_CELL_WEIGHTS:
             w = getattr(m, name, None)
@@ -343,6 +375,7 @@ def install_activation_fake_quant(model: nn.Module, act_spec: QSpec) -> int:
             or _is_blockdiag_linear(m)
             or _is_monarch_linear(m)
             or _is_butterfly(m)
+            or _is_structured_pointwise(m)[0] is not None
         ):
             targets.append(m)
 
@@ -475,6 +508,7 @@ def install_static_activation_fake_quant(model: nn.Module, bits: int) -> int:
         m for m in model.modules()
         if isinstance(m, (nn.Linear, nn.GRU, nn.Conv1d, nn.Conv2d, nn.ConvTranspose2d))
         or _is_blockdiag_linear(m) or _is_monarch_linear(m) or _is_butterfly(m)
+        or _is_structured_pointwise(m)[0] is not None
     ]
     existing = getattr(model, "_act_fake_quant", None)
     if isinstance(existing, nn.ModuleList) and len(existing) == len(targets):

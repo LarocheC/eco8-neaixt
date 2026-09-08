@@ -34,6 +34,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from convfsenet.layers import make_pointwise
+
 
 # =============================================================================
 # Losses
@@ -184,8 +186,10 @@ def _get_masker(extractor_type):
 class TCMBlock(nn.Module):
     """Original TCM block (op order: conv -> act -> dropout -> norm)."""
 
-    def __init__(self, n_channels_res, n_channels_conv, kernel_size, dilation, dropout, norm_type, causal):
+    def __init__(self, n_channels_res, n_channels_conv, kernel_size, dilation, dropout, norm_type, causal,
+                 *, pointwise_cfg=None):
         super().__init__()
+        self.pointwise_cfg = dict(pointwise_cfg or {})
         self.n_channels_res = n_channels_res
         self.n_channels_conv = n_channels_conv
         self.kernel_size = kernel_size
@@ -195,7 +199,7 @@ class TCMBlock(nn.Module):
         self.causal = causal
         self.padding = (kernel_size - 1) * dilation if causal else dilation
         NormClass = _get_normalization(norm_type)
-        self.conv1x1 = nn.Conv1d(n_channels_res, n_channels_conv, 1)
+        self.conv1x1 = make_pointwise(n_channels_res, n_channels_conv, cfg=pointwise_cfg)
         self.act1 = nn.PReLU(num_parameters=1)
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = NormClass(n_channels_conv)
@@ -207,7 +211,8 @@ class TCMBlock(nn.Module):
         self.act2 = nn.PReLU(num_parameters=1)
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = NormClass(n_channels_conv)
-        self.conv1x1_out = nn.Conv1d(n_channels_conv, n_channels_res, 1, bias=False)
+        self.conv1x1_out = make_pointwise(n_channels_conv, n_channels_res, bias=False,
+                                          cfg=pointwise_cfg)
 
     def forward_no_residual(self, x):
         x = self.conv1x1(x)
@@ -229,8 +234,10 @@ class TCMBlock(nn.Module):
 class TCMBlock_QuantFriendly(TCMBlock):
     """Quant-friendly TCM block: op order is conv -> bn -> relu, no dropout, ReLU instead of PReLU."""
 
-    def __init__(self, n_channels_res, n_channels_conv, kernel_size, dilation, causal):
-        super().__init__(n_channels_res, n_channels_conv, kernel_size, dilation, 0.0, "batch", causal)
+    def __init__(self, n_channels_res, n_channels_conv, kernel_size, dilation, causal,
+                 *, pointwise_cfg=None):
+        super().__init__(n_channels_res, n_channels_conv, kernel_size, dilation, 0.0, "batch", causal,
+                         pointwise_cfg=pointwise_cfg)
         del self.dropout1
         del self.dropout2
         self.act1 = nn.ReLU()
@@ -253,13 +260,15 @@ class TCMBlock_QuantFriendly(TCMBlock):
 
 class TCM(nn.Sequential):
     def __init__(self, n_channels_res, n_channels_conv, kernel_size,
-                 n_blocks, n_stacks, dropout, norm_type, causal):
+                 n_blocks, n_stacks, dropout, norm_type, causal,
+                 *, pointwise_cfg=None):
         blocks = []
         for _ in range(n_stacks):
             for n in range(n_blocks):
                 blocks.append(TCMBlock(
                     n_channels_res, n_channels_conv, kernel_size,
                     dilation=2 ** n, dropout=dropout, norm_type=norm_type, causal=causal,
+                    pointwise_cfg=pointwise_cfg,
                 ))
         super().__init__(*blocks)
 
@@ -354,8 +363,11 @@ class ConvFSENet(BaseModel):
                  n_channels_res, n_channels_conv, kernel_size,
                  n_blocks, n_stacks, dropout, norm_type,
                  extractor_type, compress_factor, causal,
-                 loss, preproc, postproc):
+                 loss, preproc, postproc, *, pointwise_cfg=None):
         super().__init__(loss, preproc, postproc)
+        # Structured 1x1 convs in the TCM blocks (see convfsenet/layers.py).
+        # Empty / None == plain nn.Conv1d, bit-identical to the dense model.
+        self.pointwise_cfg = dict(pointwise_cfg or {})
         self.n_fft = n_fft
         self.win_length = win_length
         self.n_features = n_features
@@ -373,7 +385,8 @@ class ConvFSENet(BaseModel):
         self.features_extractor = _get_feature_extractor(extractor_type, compress_factor)
         self.frontend = nn.Sequential(nn.Conv1d(n_features, n_channels_res, 1), nn.ReLU())
         self.backend = nn.Sequential(nn.Conv1d(n_channels_res, n_features, 1), nn.Sigmoid())
-        self.tcm = TCM(n_channels_res, n_channels_conv, kernel_size, n_blocks, n_stacks, dropout, norm_type, causal)
+        self.tcm = TCM(n_channels_res, n_channels_conv, kernel_size, n_blocks, n_stacks, dropout, norm_type, causal,
+                       pointwise_cfg=self.pointwise_cfg)
         self.masker = _get_masker(extractor_type)
 
     def forward(self, stft_noisy):
@@ -393,17 +406,22 @@ class ConvFSENet_QuantFriendly(ConvFSENet):
                  n_channels_res, n_channels_conv, kernel_size,
                  n_blocks, n_stacks,
                  extractor_type, compress_factor, causal,
-                 loss, preproc, postproc):
+                 loss, preproc, postproc, *, pointwise_cfg=None):
         super().__init__(
             n_fft, win_length, n_features,
             n_channels_res, n_channels_conv, kernel_size,
             n_blocks, n_stacks, 0.0, "batch",
             extractor_type, compress_factor, causal,
             loss, preproc, postproc,
+            pointwise_cfg=pointwise_cfg,
         )
+        # NB: this loop DISCARDS the blocks TCM just built and re-instantiates
+        # them, so pointwise_cfg has to be passed here too — miss it and the
+        # structured swap silently no-ops back to a dense model.
         for i, m in enumerate(self.tcm):
             self.tcm[i] = TCMBlock_QuantFriendly(
                 n_channels_res, n_channels_conv, kernel_size, m.dilation, causal,
+                pointwise_cfg=self.pointwise_cfg,
             )
 
 
@@ -539,6 +557,11 @@ def build_causal_model(h=None):
     causal = bool(h.get("causal", True))                                  # default True for the trainer
     extractor_type = h.get("extractor_type", "mag")
     compress_factor = h.get("compress_factor", None)
+    # Optional structured pointwise convs, e.g.
+    #   "pointwise": {"kind": "monarch", "nblocks": 8, "scope": "tcm"}
+    # Absent => dense nn.Conv1d. Validated at construction so a config typo
+    # fails in the first second, not twelve hours into a training run.
+    pointwise_cfg = h.get("pointwise", None)
 
     preproc = _TorchSpectrogram(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
     postproc = _TorchInverseSpectrogram(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
@@ -558,6 +581,7 @@ def build_causal_model(h=None):
         extractor_type=extractor_type, compress_factor=compress_factor,
         causal=causal,
         loss=loss, preproc=preproc, postproc=postproc,
+        pointwise_cfg=pointwise_cfg,
     )
 
 

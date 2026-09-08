@@ -38,6 +38,7 @@ from convfsenet.quant import _add_metadata, _compression_prologue_nodes
 from convfsenet.streaming import ConvFSENetWindowedONNX
 from common.dataset import load_voicebank_demand
 from common.env import AttrDict
+from common.quant_audit import assert_all_weights_quantized
 
 
 _METHOD_MAP = {
@@ -167,6 +168,10 @@ def quantize_windowed_fp32_onnx(
         f"int8 windowed ONNX has zero QuantizeLinear nodes — quantize_static "
         f"produced an unquantized graph. Check the calibration reader yielded windows."
     )
+    # See common/quant_audit.py: QuantizeLinear count alone cannot detect a
+    # compute node whose weights the quantizer skipped.
+    assert_all_weights_quantized(model_check, exclude_nodes=exclude_list,
+                                 context="quantize_windowed_fp32_onnx: ")
 
     fp32_size = fp32_path.stat().st_size
     int8_size = int8_path.stat().st_size
@@ -201,6 +206,7 @@ def _load_offline_from_checkpoint(checkpoint_file: Path) -> tuple[ConvFSENet_Qua
         extractor_type=h.extractor_type, compress_factor=h.compress_factor,
         causal=h.causal,
         loss=None, preproc=None, postproc=None,
+        pointwise_cfg=h.get("pointwise", None),
     )
     ckpt = torch.load(str(checkpoint_file), weights_only=True, map_location="cpu")
     model.load_state_dict(ckpt["generator"], strict=True)

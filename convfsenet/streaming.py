@@ -50,6 +50,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from convfsenet.layers import (
+    clone_pointwise,
+    fold_bn_into_pointwise,
+    is_structured_pointwise,
+)
 from convfsenet.model import (
     ConvFSENet_QuantFriendly,
     TCMBlock_QuantFriendly,
@@ -180,7 +185,11 @@ class ConvFSENetStreaming(nn.Module):
             x, new_state = blk.forward_step(x, state)
             states_out.append(new_state)
         # 4. backend: Conv1d(n_channels_res -> F, K=1) + Sigmoid → mask [B, F, 1].
-        mask = self.base.backend(x).squeeze(-1)           # [B, F] real
+        # reshape, not squeeze: with a structured pointwise stack upstream the
+        # trailing dim is no longer statically 1, so squeeze(-1) traces to
+        # Shape+Gather+Equal+If. A reshape with a -1 batch is one Reshape node
+        # in every case (dense included) and keeps the batch axis dynamic.
+        mask = self.base.backend(x).reshape(-1, self.base.n_features)   # [B, F] real
         # 5. mask the noisy STFT (complex × real → complex).
         stft_pred_t = stft_t * mask                       # [B, F] complex
         return stft_pred_t, states_out
@@ -265,6 +274,26 @@ def _fold_bn_into_conv(conv: nn.Conv1d, bn: nn.BatchNorm1d) -> nn.Conv1d:
     return folded
 
 
+def _fold_bn_into_pointwise_any(mod: nn.Module, bn: nn.BatchNorm1d) -> nn.Module:
+    """Fold BN into a 1x1 conv, dense or structured.
+
+    The structured layers deliberately expose no ``.weight``, so this dispatch
+    is the only place that knows both shapes — a structured layer reaching
+    ``_fold_bn_into_conv`` raises rather than silently folding into a
+    fabricated dense weight.
+    """
+    if is_structured_pointwise(mod):
+        return fold_bn_into_pointwise(mod, bn)
+    return _fold_bn_into_conv(mod, bn)
+
+
+def _clone_pointwise_any(src: nn.Module) -> nn.Module:
+    """Deep-copy a 1x1 conv, dense or structured."""
+    if is_structured_pointwise(src):
+        return clone_pointwise(src)
+    return _clone_conv1d(src)
+
+
 def _clone_conv1d(src: nn.Conv1d) -> nn.Conv1d:
     """Deep-copy a Conv1d (weight + bias)."""
     dst = nn.Conv1d(
@@ -315,9 +344,9 @@ class _StreamingTCMBlockQF_Fast(nn.Module):
         self.n_channels_conv = int(src.n_channels_conv)
 
         # Folded modules — own copies, not by-reference.
-        self.conv1x1_folded = _fold_bn_into_conv(src.conv1x1, src.norm1)
+        self.conv1x1_folded = _fold_bn_into_pointwise_any(src.conv1x1, src.norm1)
         self.dconv_folded = _fold_bn_into_conv(src.dconv, src.norm2)
-        self.conv1x1_out = _clone_conv1d(src.conv1x1_out)
+        self.conv1x1_out = _clone_pointwise_any(src.conv1x1_out)
 
         # K−1 past tap indices into the FIFO buffer. For K=3, D=2: [0, 2].
         # General: [i·D for i in 0..K−2]. Empty when K=1.
@@ -447,7 +476,8 @@ class ConvFSENetStreamingFast(nn.Module):
         for blk, state in zip(self.tcm_blocks, states_in):
             x, new_state = blk.forward_step(x, state)
             states_out.append(new_state)
-        mask = torch.sigmoid(self.backend_conv(x)).squeeze(-1)   # [B, F]
+        # reshape, not squeeze — see ConvFSENetStreaming.forward_step.
+        mask = torch.sigmoid(self.backend_conv(x)).reshape(-1, self.n_features)   # [B, F]
         return mask, states_out
 
     def forward_step(
@@ -582,9 +612,9 @@ class _WindowedTCMBlockQF(nn.Module):
 
         # Folded (BN absorbed) + padding=0 — _fold_bn_into_conv copies the
         # dilation, so dconv_folded is a *native* valid dilated conv (no gather).
-        self.conv1x1_folded = _fold_bn_into_conv(src.conv1x1, src.norm1)   # k=1
+        self.conv1x1_folded = _fold_bn_into_pointwise_any(src.conv1x1, src.norm1)  # k=1
         self.dconv_folded = _fold_bn_into_conv(src.dconv, src.norm2)       # k=K, dilation=D
-        self.conv1x1_out = _clone_conv1d(src.conv1x1_out)                  # k=1, no BN
+        self.conv1x1_out = _clone_pointwise_any(src.conv1x1_out)           # k=1, no BN
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: [B, n_channels_res, W] -> [B, n_channels_res, W - trim]."""
