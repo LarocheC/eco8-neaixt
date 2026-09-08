@@ -130,7 +130,10 @@ for arm in $ARMS; do
     # checkpoint, so relaunching after a crash is the recovery path — and it
     # would otherwise destroy the pre-crash validations the summary below greps.
     echo "=== $(date +%F\ %T) launch ${arm}${suffix} ===" >> "${cp_dir}.log"
-    $PY -m convfsenet.train \
+    # PYTHONUNBUFFERED: stdout to a file is block-buffered, and at one line per
+    # epoch that means ~70 epochs of silence per 8 KiB flush — a 12 h run you
+    # cannot watch. Costs nothing.
+    PYTHONUNBUFFERED=1 $PY -m convfsenet.train \
         --config "$cfg" \
         --checkpoint_path "$cp_dir" \
         --training_epochs "$EPOCHS" --stdout_interval 723 \
