@@ -272,6 +272,107 @@ Three things to keep in view when reading the results:
   change) while the dense control shrinks that overhead too. The Monarch edge is
   +1.08 / +1.74 / +3.33 / +6.40%.
 
+### Results — dense narrowing wins at every MAC budget
+
+All nine arms, one recipe (200 epochs, from scratch, seed 1234), FP32 and int8
+PESQ measured in one pass on the full 824-utterance VBD test split. **best** is
+the max over the 19 validations (what `g_best` selects on, and what every
+earlier table in this document reports); **last-5** is the mean of the final
+five validations, which no selection touched — carried because the selection
+margin is not uniform across arms (0.004 to 0.035), so `best` alone could be
+reading the spread of the tail rather than the model. RTF is the int8 streaming
+session under onnxruntime CPU; lower is faster.
+
+| arm | MACs/frame | params | reach | FP32 (best) | FP32 (last-5) | int8 | Δ int8 | RTF |
+| --- | ---------: | -----: | ----: | ----------: | ------------: | ---: | -----: | --: |
+| `cfs_dense` *(anchor)* | 1,436,160 | 1.454 M | dense | 2.877 | 2.860 | 2.871 | 0.005 | 0.015 |
+| `cfs_mon_nb4`   |   855,552 | 0.873 M | 100% / 100% | 2.857 | 2.838 | 2.789 | 0.065 | 0.015 |
+| `cfs_dense_r146`|   850,304 | 0.864 M | dense       | **2.886** | **2.851** | **2.878** | 0.011 | 0.012 |
+| `cfs_mon_nb8`   |   482,304 | 0.500 M | 100% / 100% | 2.854 | 2.830 | 2.790 | 0.063 | 0.014 |
+| `cfs_dense_r108`|   481,248 | 0.491 M | dense       | **2.872** | **2.857** | **2.859** | 0.012 | 0.010 |
+| `cfs_mon_nb16`  |   295,680 | 0.313 M | 75% / 100%  | 2.816 | 2.812 | 2.744 | 0.072 | 0.015 |
+| `cfs_dense_r83` |   295,148 | 0.303 M | dense       | **2.882** | **2.853** | **2.862** | 0.019 | 0.008 |
+| `cfs_mon_nb32`  |   202,368 | 0.220 M | 19% / 38%   | 2.811 | 2.802 | 2.761 | 0.048 | 0.016 |
+| `cfs_dense_r67` |   199,660 | 0.206 M | dense       | **2.847** | **2.816** | **2.833** | 0.012 | 0.008 |
+
+**The dense control wins every MAC-matched pairing, on every statistic.**
+
+| MACs/frame | Monarch | dense control | Δ FP32 (best) | Δ FP32 (last-5) | Δ int8 |
+| ---------: | ------- | ------------- | ------------: | --------------: | -----: |
+|    855,552 | 2.857   | **2.886**     |        +0.029 |          +0.013 | **+0.089** |
+|    482,304 | 2.854   | **2.872**     |        +0.018 |          +0.027 | **+0.069** |
+|    295,680 | 2.816   | **2.882**     |        +0.066 |          +0.042 | **+0.118** |
+|    202,368 | 2.811   | **2.847**     |        +0.036 |          +0.014 | **+0.072** |
+
+Four pairings, three statistics, twelve comparisons, all the same direction.
+**This is the opposite of the NSNet2 result**, where genuine Monarch beat a
+param-matched dense NSNet2 at all five sizes by 0.021–0.086 and the gap widened
+as the models shrank. Same structure, same library, same trainer, opposite
+conclusion — so "structured matrices beat narrow dense" is not a property of
+Monarch. See [Why it reverses](#why-it-reverses) below.
+
+#### int8: the two-factor lowering costs 4–6× more than dense
+
+| family  | Δ int8 (mean) | range         | `QuantizeLinear` nodes |
+| ------- | ------------: | ------------- | ---------------------: |
+| Monarch |     **0.062** | 0.048 – 0.072 |                    212 |
+| dense   |     **0.014** | 0.011 – 0.019 |                     77 |
+
+The node count is **constant within each family** — 212 for every Monarch arm
+regardless of `nblocks`, 77 for every dense one — and so is the penalty. Each
+Monarch layer materializes an intermediate activation between its two factors,
+plus the shuffle's reshape/transpose, and every one of those is a rounding stage
+a single dense conv never has. That is also why int8 RTF is flat at 0.014–0.016
+across a 4.2× MAC range while the dense arms fall to 0.008: both the latency and
+the accuracy cost are node-bound, not arithmetic-bound.
+
+Note this **does not reproduce NSNet2's finding** that Monarch is int8-loss-free
+(|Δ| ≤ 0.012 at nblocks 4–40). The penalty is not intrinsic to Monarch; it
+depends on the model's activation ranges — ConvFSENet feeds compressed
+magnitudes into a sigmoid mask head, a different regime from NSNet2's GRU stack.
+
+#### Why it reverses
+
+The mechanism is visible in the dense column: **ConvFSENet at 192/384 has about
+5× of slack.** `dense_r83` matches the full-size anchor at 4.9× fewer MACs
+(2.882 vs 2.877 best, 2.853 vs 2.860 last-5, 2.862 vs 2.871 int8 — a wash on all
+three, in both directions) while running 1.9× faster in int8. NSNet2's dense
+controls behaved nothing like this: they lost 0.094 PESQ shrinking to 0.12 M
+(2.845 → 2.751), i.e. that baseline really was capacity-limited at the sizes
+Monarch was beating it.
+
+That is the reconciliation, and it is the transferable claim:
+
+> A structured factorization can only win where the dense model it replaces is
+> actually capacity-limited at the target size. Where plain narrowing is free —
+> as it is here for ~5× — structure has nothing to buy back, and pays the
+> quantization and node-count costs anyway.
+
+Two further observations, both of which point at the same follow-up:
+
+- **Monarch's quality tracks reach, not MACs.** The two full-reach arms score
+  2.854–2.857 and the two reduced-reach arms 2.811–2.816, with the 0.04 step
+  landing exactly where reach falls below 100% — across a 4.2× MAC range, the
+  arm's quality is essentially bimodal by connectivity regime.
+- **Monarch's curve is flat and low; dense's is flat and high.** From 855 k to
+  202 k MACs Monarch moves 0.046 and dense 0.039, but the dense curve sits
+  0.018–0.066 above it throughout.
+
+So the arm worth trying next is not more blocks — it is **wider channels at
+`nblocks` 4–8**, where reach stays 100% and Monarch buys width instead of depth
+of factorization. That tests whether Monarch can beat dense *above* the anchor's
+quality rather than below it. This sweep does not answer that, and nothing here
+should be read as evidence about it.
+
+#### Reproducing
+
+```bash
+WAVE=1 ./run_convfsenet_monarch_sweep.sh      # nb8/r108 + nb32/r67, ~12 h 4-up
+WAVE=2 ./run_convfsenet_monarch_sweep.sh      # nb4/r146 + nb16/r83
+./run_convfsenet_monarch_eval.sh              # FP32 + int8 PESQ, all arms
+python -m convfsenet.sweep_report             # the tables above, from the artifacts
+```
+
 ### Lowering: grouped convolutions, not Einsum
 
 `MonarchPointwise` computes `blockdiag × permutation × blockdiag` as two grouped
@@ -331,6 +432,11 @@ this graph is overhead-bound, not arithmetic-bound. So a Monarch arm is
 **1.10–1.16× slower than the full dense baseline it compresses up to 7×, and
 1.7–2.0× slower than its own MAC-matched dense control.** The int8 *size* does
 track the MACs (1611 → 502 KiB).
+
+The trained arms reproduce this on the deployed path: end-to-end int8 RTF is
+**0.014–0.016 for every Monarch arm** across a 4.2× MAC range, against
+**0.008–0.012** for the dense controls — the `dense_r83` model is 1.9× faster
+than any Monarch arm while also scoring higher (see the results table above).
 
 State this before any PESQ number: on the lane this repo deploys, **the only
 claim this sweep can make is quality per MAC and per byte, not latency.** A PESQ
