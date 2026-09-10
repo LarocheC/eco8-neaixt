@@ -75,7 +75,7 @@ from torch.nn import init
 
 
 POINTWISE_KINDS = ("conv", "blockdiag", "monarch")
-POINTWISE_SCOPES = ("tcm",)
+POINTWISE_SCOPES = ("tcm", "all")
 
 
 # ---------------------------------------------------------------------------
@@ -326,17 +326,33 @@ def make_pointwise(in_channels: int, out_channels: int, bias: bool = True, *,
     scope = cfg.get("scope", "tcm")
     if scope not in POINTWISE_SCOPES:
         raise ValueError(
-            f"unknown pointwise scope {scope!r}; expected one of {POINTWISE_SCOPES}. "
-            "Only the TCM blocks' pointwise convs are structured: the frontend "
-            "(257->C) and backend (C->257) carry 7.6% of the MACs, 257 is prime "
-            "so every nblocks would zero-pad, and convfsenet/quant.py's "
-            "compression-prologue walk and streaming's _slice_nyquist both "
-            "assume a dense Conv there."
+            f"unknown pointwise scope {scope!r}; expected one of {POINTWISE_SCOPES}"
         )
     nblocks = int(cfg.get("nblocks", 4))
     if kind == "monarch":
         return MonarchPointwise(in_channels, out_channels, nblocks, bias=bias)
     return BlockdiagPointwise(in_channels, out_channels, nblocks, bias=bias)
+
+
+def ends_cfg(cfg: Optional[dict]) -> Optional[dict]:
+    """The pointwise cfg to use for the frontend/backend, or None to keep them dense.
+
+    ``scope="tcm"`` (the default) structures only the nine TCM blocks' pointwise
+    convs and leaves the frequency-facing ends dense. That is the only workable
+    choice at the native 257 bins: 257 is prime, so no block count divides it
+    and a structured end would have to zero-pad — which puts Pad/Slice in the
+    deploy graph and makes the MAC count the sweep matches on inexact.
+
+    ``scope="all"`` structures the ends too. It requires ``n_features`` to be
+    divisible by ``nblocks`` — in practice a native-256-bin model (see
+    ``convfsenet/model.py``'s MASK_PAD_VALUE) whose ``n_features`` equals its
+    channel width, so every matrix in the network is square and there is no
+    un-structured floor left to confound a MAC-matched comparison.
+    """
+    cfg = dict(cfg or {})
+    if cfg.get("kind", "conv") == "conv":
+        return None
+    return cfg if cfg.get("scope", "tcm") == "all" else None
 
 
 def is_structured_pointwise(m: nn.Module) -> bool:

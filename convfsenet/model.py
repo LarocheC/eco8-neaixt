@@ -34,7 +34,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from convfsenet.layers import make_pointwise
+from convfsenet.layers import ends_cfg, make_pointwise
 
 
 # =============================================================================
@@ -150,6 +150,39 @@ def compress_magnitude(mag, compress_factor):
     streaming wrappers, so the +eps and exponent never drift between them.
     """
     return (mag + _MAG_EPS).pow(compress_factor)
+
+
+# Native sub-Nyquist operation. A model can be trained on `n_features` < the
+# STFT's n_fft//2+1 bins — in practice 256 instead of 257, dropping Nyquist.
+# Two reasons, both load-bearing for the square-matrix Monarch work:
+#   * 257 is prime, so no block count divides it and every structured frontend
+#     or backend would have to zero-pad.
+#   * With n_features == n_channels_res the frontend (F->C) and backend (C->F)
+#     become square, like the TCM's pointwise convs, so the whole model is
+#     structurable and there is no dense floor left to confound a MAC-matched
+#     comparison.
+# The bin is acoustically negligible on this data (~-90 dB of VBD STFT power)
+# and the deployed windowed export already drops it (`drop_nyquist`); this makes
+# it a training-time property instead of a post-hoc weight slice.
+MASK_PAD_VALUE = 0.0
+
+
+def trim_to_features(x, n_features):
+    """(B, bins, T) -> (B, n_features, T), dropping the top bins."""
+    return x if x.shape[-2] == n_features else x[..., :n_features, :]
+
+
+def pad_mask_to_bins(mask, n_bins):
+    """(B, n_features, T) -> (B, n_bins, T), filling dropped bins with MASK_PAD_VALUE.
+
+    torch.cat rather than F.pad: F.pad traces to an ONNX Pad node, which the
+    windowed deploy path hard-asserts against.
+    """
+    missing = n_bins - mask.shape[-2]
+    if missing <= 0:
+        return mask
+    tail = mask.new_full((*mask.shape[:-2], missing, mask.shape[-1]), MASK_PAD_VALUE)
+    return torch.cat([mask, tail], dim=-2)
 
 
 def _get_feature_extractor(extractor_type, compress_factor=None):
@@ -370,6 +403,14 @@ class ConvFSENet(BaseModel):
         self.pointwise_cfg = dict(pointwise_cfg or {})
         self.n_fft = n_fft
         self.win_length = win_length
+        n_bins = n_fft // 2 + 1
+        dropped = n_bins - int(n_features)
+        if not 0 <= dropped <= 8:
+            raise ValueError(
+                f"n_features={n_features} must be within 8 bins of n_fft//2+1="
+                f"{n_bins}; dropping more than the top few bins is not a "
+                "supported configuration (the mask is zero-filled there)."
+            )
         self.n_features = n_features
         self.n_channels_res = n_channels_res
         self.n_channels_conv = n_channels_conv
@@ -383,8 +424,14 @@ class ConvFSENet(BaseModel):
         self.causal = causal
         # layers
         self.features_extractor = _get_feature_extractor(extractor_type, compress_factor)
-        self.frontend = nn.Sequential(nn.Conv1d(n_features, n_channels_res, 1), nn.ReLU())
-        self.backend = nn.Sequential(nn.Conv1d(n_channels_res, n_features, 1), nn.Sigmoid())
+        # scope="all" structures the frequency-facing ends too (needs n_features
+        # divisible by nblocks — i.e. a native-256-bin model); otherwise they
+        # stay dense and form the sweep's un-structured floor.
+        _ends = ends_cfg(self.pointwise_cfg)
+        self.frontend = nn.Sequential(
+            make_pointwise(n_features, n_channels_res, cfg=_ends), nn.ReLU())
+        self.backend = nn.Sequential(
+            make_pointwise(n_channels_res, n_features, cfg=_ends), nn.Sigmoid())
         self.tcm = TCM(n_channels_res, n_channels_conv, kernel_size, n_blocks, n_stacks, dropout, norm_type, causal,
                        pointwise_cfg=self.pointwise_cfg)
         self.masker = _get_masker(extractor_type)
@@ -392,9 +439,12 @@ class ConvFSENet(BaseModel):
     def forward(self, stft_noisy):
         stft_noisy = stft_noisy.squeeze(1)
         feats = self.features_extractor(stft_noisy)
+        # Identity when n_features == n_fft//2+1 (the 257-bin default): both
+        # calls are no-ops, so the dense model is bit-for-bit what it was.
+        feats = trim_to_features(feats, self.n_features)
         x = self.frontend(feats)
         x = self.tcm(x)
-        mask = self.backend(x)
+        mask = pad_mask_to_bins(self.backend(x), stft_noisy.shape[-2])
         stft_pred = self.masker(stft_noisy, mask)
         return stft_pred.unsqueeze(1)
 

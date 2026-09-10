@@ -63,7 +63,12 @@ def _graph_window_dims(onnx_path):
     dims = inp.type.tensor_type.shape.dim
     n_freq = int(dims[1].dim_value)
     window_len = int(dims[2].dim_value)
-    drop_nyquist = bool(int(meta.get("drop_nyquist", "1" if n_freq == 256 else "0")))
+    # No width-based fallback: a 256-wide graph can come from a 257-trained
+    # model sliced at export (drop_nyquist=1) or from one trained natively at
+    # 256 (drop_nyquist=0, the host still trims because the graph is narrower).
+    # Guessing from the width conflates them; the metadata is authoritative and
+    # every export since has written it.
+    drop_nyquist = bool(int(meta.get("drop_nyquist", "0")))
     if "windowed_L" in meta and "windowed_T" in meta:
         L = int(meta["windowed_L"]); T = int(meta["windowed_T"])
     else:
@@ -127,14 +132,20 @@ def _build_window_batch(mag_np: np.ndarray, L: int, T: int, coldstart: str = "re
     return batch, offsets
 
 
-def _run_windowed(session, mag_np, L, T, n_freq_full, drop_nyquist, measure_rtf=False, coldstart="replicate"):
+def _run_windowed(session, mag_np, L, T, n_freq_full, drop_nyquist, measure_rtf=False,
+                  coldstart="replicate", n_freq_graph=None):
     """mag_np [F_full, T_total] -> mask [F_full, T_total], rtf_seconds.
 
-    Drops the Nyquist bin before the graph if drop_nyquist; pads the mask back
-    to F_full (Nyquist mask := 0) after. One batched session.run."""
+    Trims the magnitude to the graph's own bin count and pads the mask back to
+    F_full (dropped bins := 0) after. One batched session.run.
+
+    The trim is driven by the GRAPH width, not by drop_nyquist: a 256-wide graph
+    can come either from slicing a 257-trained model at export (drop_nyquist=1)
+    or from a model trained natively at 256 (drop_nyquist=0). Both need the same
+    host-side trim; only the provenance differs."""
     F_full, T_total = mag_np.shape
-    F_graph = n_freq_full - (1 if drop_nyquist else 0)
-    graph_mag = mag_np[:F_graph, :] if drop_nyquist else mag_np
+    F_graph = int(n_freq_graph) if n_freq_graph else n_freq_full - (1 if drop_nyquist else 0)
+    graph_mag = mag_np[:F_graph, :] if F_graph < F_full else mag_np
     batch, offsets = _build_window_batch(graph_mag, L, T, coldstart=coldstart)   # [n_calls,F_graph,L+T]
     rtf_s = 0.0
     if measure_rtf:
@@ -148,9 +159,9 @@ def _run_windowed(session, mag_np, L, T, n_freq_full, drop_nyquist, measure_rtf=
     for k in range(out.shape[0]):
         off = int(offsets[k])
         mask_graph[:, off:off + T] = out[k]
-    if drop_nyquist:
-        mask = np.zeros((F_full, T_total), dtype=np.float32)       # Nyquist row stays 0
-        mask[:F_full - 1, :] = mask_graph
+    if mask_graph.shape[0] < F_full:
+        mask = np.zeros((F_full, T_total), dtype=np.float32)       # dropped rows stay 0
+        mask[:mask_graph.shape[0], :] = mask_graph
     else:
         mask = mask_graph
     return mask, rtf_s
@@ -158,7 +169,7 @@ def _run_windowed(session, mag_np, L, T, n_freq_full, drop_nyquist, measure_rtf=
 
 def enhance_one_utterance_windowed(
     noisy_wav, primary_session, h, L, T, n_freq_full, drop_nyquist,
-    fp32_session=None, fp32_dims=None, coldstart="replicate",
+    fp32_session=None, fp32_dims=None, coldstart="replicate", n_freq_graph=None,
 ):
     """STFT once -> batched windowed mask -> iSTFT (per session)."""
     noisy_t = torch.from_numpy(np.asarray(noisy_wav, dtype=np.float32))
@@ -175,7 +186,7 @@ def enhance_one_utterance_windowed(
 
     primary_mask, rtf_s = _run_windowed(
         primary_session, mag_np, L, T, n_freq_full, drop_nyquist, measure_rtf=True,
-        coldstart=coldstart,
+        coldstart=coldstart, n_freq_graph=n_freq_graph,
     )
     duration_s = L_samples / float(h.sampling_rate)
     rtf_primary = rtf_s / duration_s
@@ -192,9 +203,10 @@ def enhance_one_utterance_windowed(
 
     fp32_audio = None
     if fp32_session is not None:
-        fL, fT, fnf, fdrop = fp32_dims
+        fL, fT, fnf, fdrop, fgraph = fp32_dims
         fp32_mask, _ = _run_windowed(fp32_session, mag_np, fL, fT, fnf, fdrop,
-                                     measure_rtf=False, coldstart=coldstart)
+                                     measure_rtf=False, coldstart=coldstart,
+                                     n_freq_graph=fgraph)
         fp32_audio = _istft_from_mask(fp32_mask)
 
     return primary_audio, fp32_audio, rtf_primary
@@ -233,7 +245,9 @@ def main():
         raise FileNotFoundError(f"windowed ONNX missing at {primary_path}")
     _check_ort_version(primary_path)
     n_freq, window_len, L, T, drop_nyquist = _graph_window_dims(primary_path)
-    n_freq_full = int(h.n_features)
+    # The FULL STFT bin count, which is what the host holds — not the model's
+    # n_features, which for a natively sub-Nyquist model is already narrower.
+    n_freq_full = int(h.n_fft) // 2 + 1
     primary_session = _make_session(primary_path)
 
     fp32_session = fp32_dims = None
@@ -243,7 +257,7 @@ def main():
             raise FileNotFoundError(f"--fp32_checkpoint_file {fp32_path} not found")
         fnf, fwl, fL, fT, fdrop = _graph_window_dims(fp32_path)
         fp32_session = _make_session(fp32_path)
-        fp32_dims = (fL, fT, n_freq_full, fdrop)
+        fp32_dims = (fL, fT, n_freq_full, fdrop, fnf)
     dual = fp32_session is not None
     print(f"Loaded primary: {primary_path} (n_freq={n_freq}, L={L}, T={T}, "
           f"drop_nyquist={drop_nyquist})" + (f"; fp32 sidecar: {a.fp32_checkpoint_file}" if dual else ""))
@@ -261,7 +275,7 @@ def main():
         clean_wav = np.asarray(item["clean"]["array"], dtype=np.float32)
         primary_audio, fp32_audio, rtf = enhance_one_utterance_windowed(
             noisy_wav, primary_session, h, L, T, n_freq_full, drop_nyquist,
-            fp32_session, fp32_dims, coldstart=a.coldstart,
+            fp32_session, fp32_dims, coldstart=a.coldstart, n_freq_graph=n_freq,
         )
         p_pri = eval_pesq(clean_wav, primary_audio, int(h.sampling_rate))
         line = f"[{i+1}/{N}] {item['id']}: PESQ primary={p_pri:.3f}; RTF={rtf:.3f}"

@@ -32,7 +32,19 @@
 # together for the blockdiag sweep):
 #   WAVE=1  the two decisive pairings: nb8/r108 (crossover) and nb32/r67 (small)
 #   WAVE=2  the rest of the trend: nb4/r146 and nb16/r83
-#   WAVE=3  repeat seeds, set SEED=2345 or 3456 and ARMS to the chosen pairing
+#
+# The SQUARE sweep (WAVE=S1/S2/S3) answers the follow-up: the rectangular
+# geometry wastes Monarch's first factor on the wide side of the contraction
+# (compression 0.667*nblocks expanding vs 0.333*nblocks contracting), and its
+# dense frontend/backend leave an un-structured floor of 12.7-53.9% per arm.
+# Making every matrix square at 256 bins removes both: compression is exactly
+# nblocks/2 on every layer, the floor drops to the depthwise convs alone
+# (0.5-4.0%), and reach stays 100% at every swept block count -- so compression
+# and connectivity finally move independently, which the rectangular sweep
+# could not do (7.1x compression there forced reach down to 18.8%).
+#   WAVE=S1 nuisance + isolation:  cfs_dense_{s2345,s3456,f256}, sq_dense_C268
+#   WAVE=S2 square dense curve:    sq_dense_C{256,177,122,84}
+#   WAVE=S3 the experiment:        sq_mon_nb{2,4,8,16}
 # Override freely:  WAVE=2 ./run_convfsenet_monarch_sweep.sh
 #                   ARMS="cfs_mon_nb8" ./run_convfsenet_monarch_sweep.sh
 set -u
@@ -45,8 +57,23 @@ WAVE="${WAVE:-1}"
 SEED="${SEED:-}"                 # empty = the config's own seed (1234)
 
 case "$WAVE" in
+    # --- rectangular sweep (DONE, results in RESULTS_CONVFSENET.md) --------
     1) DEFAULT_ARMS="cfs_mon_nb8 cfs_dense_r108 cfs_mon_nb32 cfs_dense_r67" ;;
     2) DEFAULT_ARMS="cfs_mon_nb4 cfs_dense_r146 cfs_mon_nb16 cfs_dense_r83" ;;
+    # --- square sweep -----------------------------------------------------
+    # S1: nuisance first. Two seed replicates of the anchor (this model's seed
+    # noise has NEVER been measured, and one num_workers change moved it 0.054),
+    # plus the two arms that isolate what separates the square family from the
+    # rectangular one: bin count alone, and the H/B ratio alone.
+    S1) DEFAULT_ARMS="cfs_dense_s2345 cfs_dense_s3456 cfs_dense_f256 sq_dense_C268" ;;
+    # S2: the square dense capacity curve. Also the MAC-matched controls for S3,
+    # so it is not an extra cost. If this curve is flat, no structured arm can
+    # win and the programme stops here.
+    S2) DEFAULT_ARMS="sq_dense_C256 sq_dense_C177 sq_dense_C122 sq_dense_C84" ;;
+    # S3: the experiment. Every matrix square and structured, full reach at
+    # every block count, compression exactly nblocks/2. nb=2 is the
+    # zero-compression control (exact MAC and param twin of sq_dense_C256).
+    S3) DEFAULT_ARMS="sq_mon_nb2 sq_mon_nb4 sq_mon_nb8 sq_mon_nb16" ;;
     *) DEFAULT_ARMS="" ;;
 esac
 ARMS="${ARMS:-$DEFAULT_ARMS}"

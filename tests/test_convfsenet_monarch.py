@@ -211,7 +211,7 @@ def test_rejects_indivisible_nblocks_and_bad_config():
     with pytest.raises(ValueError, match="unknown pointwise kind"):
         make_pointwise(192, 384, cfg={"kind": "butterfly"})
     with pytest.raises(ValueError, match="unknown pointwise scope"):
-        make_pointwise(192, 384, cfg={"kind": "monarch", "scope": "all"})
+        make_pointwise(192, 384, cfg={"kind": "monarch", "scope": "ends"})
     with pytest.raises(ValueError, match="must divide"):
         _build({"kind": "monarch", "nblocks": 5})
 
@@ -258,12 +258,94 @@ def test_arms_are_mac_matched_within_one_and_a_half_percent():
         assert rel < 0.015, f"nblocks={nb} vs width={w}: MAC mismatch {rel:.2%}"
 
 
-def test_nblocks_two_is_larger_than_dense():
-    """Guards the choice to start the grid at 4. w1 scales with in**2, so a
-    contracting 384->192 layer only compresses nblocks/3 — at nblocks=2 the
-    'compressed' model is bigger than the dense one."""
-    m2 = _build({"kind": "monarch", "nblocks": 2})
-    assert _macs_per_frame(m2) > _macs_per_frame(_build())
+def test_nblocks_two_is_larger_than_dense_only_when_rectangular():
+    """The rectangular geometry's asymmetry, and its absence when square.
+
+    w1 is square in the INPUT block size, so an expanding 192->384 layer
+    compresses 2*nblocks/3 but the contracting 384->192 layer only nblocks/3 —
+    at nblocks=2 the 'compressed' rectangular model is 1.12x BIGGER than dense.
+    Square C->C makes both factors (nblocks, C/nblocks, C/nblocks), so
+    compression is exactly nblocks/2 everywhere and nblocks=2 is exact parity.
+    That parity point is the zero-compression control the square sweep uses.
+    """
+    rect = _macs_per_frame(_build({"kind": "monarch", "nblocks": 2}))
+    assert rect > _macs_per_frame(_build())
+    assert abs(rect / _macs_per_frame(_build()) - 1.1155) < 0.001
+
+    sq = dict(n_features=256, n_channels_res=256, n_channels_conv=256)
+    sq_dense = _macs_per_frame(_build(None, **sq))
+    sq_mon2 = _macs_per_frame(_build({"kind": "monarch", "nblocks": 2, "scope": "all"}, **sq))
+    assert sq_mon2 == sq_dense, "square nblocks=2 must be exact MAC parity with dense"
+
+
+SQUARE_ARMS = {2: (1_329_664, 1_317_632), 4: (674_304, 662_272),
+               8: (346_624, 334_592), 16: (182_784, 170_752)}
+
+
+@pytest.mark.parametrize("nblocks,params,macs", [(k, *v) for k, v in SQUARE_ARMS.items()])
+def test_square_scope_all_arm_arithmetic(nblocks, params, macs):
+    """The square 256-bin arms, every matrix structured — no un-structured floor
+    except the nine depthwise convs (6,912 MACs/frame, 0.5-4.0% of an arm)."""
+    m = _build({"kind": "monarch", "nblocks": nblocks, "scope": "all"},
+               n_features=256, n_channels_res=256, n_channels_conv=256)
+    assert sum(p.numel() for p in m.parameters()) == params
+    assert _macs_per_frame(m) == macs
+    assert isinstance(m.frontend[0], MonarchPointwise)
+    assert isinstance(m.backend[0], MonarchPointwise)
+    assert all(isinstance(b.conv1x1, MonarchPointwise) for b in m.tcm)
+    # compression is exactly nblocks/2, per layer, in both directions
+    assert m.frontend[0].saving == pytest.approx(2.0 / nblocks)
+    assert m.tcm[0].conv1x1.saving == pytest.approx(2.0 / nblocks)
+    assert m.tcm[0].conv1x1_out.saving == pytest.approx(2.0 / nblocks)
+
+
+@pytest.mark.parametrize("nblocks", [2, 4, 8, 16])
+def test_square_arms_have_full_reach(nblocks):
+    """Every square arm in the sweep mixes fully: nblocks <= sqrt(256) = 16.
+
+    This is the property the rectangular sweep could not hold fixed — there,
+    reaching 7.1x compression forced nblocks=32 and reach down to 18.8%, so
+    compression and connectivity moved together.
+    """
+    layer = MonarchPointwise(256, 256, nblocks, bias=False).double()
+    assert _touched_outputs(layer, 256) == 256
+
+
+def test_native_sub_nyquist_is_identity_at_full_width():
+    """The trim/pad must be a no-op for a 257-bin model, or every existing
+    number in RESULTS_CONVFSENET.md moves."""
+    torch.manual_seed(0)
+    m = _small()
+    stft = torch.randn(2, 257, 30, dtype=torch.complex64)
+    with torch.no_grad():
+        out = m(stft.unsqueeze(1))
+    assert out.shape[-2] == 257
+    # and a sub-Nyquist model zero-fills exactly the bins it dropped
+    torch.manual_seed(0)
+    m256 = _build(None, n_features=256, n_channels_res=48, n_channels_conv=96).eval()
+    with torch.no_grad():
+        out256 = m256(stft.unsqueeze(1))
+    assert out256.shape[-2] == 257
+    assert torch.equal(out256[:, :, 256, :], torch.zeros_like(out256[:, :, 256, :]))
+
+
+def test_drop_nyquist_refuses_on_a_natively_narrow_model():
+    """deploy/stm32n6/scripts/run_windowed_eval.sh passes --drop_nyquist
+    unconditionally; on a natively-256 model that would silently build a
+    255-wide graph."""
+    m = _build(None, n_features=256, n_channels_res=48, n_channels_conv=96).eval()
+    with pytest.raises(ValueError, match="already trained at"):
+        ConvFSENetWindowedONNX(m, T=1, drop_nyquist=True)
+
+
+def test_drop_nyquist_refuses_on_a_structured_end_model_too():
+    """A scope='all' model is necessarily natively narrow (257 is prime, so no
+    nblocks divides it), so the width guard is what fires. The structured-end
+    guard behind it is defence-in-depth for any future padded-end variant."""
+    m = _build({"kind": "monarch", "nblocks": 8, "scope": "all"},
+               n_features=256, n_channels_res=64, n_channels_conv=64).eval()
+    with pytest.raises(ValueError, match="already trained at|structured frontend"):
+        ConvFSENetWindowedONNX(m, T=1, drop_nyquist=True)
 
 
 # --- V5: BatchNorm folding --------------------------------------------------

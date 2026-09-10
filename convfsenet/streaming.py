@@ -59,6 +59,8 @@ from convfsenet.model import (
     ConvFSENet_QuantFriendly,
     TCMBlock_QuantFriendly,
     compress_magnitude,
+    pad_mask_to_bins,
+    trim_to_features,
 )
 
 _SUPPORTED_EXTRACTORS = ("mag", "mag_compressed")
@@ -175,7 +177,10 @@ class ConvFSENetStreaming(nn.Module):
         """Single complex-STFT frame in, single predicted complex frame out."""
         # 1. feature extraction — reuse the base model's extractor so the
         #    'mag' / 'mag_compressed' choice and its eps stay in lockstep.
-        feats = self.base.features_extractor(stft_t)      # [B, F] real
+        feats = self.base.features_extractor(stft_t)      # [B, bins] real
+        # Sub-Nyquist models see only their own n_features bins; identity for
+        # the 257-bin default. The complex IO stays full-width either way.
+        feats = trim_to_features(feats.unsqueeze(-1), self.base.n_features).squeeze(-1)
         # 2. frontend: Conv1d(F -> n_channels_res, K=1) + ReLU, on shape [B, F, 1].
         x = feats.unsqueeze(-1)                           # [B, F, 1]
         x = self.base.frontend(x)                         # [B, n_channels_res, 1]
@@ -190,8 +195,10 @@ class ConvFSENetStreaming(nn.Module):
         # Shape+Gather+Equal+If. A reshape with a -1 batch is one Reshape node
         # in every case (dense included) and keeps the batch axis dynamic.
         mask = self.base.backend(x).reshape(-1, self.base.n_features)   # [B, F] real
-        # 5. mask the noisy STFT (complex × real → complex).
-        stft_pred_t = stft_t * mask                       # [B, F] complex
+        # 5. mask the noisy STFT (complex × real → complex). Pad the mask back
+        #    to the STFT's bin count for a sub-Nyquist model; identity at 257.
+        mask = pad_mask_to_bins(mask.unsqueeze(-1), stft_t.shape[-1]).squeeze(-1)
+        stft_pred_t = stft_t * mask                       # [B, bins] complex
         return stft_pred_t, states_out
 
     # ---- python time-loop driver (parity reference) -----------------------
@@ -426,8 +433,8 @@ class ConvFSENetStreamingFast(nn.Module):
                 "Base model must be in .eval() mode before folding BatchNorm."
             )
         # Frontend / backend: no surrounding BN — clone the Conv1d, keep ReLU/Sigmoid inline.
-        self.frontend_conv = _clone_conv1d(base.frontend[0])
-        self.backend_conv = _clone_conv1d(base.backend[0])
+        self.frontend_conv = _clone_pointwise_any(base.frontend[0])
+        self.backend_conv = _clone_pointwise_any(base.backend[0])
         self.n_features = int(base.n_features)
         self.n_channels_res = int(base.n_channels_res)
         # Magnitude-compression: applied as the first op in forward_mask_step
@@ -488,7 +495,13 @@ class ConvFSENetStreamingFast(nn.Module):
         """Complex-IO wrapper for parity tests / Python-side inference.
         Delegates to forward_mask_step for the real-valued core, then
         applies the mask back to the complex STFT (preserves phase)."""
-        mask, states_out = self.forward_mask_step(stft_t.abs(), states_in)
+        mag = trim_to_features(stft_t.abs().unsqueeze(-1), self.n_features).squeeze(-1)
+        mask, states_out = self.forward_mask_step(mag, states_in)
+        # NB the trim/pad live HERE and not in forward_mask_step: that method is
+        # the body ConvFSENetStreamingONNX exports, and Slice/Concat nodes there
+        # would land in the deployed per-frame int8 graph. The host owns the bin
+        # bookkeeping, exactly as it already does for the windowed export.
+        mask = pad_mask_to_bins(mask.unsqueeze(-1), stft_t.shape[-1]).squeeze(-1)
         return stft_t * mask, states_out
 
     def forward_full(self, stft_noisy: torch.Tensor) -> torch.Tensor:
@@ -675,13 +688,31 @@ class ConvFSENetWindowedONNX(nn.Module):
             raise ValueError(f"T (emitted frames) must be >= 1; got {self.T}.")
         self.drop_nyquist = bool(drop_nyquist)
         self.n_features_full = int(base.n_features)
+        # drop_nyquist slices a bin off a model TRAINED with the full 257. A
+        # model trained natively sub-Nyquist has already dropped it, and slicing
+        # again silently yields a 255-wide graph — so refuse rather than emit
+        # one (deploy/stm32n6/scripts/run_windowed_eval.sh passes the flag
+        # unconditionally).
+        if self.drop_nyquist and self.n_features_full < base.n_fft // 2 + 1:
+            raise ValueError(
+                f"drop_nyquist=True on a model already trained at "
+                f"n_features={self.n_features_full} (< n_fft//2+1="
+                f"{base.n_fft // 2 + 1}). The bin is already gone; slicing "
+                "again would make the graph one bin too narrow."
+            )
         self.n_features = self.n_features_full - (1 if self.drop_nyquist else 0)
 
         # Frontend / backend convs (k=1, no surrounding BN). Optionally slice
         # the Nyquist bin so the graph is 256-wide.
-        front = _clone_conv1d(base.frontend[0])
-        back = _clone_conv1d(base.backend[0])
+        front = _clone_pointwise_any(base.frontend[0])
+        back = _clone_pointwise_any(base.backend[0])
         if self.drop_nyquist:
+            if is_structured_pointwise(front) or is_structured_pointwise(back):
+                raise ValueError(
+                    "drop_nyquist=True cannot slice a structured frontend/backend "
+                    "(scope='all'): the bin is one column of a factor, not of a "
+                    "dense weight. Train natively at the target bin count instead."
+                )
             front, back = self._slice_nyquist(front, back)
         self.frontend_conv = front
         self.backend_conv = back

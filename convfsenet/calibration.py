@@ -147,6 +147,13 @@ class ConvFSENetCalibrationReader(CalibrationDataReader):
         states = self.onnx_view.init_states(1, "cpu", dtype=torch.float32)
         state_in_names = self.onnx_view.state_input_names
 
+        # Feed exactly the graph's own bin count: a natively sub-Nyquist model
+        # (n_features < n_fft//2+1) takes 256 bins, not the STFT's 257. Keyed
+        # off the width so it covers both that and the export-time slice.
+        n_feat = int(self.fast.n_features)
+        if mag.shape[1] > n_feat:
+            mag = mag[:, :n_feat, :]
+
         with torch.no_grad():
             for t in range(T):
                 frame = mag[:, :, t].to(torch.float32)                    # (1, F)
@@ -282,8 +289,11 @@ class ConvFSENetWindowedCalibrationReader(ConvFSENetCalibrationReader):
         mag, _, _ = mag_pha_stft(
             audio, self.h.n_fft, self.h.hop_size, self.h.win_size, 1.0,
         )                                                                 # (1, F, T_total)
-        if self.drop_nyquist:
-            mag = mag[:, : self.onnx_view.n_features, :]                  # drop Nyquist bin
+        # Feed exactly the graph's own bin count. drop_nyquist slices a
+        # 257-trained model; a natively sub-Nyquist model is already narrow and
+        # needs the same trim without the flag, so key off the width, not the flag.
+        if mag.shape[1] > self.onnx_view.n_features:
+            mag = mag[:, : self.onnx_view.n_features, :]
         T_total = mag.shape[2]
 
         # Left-pad by L (start-of-stream zeros) so the first output frame's
