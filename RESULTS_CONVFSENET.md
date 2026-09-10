@@ -331,6 +331,32 @@ Note this **does not reproduce NSNet2's finding** that Monarch is int8-loss-free
 depends on the model's activation ranges — ConvFSENet feeds compressed
 magnitudes into a sigmoid mask head, a different regime from NSNet2's GRU stack.
 
+#### Where the int8 penalty actually comes from
+
+The 0.062 mean penalty is not a lowering artifact and not fixable in the
+quantizer. Three candidate mechanisms, all measured on the trained
+`cp_cfs_mon_nb8` checkpoint, all refuted:
+
+| hypothesis | test | result |
+| ---------- | ---- | ------ |
+| The shuffle's `Reshape`/`Transpose` requantize with their own scales, adding rounding to pure data movement | re-quantize with `op_types_to_quantize=["Conv"]`: 212 → 94 `QuantizeLinear`, 705 → 479 nodes | mask error vs FP32 got **worse**, 0.0648 → 0.0727. onnxruntime already propagates one scale across those nodes; they are numerically free |
+| The intermediate activation between the two factors has a wider dynamic range, so int8's `max/127` step is coarser there | measure `\|mid\|max` against the layer's own input and output over 6 utterances × 100 frames, all 18 layers | **narrower**, not wider: mean `mid/in` 0.72×, `mid/out` 1.01× |
+| That intermediate is peaky — a high crest factor wastes the int8 grid on outliers | crest factor (max/std) of all three tensors | the intermediate is the **best-behaved** of the three: 10.1 mean, against 14.5 for the layer input and 10.5 for the output |
+
+What is left is the simple thing: **a Monarch layer quantizes one more activation
+than a dense one does.** A dense 1×1 conv rounds its input and its output; a
+Monarch layer rounds its input, the intermediate between its factors, and its
+output. Each stage is individually benign — that is what the crest and range
+numbers say — but there are 18 to 20 of them in series, and the errors compound.
+
+The consequence is worth stating because it is actionable: no `quantize_static`
+setting recovers this, and neither does a different ONNX lowering. Only a
+parameterization that never materializes the intermediate at int8 would — i.e.
+a fused Monarch kernel that keeps it in higher precision internally. That is the
+same fix the latency measurement points to (node-bound, flat in `nblocks`), so
+one piece of work would address both costs. Nothing in this repo needs it today,
+since the dense controls win outright.
+
 #### Why it reverses
 
 The mechanism is visible in the dense column: **ConvFSENet at 192/384 has about
