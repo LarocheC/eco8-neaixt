@@ -45,6 +45,8 @@
 #   WAVE=S1 nuisance + isolation:  cfs_dense_{s2345,s3456,f256}, sq_dense_C268
 #   WAVE=S2 square dense curve:    sq_dense_C{256,177,122,84}
 #   WAVE=S3 the experiment:        sq_mon_nb{2,4,8,16}
+#   WAVE=D1/D2/D3 the deep end, where NSNet2's dense collapsed and Monarch
+#                 did not -- full reach maintained by shrinking C at nblocks=8
 # Override freely:  WAVE=2 ./run_convfsenet_monarch_sweep.sh
 #                   ARMS="cfs_mon_nb8" ./run_convfsenet_monarch_sweep.sh
 set -u
@@ -74,6 +76,25 @@ case "$WAVE" in
     # every block count, compression exactly nblocks/2. nb=2 is the
     # zero-compression control (exact MAC and param twin of sq_dense_C256).
     S3) DEFAULT_ARMS="sq_mon_nb2 sq_mon_nb4 sq_mon_nb8 sq_mon_nb16" ;;
+    # --- deep wave -------------------------------------------------------
+    # S1-S3 stop at 170,752 MACs, which is ABOVE where the interesting thing
+    # happens. On the shared MACs/frame axis, NSNet2's dense arms fell 0.096
+    # from 2.845 to 2.749 and its blockdiag collapsed to 2.608, while
+    # monarch_40 held 2.837 at 110k MACs -- a +0.086 gap, four times the noise
+    # that makes the shallower ConvFSENet gaps hard to read. ConvFSENet's own
+    # dense curve has lost only 0.033 by 172k, i.e. it has not started to break.
+    #
+    # Going deeper by raising nblocks costs reach (25% at 32, 6% at 64). Going
+    # deeper by shrinking C at nblocks=8 does NOT: every layer stays at 100%
+    # reach down to 33k MACs, because full reach needs nblocks <= sqrt(C) and
+    # nblocks <= sqrt(n_features), and 8 satisfies both for C >= 64.
+    #   D1 brackets the new range: 117k and 33k, with matched dense controls
+    #   D2 fills the middle, and adds sq_mon_nb32 -- the direct analogue of
+    #      NSNet2's monarch_40 (same 25% reach), so the one configuration that
+    #      replicates that result rather than avoiding it
+    D1) DEFAULT_ARMS="sq_mon_C144_nb8 sq_dense_C67 sq_mon_C64_nb8 sq_dense_C30" ;;
+    D2) DEFAULT_ARMS="sq_mon_C96_nb8 sq_dense_C44 sq_mon_nb32 sq_dense_C57" ;;
+    D3) DEFAULT_ARMS="sq_mon_C112_nb8 sq_dense_C52" ;;
     *) DEFAULT_ARMS="" ;;
 esac
 ARMS="${ARMS:-$DEFAULT_ARMS}"
