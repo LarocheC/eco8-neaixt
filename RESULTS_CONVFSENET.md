@@ -399,6 +399,84 @@ WAVE=2 ./run_convfsenet_monarch_sweep.sh      # nb4/r146 + nb16/r83
 python -m convfsenet.sweep_report             # the tables above, from the artifacts
 ```
 
+### Square matrices — the follow-up sweep, and the answer
+
+The sweep above put Monarch on the wrong shape. A TCM block's pointwise convs
+are a compression/expansion pair (192→384, 384→192), and Monarch's first factor
+`w1` is square in the **input** block size, so an expanding layer compresses
+`2·nblocks/3` while a contracting one compresses only `nblocks/3` — the
+contraction spends its entire first factor on the wide side. At `nblocks=2` the
+"compressed" model was 1.12× *larger* than dense.
+
+Making every matrix square fixes that by construction: with
+`n_features = n_channels_res = n_channels_conv`, both factors are
+`(nblocks, C/nblocks, C/nblocks)` and compression is exactly **`nblocks/2`** on
+every layer. `nblocks = √C` is then the canonical Dao construction (√C blocks of
+√C×√C) and sits exactly at the full-reach boundary. Training natively on 256
+bins (dropping Nyquist, ~−90 dB of VBD STFT power) makes the frontend and
+backend square too, so **all 20 pointwise matrices are structured** and the
+un-structured floor falls from 12.7–53.9% of an arm to 4.0% — the nine depthwise
+convs, which are not matrices.
+
+That also decouples the two variables the first sweep confounded. There, the
+only way to reach 7.1× compression was `nblocks=32`, which had already dropped
+to 18.8% reach. Here, shrinking `C` at `nblocks=8` holds **100% reach down to
+33 k MACs/frame**, because full reach needs `nblocks ≤ √C` and `≤ √n_features`.
+
+| MACs/frame | reach | Monarch | dense control | gap (best) | gap (last-5) |
+| ---------: | ----: | ------- | ------------- | ---------: | -----------: |
+|  1,317,632 |  100% | `sq_mon_nb2` 2.891 | `sq_dense_C256` 2.864 | +0.027 | −0.007 |
+|    662,272 |  100% | `sq_mon_nb4` 2.855 | `sq_dense_C177` 2.855 |  +0.000 | −0.003 |
+|    334,592 |  100% | `sq_mon_nb8` 2.850 | `sq_dense_C122` 2.833 | +0.017 | +0.026 |
+|    170,752 |  100% | `sq_mon_nb16` 2.838 | `sq_dense_C84` 2.831 | +0.007 | +0.011 |
+|    117,200 |  100% | `sq_mon_C144_nb8` 2.820 | `sq_dense_C67` 2.824 | −0.004 | −0.019 |
+|     59,552 |  100% | `sq_mon_C96_nb8` 2.782 | `sq_dense_C44` 2.782 | +0.000 | +0.004 |
+|     32,960 |  100% | `sq_mon_C64_nb8` 2.735 | `sq_dense_C30` 2.726 | +0.009 | +0.012 |
+|     88,832 | **25%** | `sq_mon_nb32` 2.691 | `sq_dense_C57` 2.818 | **−0.127** | **−0.112** |
+
+**At full reach, Monarch and dense are indistinguishable**: seven pairings across
+a **40× MAC range**, mean +0.008, sd 0.010, never outside ±0.027. The square
+geometry flips the *sign* of the first sweep's result (where dense won all four
+by 0.018–0.066) without producing separation.
+
+Two cautions that matter more than the mean. `sq_mon_nb2`'s +0.027 — the largest
+gap, and the interesting one because that arm has **identical MACs and identical
+parameters** to its control — **reverses to −0.007 on the selection-free last-5
+mean.** It was a validation spike, not a win. And no arm here has repeat seeds,
+so the whole ±0.027 band is of the order of the nuisance variation this model is
+known to have (one `num_workers` change once moved it 0.054).
+
+**Reduced reach is where the two models part company.** `sq_mon_nb32` is the
+direct analogue of NSNet2's `monarch_40` — same 25% reach — and it loses by
+0.127, the largest gap in either sweep. On NSNet2 that configuration was the
+star: 2.837 at 110 k MACs, +0.086 over its dense control, near dense parity at
+24× fewer parameters. On ConvFSENet the same construction collapses.
+
+#### Why NSNet2 separated and ConvFSENet does not
+
+Both models' MACs/frame on one axis (NSNet2's are computed here for the first
+time; its published tables are in parameters):
+
+| ~MACs/frame | NSNet2 dense | ConvFSENet square dense |
+| ----------: | -----------: | ----------------------: |
+|      117 k  | 2.751 (`dense_h68`) | **2.824** (`sq_dense_C67`) |
+|       76 k  | 2.749 (`dense_h52`) | — |
+|       33 k  | — | 2.726 (`sq_dense_C30`) |
+
+**NSNet2's dense baseline was fragile under width reduction and ConvFSENet's is
+not** — +0.073 in dense-vs-dense at matched MACs. That fragility is the hole
+`monarch_40` filled. A convolutional mask predictor degrades gracefully instead:
+from 1.32 M to 33 k MACs/frame (40×) its dense arms give up 0.138 PESQ, and its
+Monarch arms give up 0.156 alongside them, never diverging.
+
+The transferable claim, now measured on two architectures and two geometries:
+
+> A structured factorization wins where the dense model it replaces is
+> capacity-limited or fragile at the target size. Neither geometry nor the
+> cleanliness of the decomposition changes that — the square, canonical,
+> full-reach construction is indistinguishable from plain narrowing on a host
+> whose dense baseline is already robust.
+
 ### Lowering: grouped convolutions, not Einsum
 
 `MonarchPointwise` computes `blockdiag × permutation × blockdiag` as two grouped
