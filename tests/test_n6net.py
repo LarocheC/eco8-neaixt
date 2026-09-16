@@ -179,3 +179,57 @@ def test_no_normalization_no_recurrence_no_depthwise():
         if isinstance(mod, nn.Conv2d):
             assert mod.groups == 1, "depthwise/grouped conv defeats the reuse thesis"
             assert mod.dilation == (1, 1), "no dilation by design"
+
+
+# --- deploy graph layouts ---------------------------------------------------
+
+
+@pytest.mark.parametrize("layout", ["time_w", "time_c", "time_split"])
+def test_deploy_layouts_are_the_same_arithmetic(layout):
+    """Every NPU export layout must stream to the offline mask.
+
+    ``time_c`` folds the 1 x k_t kernel into a 1 x 1 conv over k_t*C channels
+    and ``time_split`` into k_t summed 1 x 1 convs with a host-side ring buffer;
+    both are rewrites for the compiler, so neither may change the numbers.
+    """
+    from n6net.export_npu import N6NetStreamStep
+
+    m = _model().double()
+    step = N6NetStreamStep(m, layout).double().eval()
+    T = 24
+    feat = torch.rand(1, 1, F_BINS, T, dtype=torch.float64)
+    with torch.no_grad():
+        x = m.stem(feat)
+        for b in m.blocks:
+            x = b(x)
+        offline = torch.sigmoid(m.head(x))
+
+        states = [s.double() for s in step.init_states()]
+        assert len(states) == len(step.input_names) - 1
+        masks = []
+        for t in range(T):
+            outs = step(feat[..., t:t + 1], *states)
+            assert len(outs) == len(step.output_names)
+            masks.append(outs[0])
+            states = step.advance(states, outs[1:])
+        streamed = torch.cat(masks, dim=-1)
+    assert torch.allclose(offline, streamed, atol=1e-10), (
+        (offline - streamed).abs().max().item()
+    )
+
+
+def test_split_layout_has_no_concat_or_slice():
+    """The point of ``time_split``: Neural-ART runs Concat on the M55, so the
+    deploy graph must not contain one (nor the Slice the shift would need)."""
+    import io
+
+    from n6net.export_npu import N6NetStreamStep
+
+    onnx = pytest.importorskip("onnx")
+    step = N6NetStreamStep(_model(n_blocks=1), "time_split").eval()
+    buf = io.BytesIO()
+    torch.onnx.export(step, (torch.rand(1, 1, F_BINS, 1), *step.init_states()), buf,
+                      input_names=step.input_names, output_names=step.output_names,
+                      opset_version=17, dynamo=False)
+    ops = {n.op_type for n in onnx.load_from_string(buf.getvalue()).graph.node}
+    assert not ops & {"Concat", "Slice", "Gather"}, ops

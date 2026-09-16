@@ -1,0 +1,16 @@
+// Neural-ART profiles for N6Net (stedgeai 4.0.1). Same options as ST's
+// N6_scripts/user_neuralart.json "n6-noextmem" (everything in on-chip npuRAM),
+// plus --enable-epoch-controller so an all-HW graph runs as ONE NPU blob.
+// memory_pool is machine-local, like config.mk.
+{
+  "Profiles": {
+    "n6-noextmem": {
+      "memory_pool": "/home/claroche/stedgeai/install/4.0/scripts/N6_scripts/my_mpools/stm32n6__noextmem.mpool",
+      "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os"
+    },
+    "n6-noextmem-ec": {
+      "memory_pool": "/home/claroche/stedgeai/install/4.0/scripts/N6_scripts/my_mpools/stm32n6__noextmem.mpool",
+      "options": "--optimization 3 --all-buffers-info --cache-maintenance --Oauto-sched --native-float --enable-virtual-mem-pools --Omax-ca-pipe 4 --Ocache-opt --Os --enable-epoch-controller"
+    }
+  }
+}
