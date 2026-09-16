@@ -113,12 +113,14 @@ scaled together at the original 1.5 ratio, each within ~1% of its pair):
 
 | params | block-diagonal | dense | Monarch | dense−monarch |
 | -----: | -------------: | ----: | ------: | ------------: |
-| 0.88 M |              — | 2.783 | **2.852** | −0.069 |
+| 0.88 M |              — | 2.806† | **2.852** | −0.046 |
 | 0.55 M |          2.826 | 2.840 | **2.861** | −0.021 |
 | 0.44 M |              — | 2.815 | **2.849** | −0.034 |
 | 0.23 M |          2.719 | 2.784 | **2.849** | −0.065 |
 | 0.12 M |              — | 2.751 | **2.837** | −0.086 |
 | 0.08 M |          2.608 | 2.749 |         — |      — |
+
+† `dense_h216` was originally published from a single seed-1234 run at 2.783, the worst of three. Repeat seeds (`dense_h216_s2345`, `dense_h216_s3456`, both in this repo) score 2.814 and 2.821, giving 2.806 ± 0.017 (n=3); the pairing's gap falls from −0.069 to −0.046. Note `h216`'s seed sd is 2.4× that of the other dense arms, and it reaches the same training loss as the smaller `h168` while scoring worse — consistent with `lr=0.003` being too hot for the widest dense arm.
 
 **Monarch beats dense at all five matched sizes** (mean −0.055), and the gap
 widens as models shrink. The small-end ordering is **Monarch > dense >

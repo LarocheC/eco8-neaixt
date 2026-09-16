@@ -160,16 +160,30 @@ its structured counterpart, identical recipe.
 
 | params | block-diagonal | dense (matched) | Monarch | dense−monarch |
 | -----: | -------------: | --------------: | ------: | ------------: |
-| 0.88 M |              — | 2.783 (`h216`)  | **2.852** (`monarch_5`)  | −0.069 |
+| 0.88 M |              — | 2.806 (`h216`)† | **2.852** (`monarch_5`)  | −0.046 |
 | 0.55 M | 2.826 (`bd_5`) | 2.840 (`h168`)  | **2.861** (`monarch_8`)  | −0.021 |
 | 0.44 M |              — | 2.815 (`h148`)  | **2.849** (`monarch_10`) | −0.034 |
 | 0.23 M | 2.719 (`bd_20`)| 2.784 (`h100`)  | **2.849** (`monarch_20`) | −0.065 |
 | 0.12 M |              — | 2.751 (`h68`)   | **2.837** (`monarch_40`) | −0.086 |
 | 0.08 M | 2.608 (`bd_40`)| 2.749 (`h52`)   |                        — |      — |
 
+† **Corrected 2026-09-16.** `h216` was originally published from its single
+seed-1234 run at 2.783, which turned out to be the worst of three: repeat seeds
+score 2.814 and 2.821, giving **2.806 ± 0.017 (n=3)**. The table now carries that
+mean, and the pairing's gap falls from −0.069 to **−0.046**. Every other row is
+still a single seed-1234 run.
+
 **Monarch beats dense at every matched size** — five pairings, all the same
-direction, mean −0.055 — and the gap *widens* as the models shrink (−0.021 at
+direction, mean −0.050 — and the gap *widens* as the models shrink (−0.021 at
 0.55 M to −0.086 at 0.12 M). The structure is doing real work, not riding slack.
+
+Two caveats the `h216` re-run exposes, both of which bear on the 0.88 M row more
+than the rest. Its seed sd is **0.017**, 2.4× the 0.007 measured at `h168`, so it
+is the least settled point on the dense curve. And `h216` reaches the *same*
+training loss as `h168` (0.0624 vs 0.0630) while scoring worse and varying more —
+the signature of a learning rate too hot for the widest dense arm, since the
+sweep held `lr=0.003` fixed across a 36× parameter range. The dense end of this
+curve would benefit from an LR check before any of it is leaned on hard.
 
 **The ordering at the small end is Monarch > dense > block-diagonal.** That kills
 the simplest sceptical reading of the block-count collapse: `blockdiag_40` does
@@ -198,11 +212,13 @@ below the effects. Two consequences:
 
 - **The single-seed numbers were sound.** Every original seed-1234 result falls
   inside its arm's spread, and `monarch_40` reproduced at 2.837 on a second seed.
-- **Dense's non-monotonicity is real, not noise.** Across 0.88 → 0.12 M dense
-  scatters in a 0.089 band with no trend (2.783, 2.840, 2.815, 2.784, 2.751) —
-  the 0.55 M arm beats the 0.88 M one — while its per-seed sd is only
-  0.002–0.008. So that scatter is a genuine property of how dense NSNet2 trains
-  at these widths, not unlucky draws. Monarch holds a 0.024 band over the same
+- **Dense's non-monotonicity is real, but smaller than first reported.** Across
+  0.88 → 0.12 M dense scatters in a 0.082 band with no trend (2.806, 2.840,
+  2.815, 2.784, 2.751) — the 0.55 M arm still beats the 0.88 M one, now by 0.027
+  rather than 0.057. Per-seed sd is 0.002–0.008 everywhere except `h216`, which
+  re-measured at 0.017. So the scatter is a genuine property of how dense NSNet2
+  trains at these widths rather than unlucky draws, but the single most striking
+  instance of it was partly one unlucky draw. Monarch holds a 0.024 band over the same
   range. Whether the block structure is actively stabilising optimisation is
   still open, but "it was just noise" is now ruled out.
 
