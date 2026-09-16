@@ -54,7 +54,14 @@ def _to_dev(t, device):
     return t.to(device, non_blocking=True)
 
 
-def train(a, h):
+def train(a, h, model_builder=build_causal_model):
+    """``model_builder`` lets another architecture reuse this trainer unchanged.
+
+    Nothing here is ConvFSENet-specific: it needs a module exposing
+    ``train_step`` / ``valid_step`` and a PESQ validation, which is the
+    TrainValidTest_TimeDomain contract. n6net/train.py passes its own builder
+    rather than duplicating 380 lines of metric-GAN and checkpoint plumbing.
+    """
     torch.manual_seed(h.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(h.seed)
@@ -62,7 +69,7 @@ def train(a, h):
     else:
         device = torch.device("cpu")
 
-    model = build_causal_model(h).to(device)
+    model = model_builder(h).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(model)
     print(f"Total Parameters: {n_params / 1e6:.3f}M")
