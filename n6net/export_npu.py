@@ -14,6 +14,10 @@ Where the FIFO lives is the ``--layout`` (see ``N6NetStreamStep``):
     time_c                inputs/outputs fifo_i (1, (k_t-1)*C, F, 1); channel
                           Slice goes HW, the Concat still does not
 
+A config with ``"arch": "v2"`` exports N6Net-v2 (model_v2.py) instead: its
+own split graph, 256-row input, a 2x128 half-resolution mask, and per block
+only the two dilated past columns its kernel reads.
+
 Pipeline: fp32 export -> ORT parity (streaming vs offline) -> static QDQ int8
 (signed activations, per-channel weights, the Neural-ART recipe) calibrated on
 VoiceBank-DEMAND frames with the *propagated* FIFO state -> NPU post-pass
@@ -34,8 +38,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from n6net.model import N6Net, build_causal_model, compress_magnitude, cost_summary
+from n6net.model_v2 import build_causal_model as build_v2
+from n6net.model_v2 import cost_summary as cost_summary_v2
 
 
 class N6NetStreamStep(nn.Module):
@@ -116,6 +123,21 @@ class N6NetStreamStep(nn.Module):
             return [torch.zeros(n, b.fifo_frames * C, F_, 1) for b in self.m.blocks]
         return [torch.zeros(n, C, F_, b.fifo_frames) for b in self.m.blocks]
 
+    @property
+    def feat_rows(self):
+        return self.m.n_features
+
+    def graph_inputs(self, states):
+        """The state tensors the graph takes, in ``input_names[1:]`` order."""
+        return list(states)
+
+    def offline_mask(self, feat):
+        """Offline (left-padded) mask the streaming graph must reproduce."""
+        x = self.m.stem(feat)
+        for b in self.m.blocks:
+            x = b(x)
+        return torch.sigmoid(self.m.head(x))
+
     def advance(self, states, outs):
         """Next call's state from this call's state and non-mask outputs."""
         if self.layout != "time_split":
@@ -153,9 +175,92 @@ class N6NetStreamStep(nn.Module):
         return (mask, *extra)
 
 
+class N6NetV2StreamStep(nn.Module):
+    """Deploy graph for N6Net-v2 — the ``time_split`` idea with dilated taps.
+
+    Inputs: ``feat (1, 1, 256, 1)`` and, per block, the two past columns its
+    kernel reads, ``fifo_i_0`` (t - 2d) and ``fifo_i_1`` (t - d), each
+    ``(1, C, 128, 1)``. Outputs: the half-resolution ``mask (1, 2, 128, 1)``
+    (the host interleaves it) and ``col_i``, the block's input column, which the
+    host pushes into a ring of ``2d`` columns. The state handled here is that
+    full ring; ``graph_inputs`` picks the slots the graph reads.
+    """
+
+    LAYOUTS = ("time_split",)
+
+    def __init__(self, model, layout: str = "time_split"):
+        super().__init__()
+        if layout != "time_split":
+            raise ValueError("N6Net-v2 only has the time_split deploy layout")
+        self.m = model
+        self.layout = layout
+        C, k_f = model.channels, model.k_f
+        self.taps = nn.ModuleList()
+        for b in model.blocks:
+            w = b.conv_t.weight                                 # (C, C, k_f, 3)
+            convs = nn.ModuleList()
+            for tap in range(b.TAPS):
+                last = tap == b.TAPS - 1                        # bias rides on the current frame
+                c = nn.Conv2d(C, C, (k_f, 1), padding=(k_f // 2, 0), bias=last)
+                c.weight.data = w[..., tap:tap + 1].clone()
+                if last:
+                    c.bias.data = b.conv_t.bias.data.clone()
+                convs.append(c)
+            self.taps.append(convs)
+
+    @property
+    def feat_rows(self):
+        return self.m.rows_in
+
+    @property
+    def input_names(self):
+        return ["feat"] + [f"fifo_{i}_{j}_in" for i, b in enumerate(self.m.blocks)
+                           for j in range(b.TAPS - 1)]
+
+    @property
+    def output_names(self):
+        return ["mask"] + [f"col_{i}_out" for i in range(len(self.m.blocks))]
+
+    def init_states(self, n=1):
+        return [[torch.zeros(n, self.m.channels, self.m.rows, 1) for _ in range(b.history)]
+                for b in self.m.blocks]
+
+    def graph_inputs(self, rings):
+        out = []
+        for b, ring in zip(self.m.blocks, rings):               # ring[k] is offset history-k
+            out += [ring[b.history - off] for off in b.offsets[:-1]]
+        return out
+
+    def advance(self, rings, outs):
+        return [ring[1:] + [col] for ring, col in zip(rings, outs)]
+
+    def offline_mask(self, feat):
+        return self.m.mask_half(feat)
+
+    def forward(self, feat, *cols):
+        x = self.m.stem(feat)                                   # (1, C, 128, 1)
+        extra = []
+        k = 0
+        for blk, convs in zip(self.m.blocks, self.taps):
+            past = cols[k:k + blk.TAPS - 1]
+            k += blk.TAPS - 1
+            extra.append(x)
+            y = convs[-1](x)
+            for conv, col in zip(convs[:-1], past):
+                y = y + conv(col)
+            y = F.relu(y)
+            y = F.relu(blk.conv_f(y))
+            x = x + y
+        return (torch.sigmoid(self.m.head(x)), *extra)
+
+
+def is_v2(h):
+    return h.get("arch") == "v2"
+
+
 def load_model(h, checkpoint=None, seed=0):
     torch.manual_seed(seed)
-    model = build_causal_model(h).eval()
+    model = (build_v2(h) if is_v2(h) else build_causal_model(h)).eval()
     if checkpoint:
         ck = torch.load(str(checkpoint), map_location="cpu", weights_only=True)
         model.load_state_dict(ck.get("generator", ck), strict=True)
@@ -163,9 +268,8 @@ def load_model(h, checkpoint=None, seed=0):
 
 
 def export_fp32(step: N6NetStreamStep, path: Path, opset: int = 17) -> Path:
-    m = step.m
-    feat = torch.randn(1, 1, m.n_features, 1).abs()
-    states = step.init_states()
+    feat = torch.randn(1, 1, step.feat_rows, 1).abs()
+    states = step.graph_inputs(step.init_states())
     in_names, out_names = step.input_names, step.output_names
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(step, (feat, *states), str(path),
@@ -201,9 +305,10 @@ def stream_feeds(step, feats, max_frames=400):
             for t in range(f.shape[-1]):
                 ft = f[..., t:t + 1]
                 d = {"feat": ft.numpy()}
-                d.update({n: s.numpy() for n, s in zip(names, states)})
+                ins = step.graph_inputs(states)
+                d.update({n: s.numpy() for n, s in zip(names, ins)})
                 items.append(d)
-                states = step.advance(states, step(ft, *states)[1:])
+                states = step.advance(states, step(ft, *ins)[1:])
                 if len(items) >= max_frames:
                     return items
     return items
@@ -214,17 +319,14 @@ def parity(step, onnx_path, feat):
     import onnxruntime as ort
 
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    m = step.m
     with torch.no_grad():
-        x = m.stem(feat)
-        for b in m.blocks:
-            x = b(x)
-        ref = torch.sigmoid(m.head(x)).numpy()
-    states = [s.numpy() for s in step.init_states()]
+        ref = step.offline_mask(feat).numpy()
+    states = step.init_states()
     names = step.input_names[1:]
     got = []
     for t in range(feat.shape[-1]):
-        outs = sess.run(None, {"feat": feat[..., t:t + 1].numpy(), **dict(zip(names, states))})
+        ins = [np.asarray(s) for s in step.graph_inputs(states)]
+        outs = sess.run(None, {"feat": feat[..., t:t + 1].numpy(), **dict(zip(names, ins))})
         got.append(outs[0])
         states = step.advance(states, outs[1:])
     got = np.concatenate(got, axis=-1)
@@ -396,7 +498,8 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--channels", type=int, default=None)
     ap.add_argument("--n_blocks", type=int, default=None)
-    ap.add_argument("--layout", choices=list(N6NetStreamStep.LAYOUTS), default="time_split")
+    ap.add_argument("--layout", choices=list(N6NetStreamStep.LAYOUTS), default="time_split",
+                    help="v1 only; v2 (config arch=v2) always uses its time_split graph")
     ap.add_argument("--calib_utts", type=int, default=4)
     ap.add_argument("--calib_frames", type=int, default=400)
     a = ap.parse_args()
@@ -410,11 +513,14 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     model = load_model(h, a.checkpoint)
-    step = N6NetStreamStep(model, a.layout).eval()
-    print("cost:", cost_summary(model))
+    if is_v2(h):
+        step, cost = N6NetV2StreamStep(model).eval(), cost_summary_v2(model)
+    else:
+        step, cost = N6NetStreamStep(model, a.layout).eval(), cost_summary(model)
+    print("cost:", cost)
 
     fp32 = export_fp32(step, out / "n6net_stream_fp32.onnx")
-    feats = speech_frames(h, a.calib_utts)
+    feats = [f[:, :, :step.feat_rows] for f in speech_frames(h, a.calib_utts)]
     err, _, _ = parity(step, fp32, feats[0][..., :40])
     print(f"fp32 streaming-vs-offline max|diff| = {err:.3e}")
 
@@ -424,7 +530,7 @@ def main():
     err_q, got, ref = parity(step, q, feats[0][..., :40])
     cos = float((got * ref).sum() / (np.linalg.norm(got) * np.linalg.norm(ref)))
     print(f"int8 streaming mask vs fp32 offline: max|diff|={err_q:.3e} cos={cos:.4f}")
-    json.dump({"config": h, "checkpoint": a.checkpoint, "layout": a.layout, "cost": cost_summary(model),
+    json.dump({"config": h, "checkpoint": a.checkpoint, "layout": step.layout, "cost": cost,
                "fp32_parity_maxabs": err, "int8_mask_cos": cos, "int8_mask_maxabs": err_q},
               open(out / "export_report.json", "w"), indent=1)
 

@@ -13,7 +13,7 @@ import json
 
 from common.env import AttrDict, build_env
 from convfsenet.train import train
-from n6net.model import build_causal_model, cost_summary
+from n6net import model as v1, model_v2 as v2
 
 
 def main():
@@ -36,14 +36,16 @@ def main():
     build_env(a.config, "config.json", a.checkpoint_path)
 
     # The architecture's whole claim is about cost shape, so state it up front.
-    c = cost_summary(build_causal_model(h))
+    # config "arch": "v2" selects N6Net-v2 (model_v2.py); anything else is v1
+    arch = v2 if h.get("arch") == "v2" else v1
+    c = arch.cost_summary(arch.build_causal_model(h))
     print(f"N6Net: params={c['params']:,}  MAC/frame={c['macs_per_frame']:,}  "
           f"int8 weights={c['weight_bytes_int8']/1024:.0f} KiB  "
           f"arithmetic intensity={c['arithmetic_intensity']:.0f} MAC/B  "
           f"receptive field={c['receptive_field_frames']} frames  "
           f"FIFO state={c['fifo_bytes_int8']/1024:.0f} KiB")
 
-    train(a, h, model_builder=build_causal_model)
+    train(a, h, model_builder=arch.build_causal_model)
 
 
 if __name__ == "__main__":

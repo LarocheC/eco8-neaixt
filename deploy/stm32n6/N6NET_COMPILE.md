@@ -81,3 +81,62 @@ What the estimates say:
 2. On-board: n6_loader + `stedgeai validate --mode target` and `npu_profiler.py`,
    to check these estimates against measured cycles/MAC and wall time,
    including the host ring-buffer cost.
+
+## N6Net-v2: reshaped around those estimates (`n6net/model_v2.py`, `configs/n6net_v2.json`)
+
+Single-conv probes (one conv + ReLU, int8, `n6-noextmem`) gave these per-op costs:
+
+| conv shape | MAC per compute cycle | MAC per real cycle (incl. memory waits) |
+|---|---|---|
+| 1×1, any width (96–576 in, 24–192 out) | 96 (cap) | 27–36 |
+| 3×1 / 5×1 / 7×1 along frequency | 108–129 | 54–85 |
+| 1×3 or 3×3 (kernel along time) | 48 | 34–42 |
+
+Also, from v1: the elementwise-only stages were 40 % of the cycles and 0.5 % of
+the ops. PReLU → ReLU alone takes v1 from 1.44 to 1.12 ms.
+
+v2 applies those rules:
+- 256 bins (Nyquist copied on the host), with a strided 4×1 stem to 128 rows.
+- 4 blocks, each a dilated causal (5 × 3-tap) time-frequency conv, then a 5×1 spectral conv, then a skip. Dilations are 1/2/4/8, for a 31-frame receptive field.
+- ReLU only.
+- The head outputs 2 channels × 128 rows; the host interleaves them into the mask.
+
+In the deploy graph, each temporal kernel becomes three 5×1 convs, one per
+past column. The host keeps a ring of 2·d columns per block and passes only
+the two columns each kernel reads: 8 columns in total, against v1's 15.
+`tests/test_n6net_v2.py` checks causality, the 31-frame receptive field and
+streaming parity, and that the deploy graph has no Concat, Slice or PRelu and
+no conv kernel along time.
+
+| model | MAC/frame | weights | acts | stages (EC blobs) | ops/max-cycle | U_MAC | est. NPU ms |
+|---|---|---|---|---|---|---|---|
+| v1 split, PReLU, C96 | 64.7 M | 243 kB | 651 kB | 42 (1) | 90 | 15.6 % | 1.44 |
+| v1 split, ReLU, C96 | 64.6 M | 243 kB | 675 kB | 30 (1) | 115 | 20.0 % | 1.12 |
+| **v2 C80 (MAC-matched)** | 65.8 M | 501 kB | 170 kB | 23 (1) | 184 | 31.9 % | **0.72** |
+| **v2 C96** | 94.7 M | 721 kB | 192 kB | 23 (1) | **233** | **40.5 %** | 0.81 |
+| v2 C128 | 168.2 M | 1.25 MB | 256 kB | 23 (1) | 196 | 34.1 % | 1.71 |
+| v2 C192 | 377.7 M | 2.83 MB | – | does not fit on-chip (553 kB left unplaced) | | | |
+| v2 C192 on octoFlash | 377.7 M | 2.83 MB | 384 kB | 23 (0) | 42 | 7.4 % | 17.8 (misses the 16 ms hop) |
+
+All v2 points are 0 SW / 0 hybrid. The strided stem maps to HW. max_cycles ≈
+compute_cycles, so v2 no longer stalls on memory. The int8 mask matches fp32
+with cosine ≥ 0.9999.
+
+What it shows:
+* **At equal MACs, v2 needs half the NPU time of v1** (0.72 vs 1.44 ms), or
+  36 % less than v1 with ReLU.
+* **96 is a good width for tall kernels after all.** A 5×1 96→96 conv runs at
+  256 ops/cycle (128 MAC, 44 % of the ceiling); at C80 it's 200. C128 reaches 256
+  on most convs but drops to 160 on two of them, with npuRAM3–6 all ≥ 75 % full.
+* **On-chip memory sets the size limit.** The four npuRAMs hold about 1.4 MB
+  of weights (C ≈ 128). Beyond that, weights go to flash and the model is
+  memory-bound again (C192: 7 % U_MAC, 17.8 ms).
+* **Trade-off:** v2 has 2–3× more parameters than v1 (513 k at C80, against
+  250 k), because each block is a 5 × 3-tap kernel. v1's "10× fewer parameters"
+  claim is given up for NPU time.
+* Each EC blob carries a small controller epoch (51–82 k cycles, reported at a
+  multi-watt level). The report excludes it as an estimator artefact.
+
+Not done yet (host/firmware side): zero-copy ring (`--no-inputs-allocation`
+and pointer rotation), an 8 ms hop, a complex mask, and on-board validation of
+all of the above.
