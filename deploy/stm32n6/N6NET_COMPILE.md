@@ -186,3 +186,55 @@ What it shows:
 * An all-zero positional embedding gets folded away by the toolchain, so it
   now starts from small random values; the "zero-init" rows above were
   compiled before that change.
+
+## v1 trained: the mapping worked, the model did not
+
+Both v1 arms trained to 200 epochs on VoiceBank-DEMAND, same recipe as every
+other model in this repo (time-domain DynCompMSE + PESQ metric-GAN, cosine LR,
+seed 1234). Both plateaued by epoch 30 and moved less than 0.03 over the
+remaining 170 epochs, so these are the architecture's ceiling, not undertraining.
+
+| model | MAC/frame | FP32 PESQ |
+| --- | ---: | ---: |
+| `n6net_b3` (3 blocks, C96) | 64,048,512 | **2.657** |
+| `n6net_b1` (1 block, C96) | 21,415,296 | 2.363 |
+| ConvFSENet `sq_dense_C30` | 32,370 | **2.726** |
+| NSNet2 `monarch_40` | 109,960 | 2.837 |
+| ConvFSENet dense | 1,436,160 | 2.877 |
+
+`n6net_b3` spends **1,978x more MACs than ConvFSENet's smallest square arm and
+scores 0.069 lower**. The NPU mapping result stands — one on-chip blob, zero
+software epochs, 1.44 ms/frame — but the model is not competitive on quality.
+
+**The cause is structural and measured.** Perturbing input bin 128 changes only
+bins 124-132: **9 of 257 output bins, 3.5% of the spectrum**. Every layer in v1
+is either 1 x k_t (no frequency extent at all) or 3 x 1 (+-1 bin), so after a
+stem and three blocks the frequency receptive field is +-4 bins. The model cannot
+relate a harmonic at 1 kHz to one at 3 kHz.
+
+That is not a bug but the direct cost of the design's central move. NSNet2's
+`fc_in` maps all 257 bins to 400 channels and ConvFSENet's frontend maps
+257->192; both do their global spectral reasoning in one dense matrix, and that
+matrix is exactly the one running at arithmetic intensity 1. Making frequency a
+convolutional axis is what bought 256 MAC/byte of reuse, and it is the same act
+that removed the global mixing. The reuse and the reach come from the same
+weights; v1 traded one for the other without noticing.
+
+v2's wider spectral kernels and strided stem raise this to 72 of 256 bins, and
+the full-band branch to 256 of 256 for under 1% of the MACs -- see above. Whether
+reach was the binding constraint is what `n6net_v2_c96` (reach 72) against
+`n6net_v2_fullband` (reach 256) at matched width is being trained to answer.
+
+### What did not map, and was plausible
+
+Three routes to frequency reach were tried before the reduce-and-broadcast one
+that worked. Recording them because "does not map" is as reusable as "does":
+
+- **frequency-dilated convolutions** — same kernel shape, same MACs, ~30x the
+  reach on paper, and physically apt since a dilated frequency kernel is a comb
+  over a harmonic series. Compiles to SW `Conv` on the Cortex-M55.
+- **upsampling from a frequency pyramid** — `Resize`, `ConvTranspose` and an
+  H-only pixel shuffle all go partly hybrid.
+- **a full-band dense stem** (bins as channels, one 1x1) — global mixing for ~5%
+  of the budget, but needs a channel/row reshape, which is the op class that kept
+  falling back to the M55 in v1.
