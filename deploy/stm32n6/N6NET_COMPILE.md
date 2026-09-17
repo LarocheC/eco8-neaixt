@@ -341,3 +341,22 @@ graph compiles to one EC blob with no sub-convs (832 kB weights, estimate
 0.93 ms), against 8 sub-convs without it. If the board confirms the rewritten
 kernel as the cause, the trained full-band model deploys as-is and
 `pool_native` is only needed for new runs.
+
+**Board result (2026-09-17, `validate --mode target`, n6-noextmem-ec, seeded
+weights): the split kernel is the cause; the broadcast Add is fine.**
+
+| probe / model | outcome | ms/frame | on-target cos vs host |
+|---|---|---|---|
+| `control` | runs | 0.100 | 1.000000 |
+| `gap_only` | runs | 0.105 | 0.999999 |
+| `gap` (broadcast Add) | runs | 0.109 | 1.000000 |
+| `pool_native` | runs | 0.193 | 0.999999 |
+| `v2_fullband`, exported with the default rewrite | **runs** | **1.314** | 0.999985 |
+| `v2_fullband_native` | runs | 1.257 | 0.999978 |
+| `fullh_only` (the split 8×1 conv, no broadcast) | **hangs** (read timeout) | – | – |
+
+The trained `pool` checkpoint therefore deploys with the export-time rewrite and
+no retraining. The general rule for this compiler version: keep every vertical
+kernel at a height it compiles whole (≤ 5 here, or strided); a full-height
+kernel it splits into masked sub-convs hangs the NPU even though generation
+succeeds.
