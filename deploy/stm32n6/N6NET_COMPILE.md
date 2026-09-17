@@ -238,3 +238,48 @@ that worked. Recording them because "does not map" is as reusable as "does":
 - **a full-band dense stem** (bins as channels, one 1x1) — global mixing for ~5%
   of the budget, but needs a channel/row reshape, which is the op class that kept
   falling back to the M55 in v1.
+
+## MP-SENet ingredients as config switches (compile check)
+
+Four MP-SENet ingredients are now config options on v2 (see `model_v2.py`),
+each verified through the compiler on top of `configs/n6net_v2_fullband.json`:
+
+- `mask_act: lsigmoid` — the learnable sigmoid, β·σ(a_f·x) with one learned
+  slope per bin and β = 2, so the mask can exceed 1.
+- `input_features: mag_gd_ifd` — LiSenNet's group delay and IF-difference as
+  two extra input channels, computed on the host from the STFT it already has.
+- `phase_head: true` — a second head emits (cos, sin) of a per-bin phase
+  correction; the host normalises it and rotates the noisy STFT, so there is
+  no `atan2` on the device. Needs `objective: mpsenet` for the phase loss.
+- `objective: mpsenet` — the shared loss from `common/losses.py` (magnitude,
+  complex, STFT-consistency, time-L1, and the anti-wrapping IP/GD/IAF phase
+  loss when the phase head is on). The MetricGAN term still comes from the
+  trainer via `gan.metric_loss_lambda`.
+
+One config per arm, each a single change against the full-band baseline:
+`configs/n6net_v2_fullband_{nopos,mpsenet,lsig,phain,phase}.json` (`nopos` is
+the attribution arm: the branch without the positional embedding).
+
+All three deploy-affecting arms compile as **one epoch-controller blob, 0 SW /
+0 hybrid epochs**:
+
+| arm | MAC/frame | params | est. NPU ms | 5×1 conv epochs scheduled slow | conv cycles | all other cycles | int8 mask cos | int8 phase err |
+|---|---|---|---|---|---|---|---|---|
+| fullband (control, today's code) | 95.2 M | 816 k | 0.86 | 0 of 16 | 737,280 | 122,230 | 0.9999 | – |
+| + learnable sigmoid (`lsig`) | 95.2 M | 816 k | 1.01 | 9 of 16 | 873,600 | 134,838 | 0.9999 | – |
+| + (mag, GD, IFD) input (`phain`) | 95.3 M | 817 k | 1.01 | 6 of 16 | 825,600 | 184,630 | 1.0000 | – |
+| + phase head (`phase`) | 95.3 M | 817 k | 1.00 | 9 of 16 | 871,680 | 126,326 | 0.9999 | 0.12° |
+
+Reading the table: the ingredients' own epochs are negligible — the learnable
+sigmoid's Mul + Sigmoid is 4.4 k cycles, the second head is a conv epoch of
+the size the mask head already had, and the 3-channel stem shows up as about
++0.06 ms in the small epochs. The bulk of the +0.14 ms comes from *unchanged*
+5×1 conv epochs that the compiler scheduled at 59–63 k cycles instead of 46 k
+after the memory placement shifted: same layer, same ops, a different buffer
+assignment. That is the estimator's noise floor (≈ ±0.15 ms here), and only
+the board can rank differences smaller than it.
+
+The phase head's int8 rotation matches fp32 to 0.12° mean angle error on
+untrained weights; the `phase_unit_weight` term keeps its (cos, sin) output
+near unit modulus so that stays true after training (BASENet's `atan2` phase
+path collapsed under static int8).

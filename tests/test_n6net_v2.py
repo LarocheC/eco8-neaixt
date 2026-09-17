@@ -182,3 +182,139 @@ def test_gap_pools_over_both_axes_in_the_deploy_graph():
         if axes is None:
             axes = consts[n.input[1]]
         assert sorted(axes) == [2, 3], axes
+
+
+# --- MP-SENet ingredients -----------------------------------------------------
+
+
+def test_phase_features_shape_range_and_causality():
+    m = _model(channels=8, input_features="mag_gd_ifd")
+    T = 20
+    x = torch.randn(1, 1, F_BINS, T, dtype=torch.complex64)
+    f = m.features(x)
+    assert f.shape == (1, 3, 256, T)
+    assert f[:, 1:].abs().max() <= 1.0 + 1e-6                   # GD and IFD are / pi
+    with torch.no_grad():                                        # IFD reads only the past
+        base = m(x)
+        y = x.clone()
+        y[..., 10] += 5.0
+        out = m(y)
+    assert (out[..., :10] - base[..., :10]).abs().max().item() == 0.0
+    assert (out[..., 10] - base[..., 10]).abs().max().item() > 0
+
+
+def test_learnable_sigmoid_has_a_slope_per_bin_and_can_exceed_one():
+    m = _model(channels=8, mask_act="lsigmoid", mask_beta=2.0)
+    assert m.mask_slope.shape == (1, 2, 128, 1)
+    with torch.no_grad():
+        m.head.bias.fill_(10.0)                                  # saturate
+        mask = m.mask_half(torch.rand(1, 1, 256, 4))
+    assert 1.5 < mask.max() <= 2.0
+
+
+def test_phase_head_starts_near_identity_and_rotates_by_unit_modulus():
+    h = dict(json.load(open("configs/n6net_v2_fullband_phase.json")), channels=8)
+    torch.manual_seed(0)
+    m = build_causal_model(h).eval()
+    x = torch.randn(1, 1, F_BINS, 6, dtype=torch.complex64)
+    with torch.no_grad():
+        y, pha = m.spectrum(x)
+        rot = m.rotation(pha)
+        mask = m.interleave(m.heads(m.features(x))[0])
+    assert pha.shape == (1, 4, 128, 6)
+    assert torch.allclose(rot.abs(), torch.ones_like(rot.abs()), atol=1e-5)
+    assert rot.angle().abs().mean() < 0.2                        # ~ the noisy phase at init
+    assert torch.allclose(y, x * mask * rot, atol=1e-5)
+
+
+@pytest.mark.parametrize("over", [
+    dict(mask_act="lsigmoid"),
+    dict(input_features="mag_gd_ifd"),
+    dict(objective="mpsenet", phase_head=True),
+    dict(mask_act="lsigmoid", input_features="mag_gd_ifd", objective="mpsenet", phase_head=True),
+])
+def test_mpsenet_ingredients_stream_to_the_offline_heads(over):
+    from n6net.export_npu import N6NetV2StreamStep
+
+    m = _model(channels=16, **over).double()
+    step = N6NetV2StreamStep(m).double().eval()
+    T = 30
+    feat = torch.rand(1, m.in_channels, m.rows_in, T, dtype=torch.float64) * 2 - 1
+    with torch.no_grad():
+        offline = step.offline_heads(feat)
+        assert len(offline) == step.n_head
+        assert len(step.output_names) == step.n_head + len(m.blocks)
+        rings = [[c.double() for c in r] for r in step.init_states()]
+        got = [[] for _ in offline]
+        for t in range(T):
+            outs = step(feat[..., t:t + 1], *step.graph_inputs(rings))
+            for g, o in zip(got, outs[:step.n_head]):
+                g.append(o)
+            rings = step.advance(rings, outs[step.n_head:])
+    for g, r in zip(got, offline):
+        assert torch.allclose(torch.cat(g, dim=-1), r, atol=1e-10)
+
+
+def test_all_ingredients_deploy_graph_follows_the_compiler_rules():
+    from n6net.export_npu import N6NetV2StreamStep
+
+    onnx = pytest.importorskip("onnx")
+    step = N6NetV2StreamStep(_model(channels=8, mask_act="lsigmoid", input_features="mag_gd_ifd",
+                                    objective="mpsenet", phase_head=True)).eval()
+    buf = io.BytesIO()
+    torch.onnx.export(step, (torch.rand(1, 3, step.feat_rows, 1),
+                             *step.graph_inputs(step.init_states())), buf,
+                      input_names=step.input_names, output_names=step.output_names,
+                      opset_version=17, dynamo=False)
+    g = onnx.load_from_string(buf.getvalue()).graph
+    ops = {n.op_type for n in g.node}
+    assert not ops & {"Concat", "Slice", "Gather", "PRelu", "Atan", "Div"}, ops
+    assert [o.name for o in g.output][:2] == ["mask", "pha"]
+
+
+def test_mpsenet_objective_trains_every_head():
+    h = dict(json.load(open("configs/n6net_v2_fullband_phase.json")), channels=8)
+    torch.manual_seed(0)
+    m = build_causal_model(h).train()
+    x_noisy, x_clean = torch.randn(2, 1, 8000), torch.randn(2, 1, 8000)
+    ld = m.train_step(x_noisy, x_clean)
+    for k in ("loss/magnitude", "loss/complex", "loss/consistency", "loss/time",
+              "loss/phase", "loss/phase_unit"):
+        assert k in ld and torch.isfinite(ld[k]), k
+    assert ld["loss/consistency"] > 0                            # live, not identically zero
+    assert "loss/metric" not in ld                               # the trainer adds it
+    ld["loss"].backward()
+    assert m.pha_head.weight.grad.abs().sum() > 0
+    assert m.head.weight.grad.abs().sum() > 0
+    m.eval()
+    x_pred, x_clean_p, _, ld_v = m.valid_step(x_noisy, x_clean)
+    assert x_pred.shape == x_clean_p.shape and torch.isfinite(ld_v["loss"])
+    # mask-only model on the same objective: no phase terms
+    ld2 = build_causal_model(dict(h, phase_head=False)).train_step(x_noisy, x_clean)
+    assert "loss/phase" not in ld2 and "loss/phase_unit" not in ld2
+
+
+def test_phase_head_requires_the_mpsenet_objective():
+    with pytest.raises(ValueError):
+        _model(channels=8, phase_head=True)
+
+
+def test_trainer_gan_step_runs_on_the_mpsenet_objective():
+    """The shared trainer's own metric-GAN step, on the phase-head config."""
+    from common.discriminator import MetricDiscriminator
+    from common.env import AttrDict
+    from convfsenet.train import _gan_step
+
+    h = AttrDict(dict(json.load(open("configs/n6net_v2_fullband_phase.json")), channels=8))
+    torch.manual_seed(0)
+    model = build_causal_model(h).train()
+    disc = MetricDiscriminator()
+    optim = torch.optim.AdamW(model.parameters(), 1e-4)
+    optim_d = torch.optim.AdamW(disc.parameters(), 1e-4)
+    noisy, clean = torch.randn(2, 1, 16000), torch.randn(2, 1, 16000)
+    before = model.pha_head.weight.detach().clone()
+    metrics = _gan_step(model, disc, optim, optim_d, noisy, clean, h,
+                        metric_lambda=0.05, disc_compress=0.3, device="cpu")
+    for k in ("loss", "base_loss", "loss_metric", "loss_disc"):
+        assert k in metrics and metrics[k] == metrics[k]              # finite, not NaN
+    assert not torch.equal(before, model.pha_head.weight)              # the step trained it

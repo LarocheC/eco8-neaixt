@@ -40,7 +40,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from n6net.model import N6Net, build_causal_model, compress_magnitude, cost_summary
+from n6net.model import N6Net, build_causal_model, cost_summary
 from n6net.model_v2 import build_causal_model as build_v2
 from n6net.model_v2 import cost_summary as cost_summary_v2
 
@@ -126,6 +126,16 @@ class N6NetStreamStep(nn.Module):
     @property
     def feat_rows(self):
         return self.m.n_features
+
+    feat_channels = 1
+    n_head = 1                                  # graph outputs before the state columns
+
+    def featurize(self, spec):
+        """Complex STFT (1, 1, F, T) -> the graph's feat input."""
+        return self.m.features(spec.abs())
+
+    def offline_heads(self, feat):
+        return (self.offline_mask(feat),)
 
     def graph_inputs(self, states):
         """The state tensors the graph takes, in ``input_names[1:]`` order."""
@@ -213,13 +223,25 @@ class N6NetV2StreamStep(nn.Module):
         return self.m.rows_in
 
     @property
+    def feat_channels(self):
+        return self.m.in_channels
+
+    @property
+    def n_head(self):
+        return 2 if self.m.phase_head else 1
+
+    def featurize(self, spec):
+        return self.m.features(spec)
+
+    @property
     def input_names(self):
         return ["feat"] + [f"fifo_{i}_{j}_in" for i, b in enumerate(self.m.blocks)
                            for j in range(b.TAPS - 1)]
 
     @property
     def output_names(self):
-        return ["mask"] + [f"col_{i}_out" for i in range(len(self.m.blocks))]
+        heads = ["mask", "pha"] if self.m.phase_head else ["mask"]
+        return heads + [f"col_{i}_out" for i in range(len(self.m.blocks))]
 
     def init_states(self, n=1):
         return [[torch.zeros(n, self.m.channels, self.m.rows, 1) for _ in range(b.history)]
@@ -237,6 +259,9 @@ class N6NetV2StreamStep(nn.Module):
     def offline_mask(self, feat):
         return self.m.mask_half(feat)
 
+    def offline_heads(self, feat):
+        return tuple(h for h in self.m.heads(feat) if h is not None)
+
     def forward(self, feat, *cols):
         x = self.m.embed(self.m.stem(feat))                     # (1, C, rows, 1)
         extra = []
@@ -249,7 +274,8 @@ class N6NetV2StreamStep(nn.Module):
             for conv, col in zip(convs[:-1], past):
                 y = y + conv(col)
             x = blk.mix(x, F.relu(y))
-        return (torch.sigmoid(self.m.head(x)), *extra)
+        heads = tuple(h for h in self.m.apply_heads(x) if h is not None)
+        return (*heads, *extra)
 
 
 def is_v2(h):
@@ -266,7 +292,7 @@ def load_model(h, checkpoint=None, seed=0):
 
 
 def export_fp32(step: N6NetStreamStep, path: Path, opset: int = 17) -> Path:
-    feat = torch.randn(1, 1, step.feat_rows, 1).abs()
+    feat = torch.randn(1, step.feat_channels, step.feat_rows, 1)
     states = step.graph_inputs(step.init_states())
     in_names, out_names = step.input_names, step.output_names
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,11 +302,10 @@ def export_fp32(step: N6NetStreamStep, path: Path, opset: int = 17) -> Path:
     return path
 
 
-def speech_frames(h, n_utts=4, split="train"):
-    """Compressed-magnitude frames (1, 1, F, T) from VoiceBank-DEMAND noisy crops."""
+def speech_frames(step, h, n_utts=4, split="train"):
+    """Network-input frames (1, C_in, F, T) from VoiceBank-DEMAND noisy crops."""
     from common.dataset import Dataset, load_voicebank_demand
 
-    model = build_causal_model(h)
     hf = load_voicebank_demand()
     ds = Dataset(hf[split], h["segment_size"], h["sampling_rate"],
                  split=True, shuffle=True, seed=0)
@@ -288,8 +313,8 @@ def speech_frames(h, n_utts=4, split="train"):
     with torch.no_grad():
         for i in range(n_utts):
             _, noisy = ds[i]
-            spec = model.preproc(noisy.view(1, 1, -1))           # (1, 1, F, T)
-            out.append(compress_magnitude(spec.abs(), float(h.get("compress_factor", 0.3))))
+            spec = step.m.preproc(noisy.view(1, 1, -1))          # (1, 1, F, T) complex
+            out.append(step.featurize(spec))
     return out
 
 
@@ -306,29 +331,49 @@ def stream_feeds(step, feats, max_frames=400):
                 ins = step.graph_inputs(states)
                 d.update({n: s.numpy() for n, s in zip(names, ins)})
                 items.append(d)
-                states = step.advance(states, step(ft, *ins)[1:])
+                states = step.advance(states, step(ft, *ins)[step.n_head:])
                 if len(items) >= max_frames:
                     return items
     return items
 
 
+def _angle_err_deg(a, b):
+    """Mean anti-wrapped angle error between two (N, 2s, R, T) (cos, sin) tensors."""
+    s = a.shape[1] // 2
+    d = np.arctan2(a[:, s:], a[:, :s]) - np.arctan2(b[:, s:], b[:, :s])
+    return float(np.degrees(np.abs(d - np.round(d / (2 * np.pi)) * 2 * np.pi)).mean())
+
+
 def parity(step, onnx_path, feat):
-    """Streaming ONNX over T frames vs the offline left-padded model."""
+    """Streaming ONNX over T frames vs the offline left-padded model, per head.
+
+    Returns ``{head: metrics}`` with ``maxabs`` and ``cos`` for every head and,
+    for the phase head, ``angle_deg`` (mean error of the implied rotation).
+    """
     import onnxruntime as ort
 
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     with torch.no_grad():
-        ref = step.offline_mask(feat).numpy()
+        refs = [r.numpy() for r in step.offline_heads(feat)]
+    names = step.output_names[:step.n_head]
     states = step.init_states()
-    names = step.input_names[1:]
-    got = []
+    got = [[] for _ in refs]
     for t in range(feat.shape[-1]):
         ins = [np.asarray(s) for s in step.graph_inputs(states)]
-        outs = sess.run(None, {"feat": feat[..., t:t + 1].numpy(), **dict(zip(names, ins))})
-        got.append(outs[0])
-        states = step.advance(states, outs[1:])
-    got = np.concatenate(got, axis=-1)
-    return float(np.abs(got - ref).max()), got, ref
+        outs = sess.run(None, {"feat": feat[..., t:t + 1].numpy(),
+                               **dict(zip(step.input_names[1:], ins))})
+        for g, o in zip(got, outs[:step.n_head]):
+            g.append(o)
+        states = step.advance(states, outs[step.n_head:])
+    metrics = {}
+    for name, g, r in zip(names, got, refs):
+        g = np.concatenate(g, axis=-1)
+        m = {"maxabs": float(np.abs(g - r).max()),
+             "cos": float((g * r).sum() / (np.linalg.norm(g) * np.linalg.norm(r) + 1e-12))}
+        if name == "pha":
+            m["angle_deg"] = _angle_err_deg(g, r)
+        metrics[name] = m
+    return metrics
 
 
 class _Reader:
@@ -518,18 +563,23 @@ def main():
     print("cost:", cost)
 
     fp32 = export_fp32(step, out / "n6net_stream_fp32.onnx")
-    feats = [f[:, :, :step.feat_rows] for f in speech_frames(h, a.calib_utts)]
-    err, _, _ = parity(step, fp32, feats[0][..., :40])
+    feats = speech_frames(step, h, a.calib_utts)
+    p32 = parity(step, fp32, feats[0][..., :40])
+    err = max(m["maxabs"] for m in p32.values())
     print(f"fp32 streaming-vs-offline max|diff| = {err:.3e}")
 
     items = stream_feeds(step, feats, a.calib_frames)
     q = quantize(fp32, out / "n6net_stream_int8_ort.onnx", items)
     q = npu_postpass(q, out / "n6net_stream_int8.onnx")
-    err_q, got, ref = parity(step, q, feats[0][..., :40])
-    cos = float((got * ref).sum() / (np.linalg.norm(got) * np.linalg.norm(ref)))
-    print(f"int8 streaming mask vs fp32 offline: max|diff|={err_q:.3e} cos={cos:.4f}")
+    p8 = parity(step, q, feats[0][..., :40])
+    for name, m in p8.items():
+        extra = f" angle_err={m['angle_deg']:.2f} deg" if "angle_deg" in m else ""
+        print(f"int8 streaming {name} vs fp32 offline: max|diff|={m['maxabs']:.3e} "
+              f"cos={m['cos']:.4f}{extra}")
     json.dump({"config": h, "checkpoint": a.checkpoint, "layout": step.layout, "cost": cost,
-               "fp32_parity_maxabs": err, "int8_mask_cos": cos, "int8_mask_maxabs": err_q},
+               "fp32_parity_maxabs": err, "int8_mask_cos": p8["mask"]["cos"],
+               "int8_mask_maxabs": p8["mask"]["maxabs"],
+               "int8_phase_angle_err_deg": p8.get("pha", {}).get("angle_deg")},
               open(out / "export_report.json", "w"), indent=1)
 
 
