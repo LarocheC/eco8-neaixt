@@ -360,3 +360,6 @@ no retraining. The general rule for this compiler version: keep every vertical
 kernel at a height it compiles whole (≤ 5 here, or strided); a full-height
 kernel it splits into masked sub-convs hangs the NPU even though generation
 succeeds.
+
+Measured latency and board power for every model on this page, against the
+estimates above, are in [N6NET_POWER.md](N6NET_POWER.md).
