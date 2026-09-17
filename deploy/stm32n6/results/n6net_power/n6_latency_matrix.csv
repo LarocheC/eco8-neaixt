@@ -1,0 +1,12 @@
+cell,model,profile,ms,ms_min,ms_max,ms_std,rtf,cycles,cos_random_input,error
+blockdiag_full__n6-noextmem,blockdiag_full,n6-noextmem,0.674,0.672,0.690,0.005,0.0421,246512,0.999961,
+n6net_b3__n6-noextmem-ec,n6net_b3,n6-noextmem-ec,1.611,1.610,1.612,0.000,0.1007,19220,0.999985,
+n6net_v2_c96__n6-noextmem-ec,n6net_v2_c96,n6-noextmem-ec,1.154,1.153,1.155,0.000,0.0721,12993,0.999986,
+convfsenet__n6-noextmem,convfsenet,n6-noextmem,3.108,3.100,3.125,0.007,0.1943,986959,0.734231,
+n6net_b1__n6-noextmem-ec,n6net_b1,n6-noextmem-ec,0.619,0.619,0.620,0.000,0.0387,6879,0.999998,
+n6net_v2__n6-noextmem-ec,n6net_v2,n6-noextmem-ec,2.597,2.597,2.598,0.000,0.1623,17101,0.999985,
+monarch_20__n6-noextmem,monarch_20,n6-noextmem,0.789,0.786,0.802,0.005,0.0493,315403,0.999574,
+lisennet_stream__n6-noextmem,lisennet_stream,n6-noextmem,2.788,2.781,2.806,0.007,0.1742,775932,0.972183,
+n6net_b3__n6-noextmem,n6net_b3,n6-noextmem,2.447,2.445,2.455,0.003,0.1529,649052,0.999985,
+n6net_v2_fullband_rw__n6-noextmem-ec,n6net_v2_fullband_rw,n6-noextmem-ec,1.314,1.314,1.316,0.000,0.0821,12980,0.999985,
+n6net_v2_fullband_native__n6-noextmem-ec,n6net_v2_fullband_native,n6-noextmem-ec,1.257,1.257,1.258,0.000,0.0786,12990,0.999978,

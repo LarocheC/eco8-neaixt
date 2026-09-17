@@ -1,0 +1,25 @@
+PWR_BEGIN at 1789666868.323; trace covers 1789666853.019..1789667050.969 (198.0s, 19940 samples)
+
+phase           n   mean mW   sd mW
+matched wait: 45083 x 532064 cyc = 30.0s at 800 MHz (665.1 us/inference)
+
+fiducial      200   579.037   9.094
+idle_A       1600   565.367   0.168
+saturated    2600   591.665   0.168
+idle_B       1600   565.251   0.176
+matched_wait   2598   555.671   0.166
+idle_C       1600   564.524   0.157
+realtime     2600   570.847   0.170
+idle_D       1599   564.931   0.166
+
+saturated - bracketed idle : +26.356 mW
+  saturated rate  : 1502.8 inf/s (45083 inferences / 30s -> 0.665 ms/inference)
+  -> 17.54 uJ/frame
+  cross-check: 17.54 uJ x 62.5 fps = 1.096 mW expected at real-time duty
+
+saturated - matched wait   : +35.994 mW   <- the UTIA base
+  -> 23.95 uJ/frame
+matched wait - idle        : -9.638 mW   (spin-vs-HAL_GetTick cost; may be negative)
+realtime  - bracketed idle : +6.119 mW   (product figure, 62.5 fps duty)
+
+Caveats: neither baseline is truly idle -- the idle phases are a HAL_GetTick busy loop while real inference parks the M55 in WFE. Report both bases and quote board static overhead separately.

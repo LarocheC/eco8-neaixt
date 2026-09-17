@@ -1,0 +1,16 @@
+blockdiag_full__n6-noextmem
+n6net_b3__n6-noextmem-ec
+n6net_v2_c96__n6-noextmem-ec
+#n6net_v2_fullband__n6-noextmem-ec   hangs on target (read timeout), see measure/val_*
+convfsenet__n6-noextmem
+n6net_b1__n6-noextmem-ec
+n6net_v2__n6-noextmem-ec
+#n6net_v2_fullband_nopos__n6-noextmem-ec   hangs on target (read timeout), see measure/val_*
+monarch_20__n6-noextmem
+#n6net_v2_fullband_lsig__n6-noextmem-ec   hangs on target (read timeout), see measure/val_*
+#n6net_v2_fullband_phain__n6-noextmem-ec   not run: board already wedged; same fullband branch as the three that hung
+#n6net_v2_fullband_phase__n6-noextmem-ec   not run: board already wedged; same fullband branch as the three that hung
+lisennet_stream__n6-noextmem
+n6net_b3__n6-noextmem
+n6net_v2_fullband_rw__n6-noextmem-ec
+n6net_v2_fullband_native__n6-noextmem-ec

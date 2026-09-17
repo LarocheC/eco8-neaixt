@@ -1,0 +1,92 @@
+1789669286.049 #
+1789669286.049 # AI Validation ATONN/NPU 0.6
+1789669286.049 #
+1789669286.049 Compiled with GCC 14.3.1
+1789669286.049 STM32 device configuration...
+1789669286.049 Device       : DevID:0x0486 (STM32N6) RevID:0x0000
+1789669286.049 Core Arch.   : M55 - FPU  used
+1789669286.049 HAL version  : 0x01030000
+1789669286.049 SYSCLK clock : 800 MHz
+1789669286.551 HCLK clock   : 400 MHz
+1789669286.551 CACHE conf.  : $I/$D=(True,True)
+1789669286.551 Timestamp    : DWT only (delay(1)=1.002 ms)
+1789669286.551 PWR_BEGIN sat_ms=30000 rt_ms=30000 rt_per=16 cyc_per_inf=1005722 us_per_inf=1257
+1789669463.507 PWR_DONE fid=2388 sat=23865 rt=1875 cyc_per_inf=1005722
+1789669463.507 ATONN RT
+1789669463.507 --------------------------------------------------
+1789669463.507 version         : atonn-v1.1.3-275-g6770925d
+1789669463.507 network rt lib  : v12.0.1-92efada9
+1789669463.507 compiled with : GCC 13.3.1
+1789669463.507 C-Model
+1789669463.510 --------------------------------------------------
+1789669463.510 name          : network
+1789669463.510 n_epochs      : 1
+1789669463.510 params        : n.a.
+1789669463.510 activations   : 169 KiB
+1789669463.510 n_inputs      : 9
+1789669463.510 name    : Input_65_out_0
+1789669463.510 addr   : 0x3422a600 (256 bytes)  (8 bits)
+1789669463.513 type   : 7 shape(4)=(1,1,256,1)
+1789669463.513 quant  : scale=0.024539, zp=-128
+1789669463.513 name    : Input_57_out_0
+1789669463.513 addr   : 0x34200000 (12288 bytes)  (8 bits)
+1789669463.513 type   : 7 shape(4)=(1,96,128,1)
+1789669463.513 quant  : scale=0.052883, zp=0
+1789669463.513 name    : Input_49_out_0
+1789669463.516 addr   : 0x34209000 (12288 bytes)  (8 bits)
+1789669463.516 type   : 7 shape(4)=(1,96,128,1)
+1789669463.516 quant  : scale=0.052883, zp=0
+1789669463.516 name    : Input_41_out_0
+1789669463.516 addr   : 0x3420c000 (12288 bytes)  (8 bits)
+1789669463.516 type   : 7 shape(4)=(1,96,128,1)
+1789669463.516 quant  : scale=0.053708, zp=0
+1789669463.516 name    : Input_33_out_0
+1789669463.519 addr   : 0x3420f000 (12288 bytes)  (8 bits)
+1789669463.519 type   : 7 shape(4)=(1,96,128,1)
+1789669463.519 quant  : scale=0.053708, zp=0
+1789669463.519 name    : Input_25_out_0
+1789669463.519 addr   : 0x34215000 (12288 bytes)  (8 bits)
+1789669463.519 type   : 7 shape(4)=(1,96,128,1)
+1789669463.519 quant  : scale=0.054258, zp=-1
+1789669463.522 name    : Input_17_out_0
+1789669463.522 addr   : 0x34212000 (12288 bytes)  (8 bits)
+1789669463.522 type   : 7 shape(4)=(1,96,128,1)
+1789669463.522 quant  : scale=0.054258, zp=-1
+1789669463.522 name    : Input_9_out_0
+1789669463.522 addr   : 0x34203000 (12288 bytes)  (8 bits)
+1789669463.522 type   : 7 shape(4)=(1,96,128,1)
+1789669463.525 quant  : scale=0.054674, zp=-2
+1789669463.525 name    : Input_1_out_0
+1789669463.525 addr   : 0x34206000 (12288 bytes)  (8 bits)
+1789669463.525 type   : 7 shape(4)=(1,96,128,1)
+1789669463.525 quant  : scale=0.054674, zp=-2
+1789669463.525 n_outputs     : 5
+1789669463.525 name    : Quantize_163_out_0
+1789669463.528 addr   : 0x3420c200 (256 bytes)  (8 bits)
+1789669463.528 type   : 7 shape(4)=(1,2,128,1)
+1789669463.528 quant  : scale=0.002611, zp=-128
+1789669463.528 name    : Quantize_73_out_0
+1789669463.528 addr   : 0x34206000 (12288 bytes)  (8 bits)
+1789669463.528 type   : 7 shape(4)=(1,96,128,1)
+1789669463.528 quant  : scale=0.052883, zp=0
+1789669463.528 name    : Quantize_90_out_0
+1789669463.531 addr   : 0x34200000 (12288 bytes)  (8 bits)
+1789669463.531 type   : 7 shape(4)=(1,96,128,1)
+1789669463.531 quant  : scale=0.053708, zp=0
+1789669463.531 name    : Quantize_122_out_0
+1789669463.531 addr   : 0x34203000 (12288 bytes)  (8 bits)
+1789669463.531 type   : 7 shape(4)=(1,96,128,1)
+1789669463.533 quant  : scale=0.054258, zp=-1
+1789669463.533 name    : Quantize_139_out_0
+1789669463.533 addr   : 0x34209000 (12288 bytes)  (8 bits)
+1789669463.533 type   : 7 shape(4)=(1,96,128,1)
+1789669463.533 quant  : scale=0.054674, zp=-2
+1789669463.533 NPU stack initialization (res=0)
+1789669463.533 Model installation 0 MCU cycles (0.000000 ms)
+1789669463.536 Model init         1437 MCU cycles (0.001796 ms)
+1789669463.536 -------------------------------------------
+1789669463.536 | READY to receive a CMD from the HOST... |
+1789669463.536 -------------------------------------------
+1789669463.536 # Note: At this point, default ASCII-base terminal should be closed
+1789669464.039 # and a serial COM interface should be used
+1789669464.039 # (i.e. Python stm32com module). Protocol version = 3.2

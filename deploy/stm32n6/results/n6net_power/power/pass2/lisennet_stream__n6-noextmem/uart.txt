@@ -1,0 +1,180 @@
+1789665309.618 #
+1789665309.618 # AI Validation ATONN/NPU 0.6
+1789665309.618 #
+1789665309.618 Compiled with GCC 14.3.1
+1789665309.618 STM32 device configuration...
+1789665309.618 Device       : DevID:0x0486 (STM32N6) RevID:0x0000
+1789665309.618 Core Arch.   : M55 - FPU  used
+1789665309.618 HAL version  : 0x01030000
+1789665309.618 SYSCLK clock : 800 MHz
+1789665310.120 HCLK clock   : 400 MHz
+1789665310.120 CACHE conf.  : $I/$D=(True,True)
+1789665310.120 Timestamp    : DWT only (delay(1)=1.005 ms)
+1789665310.120 PWR_BEGIN sat_ms=30000 rt_ms=30000 rt_per=16 cyc_per_inf=2158905 us_per_inf=2698
+1789665487.402 PWR_DONE fid=1113 sat=11119 rt=1875 cyc_per_inf=2158905
+1789665487.402 ATONN RT
+1789665487.402 --------------------------------------------------
+1789665487.402 version         : atonn-v1.1.3-275-g6770925d
+1789665487.402 network rt lib  : v12.0.1-92efada9
+1789665487.402 compiled with : GCC 13.3.1
+1789665487.402 C-Model
+1789665487.405 --------------------------------------------------
+1789665487.405 name          : network
+1789665487.405 n_epochs      : 132
+1789665487.405 params        : n.a.
+1789665487.405 activations   : 146 KiB
+1789665487.405 n_inputs      : 18
+1789665487.405 name    : Input_36_out_0
+1789665487.405 addr   : 0x3427de70 (771 bytes)  (8 bits)
+1789665487.408 type   : 7 shape(4)=(1,3,1,257)
+1789665487.408 quant  : scale=0.027422, zp=-92
+1789665487.408 name    : Input_34_out_0
+1789665487.408 addr   : 0x3427e180 (384 bytes)  (8 bits)
+1789665487.408 type   : 7 shape(4)=(1,6,1,64)
+1789665487.408 quant  : scale=0.025733, zp=-128
+1789665487.408 name    : Input_32_out_0
+1789665487.411 addr   : 0x3427d200 (1158 bytes)  (8 bits)
+1789665487.411 type   : 7 shape(4)=(1,6,1,193)
+1789665487.411 quant  : scale=0.011804, zp=-128
+1789665487.411 name    : Input_30_out_0
+1789665487.411 addr   : 0x3427e300 (384 bytes)  (8 bits)
+1789665487.411 type   : 7 shape(4)=(1,12,1,32)
+1789665487.411 quant  : scale=0.022783, zp=-128
+1789665487.411 name    : Input_28_out_0
+1789665487.414 addr   : 0x3427d690 (1152 bytes)  (8 bits)
+1789665487.414 type   : 7 shape(4)=(1,12,1,96)
+1789665487.414 quant  : scale=0.018622, zp=-128
+1789665487.414 name    : Input_26_out_0
+1789665487.414 addr   : 0x3427e480 (288 bytes)  (8 bits)
+1789665487.414 type   : 7 shape(4)=(1,18,1,16)
+1789665487.414 quant  : scale=0.019310, zp=-128
+1789665487.417 name    : Input_24_out_0
+1789665487.417 addr   : 0x3427db10 (864 bytes)  (8 bits)
+1789665487.417 type   : 7 shape(4)=(1,18,1,48)
+1789665487.417 quant  : scale=0.022592, zp=-128
+1789665487.417 name    : Input_22_out_0
+1789665487.417 addr   : 0x3427c000 (1536 bytes)  (8 bits)
+1789665487.417 type   : 7 shape(4)=(1,24,2,32)
+1789665487.420 quant  : scale=0.049370, zp=-69
+1789665487.420 name    : Input_20_out_0
+1789665487.420 addr   : 0x34279000 (3072 bytes)  (8 bits)
+1789665487.420 type   : 7 shape(4)=(1,24,4,32)
+1789665487.420 quant  : scale=0.030090, zp=-128
+1789665487.420 name    : Input_18_out_0
+1789665487.420 addr   : 0x34277800 (6144 bytes)  (8 bits)
+1789665487.423 type   : 7 shape(4)=(1,24,8,32)
+1789665487.423 quant  : scale=0.018726, zp=-128
+1789665487.423 name    : Input_16_out_0
+1789665487.423 addr   : 0x34270000 (12288 bytes)  (8 bits)
+1789665487.423 type   : 7 shape(4)=(1,24,16,32)
+1789665487.423 quant  : scale=0.007284, zp=-128
+1789665487.423 name    : Input_14_out_0
+1789665487.425 addr   : 0x34279c00 (3072 bytes)  (8 bits)
+1789665487.425 type   : 7 shape(4)=(1,48,2,32)
+1789665487.425 quant  : scale=0.052634, zp=0
+1789665487.425 name    : Input_12_out_0
+1789665487.425 addr   : 0x3427c600 (1536 bytes)  (8 bits)
+1789665487.425 type   : 7 shape(4)=(1,24,2,32)
+1789665487.425 quant  : scale=0.044001, zp=-37
+1789665487.428 name    : Input_10_out_0
+1789665487.428 addr   : 0x3427a800 (3072 bytes)  (8 bits)
+1789665487.428 type   : 7 shape(4)=(1,24,4,32)
+1789665487.428 quant  : scale=0.033097, zp=-128
+1789665487.428 name    : Input_8_out_0
+1789665487.428 addr   : 0x34276000 (6144 bytes)  (8 bits)
+1789665487.428 type   : 7 shape(4)=(1,24,8,32)
+1789665487.431 quant  : scale=0.025944, zp=-128
+1789665487.431 name    : Input_6_out_0
+1789665487.431 addr   : 0x34273000 (12288 bytes)  (8 bits)
+1789665487.431 type   : 7 shape(4)=(1,24,16,32)
+1789665487.431 quant  : scale=0.014163, zp=-128
+1789665487.431 name    : Input_4_out_0
+1789665487.431 addr   : 0x3427b400 (3072 bytes)  (8 bits)
+1789665487.434 type   : 7 shape(4)=(1,48,2,32)
+1789665487.434 quant  : scale=0.063392, zp=-15
+1789665487.434 name    : Input_2_out_0
+1789665487.434 addr   : 0x3427cc00 (1536 bytes)  (8 bits)
+1789665487.434 type   : 7 shape(4)=(1,6,1,256)
+1789665487.434 quant  : scale=0.048495, zp=-50
+1789665487.434 n_outputs     : 18
+1789665487.434 name    : Quantize_305_out_0
+1789665487.437 addr   : 0x342927b0 (257 bytes)  (8 bits)
+1789665487.437 type   : 7 shape(3)=(1,1,257)
+1789665487.437 quant  : scale=0.027569, zp=-128
+1789665487.437 name    : Quantize_286_out_0
+1789665487.437 addr   : 0x34294510 (384 bytes)  (8 bits)
+1789665487.437 type   : 7 shape(4)=(1,6,1,64)
+1789665487.437 quant  : scale=0.025733, zp=-128
+1789665487.440 name    : Quantize_50_out_0
+1789665487.440 addr   : 0x342935a0 (1158 bytes)  (8 bits)
+1789665487.440 type   : 7 shape(4)=(1,6,1,193)
+1789665487.440 quant  : scale=0.011804, zp=-128
+1789665487.440 name    : Quantize_284_out_0
+1789665487.440 addr   : 0x34294690 (384 bytes)  (8 bits)
+1789665487.440 type   : 7 shape(4)=(1,12,1,32)
+1789665487.443 quant  : scale=0.022783, zp=-128
+1789665487.443 name    : Quantize_66_out_0
+1789665487.443 addr   : 0x34293a30 (1152 bytes)  (8 bits)
+1789665487.443 type   : 7 shape(4)=(1,12,1,96)
+1789665487.443 quant  : scale=0.018622, zp=-128
+1789665487.443 name    : Quantize_282_out_0
+1789665487.443 addr   : 0x34294810 (288 bytes)  (8 bits)
+1789665487.446 type   : 7 shape(4)=(1,18,1,16)
+1789665487.446 quant  : scale=0.019310, zp=-128
+1789665487.446 name    : Quantize_82_out_0
+1789665487.446 addr   : 0x34293eb0 (864 bytes)  (8 bits)
+1789665487.446 type   : 7 shape(4)=(1,18,1,48)
+1789665487.446 quant  : scale=0.022592, zp=-128
+1789665487.446 name    : Quantize_280_out_0
+1789665487.449 addr   : 0x342929a0 (1536 bytes)  (8 bits)
+1789665487.449 type   : 7 shape(4)=(1,24,2,32)
+1789665487.449 quant  : scale=0.049370, zp=-69
+1789665487.449 name    : Quantize_278_out_0
+1789665487.449 addr   : 0x3428dba0 (3072 bytes)  (8 bits)
+1789665487.449 type   : 7 shape(4)=(1,24,4,32)
+1789665487.449 quant  : scale=0.030090, zp=-128
+1789665487.452 name    : Quantize_276_out_0
+1789665487.452 addr   : 0x34288aa0 (6144 bytes)  (8 bits)
+1789665487.452 type   : 7 shape(4)=(1,24,8,32)
+1789665487.452 quant  : scale=0.018764, zp=-128
+1789665487.452 name    : Quantize_274_out_0
+1789665487.452 addr   : 0x342818a0 (12288 bytes)  (8 bits)
+1789665487.452 type   : 7 shape(4)=(1,24,16,32)
+1789665487.455 quant  : scale=0.007284, zp=-128
+1789665487.455 name    : Quantize_272_out_0
+1789665487.455 addr   : 0x3428e7a0 (3072 bytes)  (8 bits)
+1789665487.455 type   : 7 shape(4)=(1,48,2,32)
+1789665487.455 quant  : scale=0.052634, zp=0
+1789665487.455 name    : Quantize_270_out_0
+1789665487.455 addr   : 0x342920a0 (1536 bytes)  (8 bits)
+1789665487.458 type   : 7 shape(4)=(1,24,2,32)
+1789665487.458 quant  : scale=0.044001, zp=-37
+1789665487.458 name    : Quantize_268_out_0
+1789665487.458 addr   : 0x3428f3a0 (3072 bytes)  (8 bits)
+1789665487.458 type   : 7 shape(4)=(1,24,4,32)
+1789665487.458 quant  : scale=0.033097, zp=-128
+1789665487.458 name    : Quantize_266_out_0
+1789665487.461 addr   : 0x3428a2a0 (6144 bytes)  (8 bits)
+1789665487.461 type   : 7 shape(4)=(1,24,8,32)
+1789665487.461 quant  : scale=0.025944, zp=-128
+1789665487.461 name    : Quantize_264_out_0
+1789665487.461 addr   : 0x34279000 (12288 bytes)  (8 bits)
+1789665487.461 type   : 7 shape(4)=(1,24,16,32)
+1789665487.461 quant  : scale=0.014247, zp=-128
+1789665487.464 name    : Quantize_262_out_0
+1789665487.464 addr   : 0x34286ca0 (3072 bytes)  (8 bits)
+1789665487.464 type   : 7 shape(4)=(1,48,2,32)
+1789665487.464 quant  : scale=0.063392, zp=-15
+1789665487.464 name    : Quantize_260_out_0
+1789665487.464 addr   : 0x342878a0 (1536 bytes)  (8 bits)
+1789665487.464 type   : 7 shape(4)=(1,6,1,256)
+1789665487.467 quant  : scale=0.048495, zp=-50
+1789665487.467 NPU stack initialization (res=0)
+1789665487.467 Model installation 0 MCU cycles (0.000000 ms)
+1789665487.467 Model init         7768 MCU cycles (0.009710 ms)
+1789665487.467 -------------------------------------------
+1789665487.970 | READY to receive a CMD from the HOST... |
+1789665487.970 -------------------------------------------
+1789665487.970 # Note: At this point, default ASCII-base terminal should be closed
+1789665487.970 # and a serial COM interface should be used
+1789665487.970 # (i.e. Python stm32com module). Protocol version = 3.2

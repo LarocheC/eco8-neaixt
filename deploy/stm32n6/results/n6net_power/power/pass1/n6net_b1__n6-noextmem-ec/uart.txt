@@ -1,0 +1,68 @@
+1789651256.153 #
+1789651256.153 # AI Validation ATONN/NPU 0.6
+1789651256.153 #
+1789651256.153 Compiled with GCC 14.3.1
+1789651256.153 STM32 device configuration...
+1789651256.153 Device       : DevID:0x0486 (STM32N6) RevID:0x0000
+1789651256.153 Core Arch.   : M55 - FPU  used
+1789651256.153 HAL version  : 0x01030000
+1789651256.153 SYSCLK clock : 800 MHz
+1789651256.655 HCLK clock   : 400 MHz
+1789651256.655 CACHE conf.  : $I/$D=(True,True)
+1789651256.655 Timestamp    : DWT only (delay(1)=1.002 ms)
+1789651256.655 PWR_BEGIN sat_ms=30000 rt_ms=30000 rt_per=16 cyc_per_inf=495303 us_per_inf=619
+1789651433.735 PWR_DONE fid=4846 sat=48457 rt=1875 cyc_per_inf=495303
+1789651433.735 ATONN RT
+1789651433.735 --------------------------------------------------
+1789651433.735 version         : atonn-v1.1.3-275-g6770925d
+1789651433.735 network rt lib  : v12.0.1-92efada9
+1789651433.735 compiled with : GCC 13.3.1
+1789651433.735 C-Model
+1789651433.738 --------------------------------------------------
+1789651433.738 name          : network
+1789651433.738 n_epochs      : 1
+1789651433.738 params        : n.a.
+1789651433.738 activations   : 289 KiB
+1789651433.738 n_inputs      : 6
+1789651433.738 name    : Input_47_out_0
+1789651433.738 addr   : 0x342b8480 (257 bytes)  (8 bits)
+1789651433.740 type   : 7 shape(4)=(1,1,257,1)
+1789651433.740 quant  : scale=0.024077, zp=-128
+1789651433.741 name    : Input_28_out_0
+1789651433.741 addr   : 0x34282120 (24672 bytes)  (8 bits)
+1789651433.741 type   : 7 shape(4)=(1,96,257,1)
+1789651433.741 quant  : scale=0.045398, zp=0
+1789651433.741 name    : Input_21_out_0
+1789651433.743 addr   : 0x34270000 (24672 bytes)  (8 bits)
+1789651433.743 type   : 7 shape(4)=(1,96,257,1)
+1789651433.743 quant  : scale=0.045398, zp=0
+1789651433.744 name    : Input_14_out_0
+1789651433.744 addr   : 0x34288180 (24672 bytes)  (8 bits)
+1789651433.744 type   : 7 shape(4)=(1,96,257,1)
+1789651433.744 quant  : scale=0.045398, zp=0
+1789651433.744 name    : Input_7_out_0
+1789651433.746 addr   : 0x3427c0c0 (24672 bytes)  (8 bits)
+1789651433.746 type   : 7 shape(4)=(1,96,257,1)
+1789651433.746 quant  : scale=0.045398, zp=0
+1789651433.746 name    : Input_0_out_0
+1789651433.746 addr   : 0x34276060 (24672 bytes)  (8 bits)
+1789651433.746 type   : 7 shape(4)=(1,96,257,1)
+1789651433.746 quant  : scale=0.045398, zp=0
+1789651433.749 n_outputs     : 2
+1789651433.749 name    : Quantize_73_out_0
+1789651433.749 addr   : 0x34276060 (257 bytes)  (8 bits)
+1789651433.749 type   : 7 shape(4)=(1,1,257,1)
+1789651433.749 quant  : scale=0.003672, zp=-128
+1789651433.749 name    : Quantize_52_out_0
+1789651433.749 addr   : 0x34282120 (24672 bytes)  (8 bits)
+1789651433.752 type   : 7 shape(4)=(1,96,257,1)
+1789651433.752 quant  : scale=0.045398, zp=0
+1789651433.752 NPU stack initialization (res=0)
+1789651433.752 Model installation 0 MCU cycles (0.000000 ms)
+1789651433.752 Model init         1437 MCU cycles (0.001796 ms)
+1789651433.752 -------------------------------------------
+1789651434.254 | READY to receive a CMD from the HOST... |
+1789651434.255 -------------------------------------------
+1789651434.255 # Note: At this point, default ASCII-base terminal should be closed
+1789651434.255 # and a serial COM interface should be used
+1789651434.255 # (i.e. Python stm32com module). Protocol version = 3.2

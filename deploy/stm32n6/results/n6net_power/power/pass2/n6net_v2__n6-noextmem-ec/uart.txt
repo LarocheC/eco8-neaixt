@@ -1,0 +1,92 @@
+1789665759.482 #
+1789665759.482 # AI Validation ATONN/NPU 0.6
+1789665759.482 #
+1789665759.482 Compiled with GCC 14.3.1
+1789665759.482 STM32 device configuration...
+1789665759.482 Device       : DevID:0x0486 (STM32N6) RevID:0x0000
+1789665759.482 Core Arch.   : M55 - FPU  used
+1789665759.482 HAL version  : 0x01030000
+1789665759.482 SYSCLK clock : 800 MHz
+1789665759.983 HCLK clock   : 400 MHz
+1789665759.983 CACHE conf.  : $I/$D=(True,True)
+1789665759.983 Timestamp    : DWT only (delay(1)=1.002 ms)
+1789665759.983 PWR_BEGIN sat_ms=30000 rt_ms=30000 rt_per=16 cyc_per_inf=2077738 us_per_inf=2597
+1789665937.224 PWR_DONE fid=1157 sat=11552 rt=1875 cyc_per_inf=2077738
+1789665937.224 ATONN RT
+1789665937.224 --------------------------------------------------
+1789665937.224 version         : atonn-v1.1.3-275-g6770925d
+1789665937.224 network rt lib  : v12.0.1-92efada9
+1789665937.224 compiled with : GCC 13.3.1
+1789665937.224 C-Model
+1789665937.227 --------------------------------------------------
+1789665937.227 name          : network
+1789665937.227 n_epochs      : 1
+1789665937.227 params        : n.a.
+1789665937.227 activations   : 256 KiB
+1789665937.227 n_inputs      : 9
+1789665937.227 name    : Input_64_out_0
+1789665937.227 addr   : 0x343a4000 (256 bytes)  (8 bits)
+1789665937.230 type   : 7 shape(4)=(1,1,256,1)
+1789665937.230 quant  : scale=0.024893, zp=-128
+1789665937.230 name    : Input_56_out_0
+1789665937.230 addr   : 0x34364000 (16384 bytes)  (8 bits)
+1789665937.230 type   : 7 shape(4)=(1,128,128,1)
+1789665937.230 quant  : scale=0.052333, zp=0
+1789665937.230 name    : Input_48_out_0
+1789665937.233 addr   : 0x34370000 (16384 bytes)  (8 bits)
+1789665937.233 type   : 7 shape(4)=(1,128,128,1)
+1789665937.233 quant  : scale=0.052333, zp=0
+1789665937.233 name    : Input_40_out_0
+1789665937.233 addr   : 0x34374000 (16384 bytes)  (8 bits)
+1789665937.233 type   : 7 shape(4)=(1,128,128,1)
+1789665937.233 quant  : scale=0.054288, zp=0
+1789665937.233 name    : Input_32_out_0
+1789665937.235 addr   : 0x34378000 (16384 bytes)  (8 bits)
+1789665937.235 type   : 7 shape(4)=(1,128,128,1)
+1789665937.235 quant  : scale=0.054288, zp=0
+1789665937.235 name    : Input_24_out_0
+1789665937.235 addr   : 0x3437c000 (16384 bytes)  (8 bits)
+1789665937.235 type   : 7 shape(4)=(1,128,128,1)
+1789665937.235 quant  : scale=0.054998, zp=0
+1789665937.238 name    : Input_16_out_0
+1789665937.238 addr   : 0x34380000 (16384 bytes)  (8 bits)
+1789665937.238 type   : 7 shape(4)=(1,128,128,1)
+1789665937.238 quant  : scale=0.054998, zp=0
+1789665937.238 name    : Input_8_out_0
+1789665937.238 addr   : 0x3436c000 (16384 bytes)  (8 bits)
+1789665937.238 type   : 7 shape(4)=(1,128,128,1)
+1789665937.241 quant  : scale=0.057234, zp=-4
+1789665937.241 name    : Input_0_out_0
+1789665937.241 addr   : 0x34368000 (16384 bytes)  (8 bits)
+1789665937.241 type   : 7 shape(4)=(1,128,128,1)
+1789665937.241 quant  : scale=0.057234, zp=-4
+1789665937.241 n_outputs     : 5
+1789665937.241 name    : Quantize_144_out_0
+1789665937.244 addr   : 0x343a4000 (256 bytes)  (8 bits)
+1789665937.244 type   : 7 shape(4)=(1,2,128,1)
+1789665937.244 quant  : scale=0.003466, zp=-128
+1789665937.244 name    : Quantize_69_out_0
+1789665937.244 addr   : 0x3436c000 (16384 bytes)  (8 bits)
+1789665937.244 type   : 7 shape(4)=(1,128,128,1)
+1789665937.244 quant  : scale=0.052333, zp=0
+1789665937.247 name    : Quantize_86_out_0
+1789665937.247 addr   : 0x34364000 (16384 bytes)  (8 bits)
+1789665937.247 type   : 7 shape(4)=(1,128,128,1)
+1789665937.247 quant  : scale=0.054288, zp=0
+1789665937.247 name    : Quantize_103_out_0
+1789665937.247 addr   : 0x34368000 (16384 bytes)  (8 bits)
+1789665937.247 type   : 7 shape(4)=(1,128,128,1)
+1789665937.250 quant  : scale=0.054998, zp=0
+1789665937.250 name    : Quantize_120_out_0
+1789665937.250 addr   : 0x34370000 (16384 bytes)  (8 bits)
+1789665937.250 type   : 7 shape(4)=(1,128,128,1)
+1789665937.250 quant  : scale=0.057234, zp=-4
+1789665937.250 NPU stack initialization (res=0)
+1789665937.250 Model installation 0 MCU cycles (0.000000 ms)
+1789665937.253 Model init         1437 MCU cycles (0.001796 ms)
+1789665937.253 -------------------------------------------
+1789665937.253 | READY to receive a CMD from the HOST... |
+1789665937.253 -------------------------------------------
+1789665937.253 # Note: At this point, default ASCII-base terminal should be closed
+1789665937.755 # and a serial COM interface should be used
+1789665937.755 # (i.e. Python stm32com module). Protocol version = 3.2
