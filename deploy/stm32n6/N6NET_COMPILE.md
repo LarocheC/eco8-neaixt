@@ -329,3 +329,15 @@ How to read the outcome:
   It needs retraining; the `pool` weights do not transfer.
 * `gap` hangs too → the broadcast Add is the cause. The `*_tile` forms are
   the fallback, at the cost of a SW epoch.
+
+**Deploying the trained `pool` checkpoint without retraining.** An 8×1 valid
+conv over 8 rows is exactly a 4×1 stride-4 conv with one output-channel block
+per kernel half, followed by a 2×1 conv with fixed 0/1 weights that keeps
+block j at row j (`model_v2.native_full_height`). `export_npu.py` now applies
+this by default to every `pool` branch (`--pool-rewrite native`; `none`
+reproduces the hanging graph). On `configs/n6net_v2_fullband.json` the
+rewrite is exact to 1.2e-7 in fp32, the int8 mask cosine is 1.0000, and the
+graph compiles to one EC blob with no sub-convs (832 kB weights, estimate
+0.93 ms), against 8 sub-convs without it. If the board confirms the rewritten
+kernel as the cause, the trained full-band model deploys as-is and
+`pool_native` is only needed for new runs.

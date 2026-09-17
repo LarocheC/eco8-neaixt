@@ -77,6 +77,34 @@ from convfsenet.model import (
 )
 
 
+def native_full_height(fh: nn.Conv2d, stride: int = 4) -> nn.Sequential:
+    """Exact rewrite of a full-height (k x 1, valid) conv into native shapes.
+
+    The compiler splits kernels like the 8x1 into masked 1x1 sub-convs, which
+    hangs the NPU. The same function as two native convs: a (stride x 1)
+    stride-``stride`` conv whose output holds one channel block per kernel
+    segment (segment j applied to every input segment), then an (m x 1) conv
+    with fixed 0/1 weights that keeps block j at row j and adds the bias.
+    Linear in between, so it matches the original exactly (up to float
+    rounding); only the export uses it, so trained weights carry over.
+    """
+    c_out, c_in, k, kw = fh.weight.shape
+    if kw != 1 or k % stride:
+        raise ValueError(f"need a (k x 1) kernel with k divisible by {stride}; got {k}x{kw}")
+    m = k // stride
+    kw_ = {"device": fh.weight.device, "dtype": fh.weight.dtype}
+    a = nn.Conv2d(c_in, m * c_out, (stride, 1), stride=(stride, 1), bias=False, **kw_)
+    b = nn.Conv2d(m * c_out, c_out, (m, 1), **kw_)
+    with torch.no_grad():
+        a.weight.copy_(torch.cat([fh.weight[:, :, j * stride:(j + 1) * stride]
+                                  for j in range(m)], dim=0))
+        b.weight.zero_()
+        for j in range(m):
+            b.weight[torch.arange(c_out), j * c_out + torch.arange(c_out), j, 0] = 1.0
+        b.bias.copy_(fh.bias if fh.bias is not None else torch.zeros(c_out))
+    return nn.Sequential(a, b)
+
+
 class FullBand(nn.Module):
     """Full-band context for every frequency row, at almost no MAC cost.
 
@@ -122,6 +150,14 @@ class FullBand(nn.Module):
             self.fh = nn.Conv2d(c_g, channels, (rows // 64, 1))
         else:
             raise ValueError(f"unknown full-band branch {kind!r}")
+
+    def use_native_rewrite(self):
+        """Swap the 8x1 full-height conv of a ``pool`` branch for its exact
+        native equivalent (``native_full_height``). Export-time only."""
+        if self.kind == "pool" and not isinstance(self.fh, nn.Sequential):
+            self.fh = native_full_height(self.fh)
+            return True
+        return False
 
     def forward(self, y):
         if self.kind == "gap":

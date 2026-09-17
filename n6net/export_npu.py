@@ -543,6 +543,9 @@ def main():
     ap.add_argument("--n_blocks", type=int, default=None)
     ap.add_argument("--layout", choices=list(N6NetStreamStep.LAYOUTS), default="time_split",
                     help="v1 only; v2 (config arch=v2) always uses its time_split graph")
+    ap.add_argument("--pool-rewrite", choices=["native", "none"], default="native",
+                    help="v2 'pool' full-band branch: rewrite its 8x1 full-height conv into "
+                         "exact native shapes (the compiler's own split of it hangs the NPU)")
     ap.add_argument("--calib_utts", type=int, default=4)
     ap.add_argument("--calib_frames", type=int, default=400)
     a = ap.parse_args()
@@ -556,6 +559,18 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
 
     model = load_model(h, a.checkpoint)
+    rewrite_err = None
+    if is_v2(h) and a.pool_rewrite == "native":
+        probe = torch.rand(1, model.in_channels, model.rows_in, 8)
+        with torch.no_grad():
+            before = model.mask_half(probe)
+            n = sum(b.full_band.use_native_rewrite() for b in model.blocks if b.full_band)
+            after = model.mask_half(probe)
+        if n:
+            rewrite_err = float((before - after).abs().max())
+            print(f"pool rewrite: {n} full-height conv(s) -> native, max|diff| = {rewrite_err:.2e}")
+            if rewrite_err > 1e-4:
+                raise RuntimeError("native rewrite changed the model output")
     if is_v2(h):
         step, cost = N6NetV2StreamStep(model).eval(), cost_summary_v2(model)
     else:
@@ -579,7 +594,8 @@ def main():
     json.dump({"config": h, "checkpoint": a.checkpoint, "layout": step.layout, "cost": cost,
                "fp32_parity_maxabs": err, "int8_mask_cos": p8["mask"]["cos"],
                "int8_mask_maxabs": p8["mask"]["maxabs"],
-               "int8_phase_angle_err_deg": p8.get("pha", {}).get("angle_deg")},
+               "int8_phase_angle_err_deg": p8.get("pha", {}).get("angle_deg"),
+               "pool_rewrite_maxabs": rewrite_err},
               open(out / "export_report.json", "w"), indent=1)
 
 

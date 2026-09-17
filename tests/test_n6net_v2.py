@@ -333,3 +333,42 @@ def test_pool_native_reaches_every_bin_without_kernels_the_compiler_rewrites():
     assert frequency_reach(m) == 256
     fb = m.blocks[1].full_band
     assert [c.kernel_size[0] for c in (fb.d1, fb.d2, fb.d3, fb.fh)] == [4, 4, 4, 2]
+
+
+def test_native_rewrite_of_the_full_height_conv_is_exact():
+    """The export-time rewrite must not change a trained 'pool' model."""
+    from n6net.model_v2 import native_full_height
+
+    torch.manual_seed(0)
+    fh = nn.Conv2d(48, 96, (8, 1)).double()
+    y = torch.randn(3, 48, 8, 5, dtype=torch.float64)
+    native = native_full_height(fh)
+    assert [c.kernel_size for c in native] == [(4, 1), (2, 1)]
+    assert torch.allclose(fh(y), native(y), atol=1e-12)
+
+    m = _model(channels=16, full_band="pool", full_band_blocks=[1], freq_pos_emb=True).double()
+    feat = torch.rand(1, 1, 256, 12, dtype=torch.float64)
+    with torch.no_grad():
+        before = m.mask_half(feat)
+        assert m.blocks[1].full_band.use_native_rewrite()
+        assert not m.blocks[1].full_band.use_native_rewrite()      # idempotent
+        after = m.mask_half(feat)
+    assert torch.allclose(before, after, atol=1e-12)
+
+
+def test_rewritten_pool_graph_has_no_kernel_taller_than_four():
+    from n6net.export_npu import N6NetV2StreamStep
+
+    onnx = pytest.importorskip("onnx")
+    m = _model(channels=8, full_band="pool", full_band_blocks=[1])
+    m.blocks[1].full_band.use_native_rewrite()
+    step = N6NetV2StreamStep(m).eval()
+    buf = io.BytesIO()
+    torch.onnx.export(step, (torch.rand(1, 1, step.feat_rows, 1),
+                             *step.graph_inputs(step.init_states())), buf,
+                      input_names=step.input_names, output_names=step.output_names,
+                      opset_version=17, dynamo=False)
+    for n in onnx.load_from_string(buf.getvalue()).graph.node:
+        if n.op_type == "Conv":
+            ks = next(a.ints for a in n.attribute if a.name == "kernel_shape")
+            assert ks[0] <= 5 and ks[1] == 1, list(ks)
