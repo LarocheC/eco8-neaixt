@@ -140,3 +140,49 @@ What it shows:
 Not done yet (host/firmware side): zero-copy ring (`--no-inputs-allocation`
 and pointer rotation), an 8 ms hop, a complex mask, and on-board validation of
 all of the above.
+
+## Frequency reach (v2): full band for < 1 % MAC
+
+Reach here means how many input bins can change the centre output bin, measured
+by perturbation (`model_v2.frequency_reach`):
+- **v1: 9 of 257 bins (±125 Hz).**
+- **v2: 72 of 256 (±1.1 kHz).**
+
+Compiler probes for widening it:
+
+| candidate | Neural-ART mapping |
+|---|---|
+| frequency-dilated conv (d = 2, 4, 8) | **SW Conv on the M55**, so it's ruled out |
+| Resize / ConvTranspose / pixel shuffle along frequency | hybrid (DepthToSpace, Concat, Pad, Transpose) |
+| mean over frequency → 1×1 → broadcast add/mul | HW, but only as mean over (H, W); mean over H alone is a hybrid Transpose |
+| 4×1 stride 4 ×2 → full-height conv → broadcast add | HW |
+
+So v2 got a `FullBand` branch (`gap` or position-aware `pool`), which can go on
+any subset of blocks, plus an optional learned per-row embedding
+(`freq_pos_emb`) so a broadcast context can still be told apart by band.
+All results are at C96, n6-noextmem + epoch controller, and all are 0 SW / 0 hybrid:
+
+| variant | reach | MAC/frame | weights | stages (EC blobs) | U_MAC | est. NPU ms |
+|---|---|---|---|---|---|---|
+| v2 (no branch) | 72 | 94.5 M | 721 kB | 23 (1) | 40.5 % | 0.81 |
+| gap on block 1 | 256 | 94.5 M | 730 kB | 25 (1) | 39.2 % | 0.84 |
+| gap on block 1 + pos emb | 256 | 94.5 M | 742 kB | 25 (1) | 37.3 % | 0.88 |
+| **pool on block 1 + pos emb** (`configs/n6net_v2_fullband.json`) | 256 | 95.2 M | 796 kB | 31 (1) | 36.7 % | **0.90** |
+| gap on all 4 blocks (+ pos, zero-init) | 256 | 94.5 M | 757 kB | 31 (1) | 35.8 % | 0.92 |
+| pool on all 4 blocks (+ pos, zero-init) | 256 | 97.3 M | 973 kB | 55 (1) | 33.8 % | 1.00 |
+| 64 rows (`stem_stride=4`), C128 | 144 | 84.0 M | 1.25 MB | 23 (1) | 24.6 % | 1.19 |
+| 64 rows, C128, gap ×4 + pos | 256 | 84.1 M | 1.32 MB | 43 (5 + 4 hybrid Transpose, before the mean fix) | 22.1 % | 1.32 |
+| 64 rows, C128, pool ×4 + pos | 256 | 86.5 M | 1.57 MB | 39 (1) | 19.6 % | 1.54 |
+
+What it shows:
+* **Full-band reach costs < 1 % MAC and about +4–11 % NPU time.** The added time
+  is the two tensor-wide passes (pool and broadcast add) per branch, not the
+  arithmetic. One branch gives full reach, and more branches only add passes.
+* **Recommended: one position-aware `pool` branch on block 1, plus the
+  embedding.** Unlike `gap`, the full-height conv gives each band its own
+  weights, for 0.02 ms more. Which variant sounds better is for training to decide.
+* **64 rows is not a win on the NPU.** It doubles the local reach, but C128
+  runs at lower utilisation and sits at the on-chip weight ceiling.
+* An all-zero positional embedding gets folded away by the toolchain, so it
+  now starts from small random values; the "zero-init" rows above were
+  compiled before that change.

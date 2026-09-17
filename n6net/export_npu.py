@@ -180,7 +180,7 @@ class N6NetV2StreamStep(nn.Module):
 
     Inputs: ``feat (1, 1, 256, 1)`` and, per block, the two past columns its
     kernel reads, ``fifo_i_0`` (t - 2d) and ``fifo_i_1`` (t - d), each
-    ``(1, C, 128, 1)``. Outputs: the half-resolution ``mask (1, 2, 128, 1)``
+    ``(1, C, rows, 1)``. Outputs: the folded ``mask (1, stem_stride, rows, 1)``
     (the host interleaves it) and ``col_i``, the block's input column, which the
     host pushes into a ring of ``2d`` columns. The state handled here is that
     full ring; ``graph_inputs`` picks the slots the graph reads.
@@ -238,7 +238,7 @@ class N6NetV2StreamStep(nn.Module):
         return self.m.mask_half(feat)
 
     def forward(self, feat, *cols):
-        x = self.m.stem(feat)                                   # (1, C, 128, 1)
+        x = self.m.embed(self.m.stem(feat))                     # (1, C, rows, 1)
         extra = []
         k = 0
         for blk, convs in zip(self.m.blocks, self.taps):
@@ -248,9 +248,7 @@ class N6NetV2StreamStep(nn.Module):
             y = convs[-1](x)
             for conv, col in zip(convs[:-1], past):
                 y = y + conv(col)
-            y = F.relu(y)
-            y = F.relu(blk.conv_f(y))
-            x = x + y
+            x = blk.mix(x, F.relu(y))
         return (torch.sigmoid(self.m.head(x)), *extra)
 
 
