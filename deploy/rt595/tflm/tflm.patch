@@ -75,6 +75,42 @@ index 98231968..b18ee19a 100644
  }
  
  #ifndef TF_LITE_STRIP_ERROR_STRINGS
+diff --git a/tensorflow/lite/micro/tools/make/ext_libs/xtensa.inc b/tensorflow/lite/micro/tools/make/ext_libs/xtensa.inc
+index 5cd84d12..eb17dca5 100755
+--- a/tensorflow/lite/micro/tools/make/ext_libs/xtensa.inc
++++ b/tensorflow/lite/micro/tools/make/ext_libs/xtensa.inc
+@@ -79,11 +79,11 @@ else ifeq ($(TARGET_ARCH), hifi5)
+     $(shell find $(NNLIB_PATH) -name "*.c")
+ 
+   # The NDSP library has a lot of file. Add as needed.
++  # RT500 (Fusion-F1) is a NARROWER HiFi4 than the rt600 these sources assume: it
++  # lacks AE_MOVBA4 / AE_ADDANDSUB32S / AE_MUL32JS / AE_ADDANDSUBRNG32, so every
++  # ndsplib FFT translation unit fails to compile. None of our models contain an
++  # FFT op (the STFT runs on the M33), so excluding them costs nothing.
+   THIRD_PARTY_KERNEL_CC_SRCS += \
+-    $(shell find $(NDSPLIB_PATH)/library/fft/fft -name "*.c") \
+-    $(shell find $(NDSPLIB_PATH)/library/fft/fft_ie -name "*.c") \
+-    $(shell find $(NDSPLIB_PATH)/library/fft/fft_ief -name "*.c") \
+-    $(shell find $(NDSPLIB_PATH)/library/twiddles -name "*.c") \
+     $(shell find $(NDSPLIB_PATH)/library -name "version.c")
+ 
+   EXCLUDED_NNLIB_SRCS = \
+@@ -145,11 +145,11 @@ else ifeq ($(TARGET_ARCH), $(filter $(TARGET_ARCH), hifi4 hifi4_internal hifi3 h
+     $(shell find $(NNLIB_PATH) -name "*.c")
+ 
+   # The NDSP library has a lot of file. Add as needed.
++  # RT500 (Fusion-F1) is a NARROWER HiFi4 than the rt600 these sources assume: it
++  # lacks AE_MOVBA4 / AE_ADDANDSUB32S / AE_MUL32JS / AE_ADDANDSUBRNG32, so every
++  # ndsplib FFT translation unit fails to compile. None of our models contain an
++  # FFT op (the STFT runs on the M33), so excluding them costs nothing.
+   THIRD_PARTY_KERNEL_CC_SRCS += \
+-    $(shell find $(NDSPLIB_PATH)/library/fft/fft -name "*.c") \
+-    $(shell find $(NDSPLIB_PATH)/library/fft/fft_ie -name "*.c") \
+-    $(shell find $(NDSPLIB_PATH)/library/fft/fft_ief -name "*.c") \
+-    $(shell find $(NDSPLIB_PATH)/library/twiddles -name "*.c") \
+     $(shell find $(NDSPLIB_PATH)/library -name "version.c")
+ 
+   EXCLUDED_NNLIB_SRCS = \
 diff --git a/tensorflow/lite/micro/tools/make/targets/xtensa_makefile.inc b/tensorflow/lite/micro/tools/make/targets/xtensa_makefile.inc
 index 60b66732..daac77bd 100644
 --- a/tensorflow/lite/micro/tools/make/targets/xtensa_makefile.inc
@@ -86,4 +122,4 @@ index 60b66732..daac77bd 100644
 -  -mcoproc \
    $(TARGET_ARCH_DEFINES) \
    -mlongcalls
-
+ 

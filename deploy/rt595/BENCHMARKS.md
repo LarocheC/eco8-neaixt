@@ -105,6 +105,83 @@ ConvFSENet (1.71 MB) exceed the 1.24 MB DSP data segment, so their flat numbers 
 unrealizable as-linked — a memory problem first. Arena high-water: NSNet2 9.8 KB (WITHDRAWN — the silicon capture measures 17,096 B; see results/PROVENANCE.md), ConvFSENet
 160 KB, LiSenNet 277 KB.
 
+## Per-op cost model (2026-09-17, ISS) — what this chip actually charges for
+
+Every HiFi4 figure above is a whole-model number, and until now the per-op cost of
+xa_nnlib's int8 kernels had never been measured. `host/gen_kernel_bench.py` emits
+single-op int8 models at streaming shapes (W = 1) and `iss/kernel_bench.cpp` runs them
+through the same TFLM interpreter the firmware uses.
+
+| op | MACs | cycles | MAC/cycle |
+|---|---:|---:|---:|
+| `FULLY_CONNECTED` 600x600 | 360,000 | 144,980 | **2.48** |
+| `CONV_2D` 5x1, F257, C96 | 11,842,560 | 4,826,233 | **2.45** |
+| `CONV_2D` 1x1, F257, C192 | 9,474,048 | 3,993,312 | 2.37 |
+| `CONV_2D` 3x1, F257, C96 | 7,105,536 | 3,048,566 | 2.33 |
+| `CONV_2D` 1x1, F257, C96 | 2,368,512 | 1,256,568 | 1.88 |
+| `BATCH_MATMUL` b8, 64x64 | 32,768 | 26,673 | 1.23 |
+| grouped `CONV_2D` g=4, C96 | 592,128 | 682,053 | 0.87 |
+| `FULLY_CONNECTED` 257x400 | 102,800 | 130,654 | 0.79 |
+| `DEPTHWISE_CONV_2D` 3x1, C192 | 148,032 | 869,192 | **0.17** |
+
+Fitting the three pointwise rows (same kernel and height, different channel counts, so the
+terms separate cleanly) gives a law that holds to within 13 % on every other row except
+depthwise (+24 %) and the 257-reduction FC (-68 %):
+
+> **cycles ~ MAC / 3.2 + 20.9 x output_elements + 1300 per op**
+
+Three consequences, and they are the design rules for this target:
+
+- **An output element costs about 67 MACs.** So an op is output-bound rather than
+  MAC-bound unless `k * Cin > 67`. Depthwise sits at `k*Cin = 3` and grouped-4 at 24 —
+  that is the whole explanation for their 0.17 and 0.87. They are not slow per MAC; they
+  hardly do any MACs per output they must requantize. **Do not use depthwise or grouped
+  convolutions on this chip**, even though both cut MACs.
+- **Convolution over frequency is free.** 2.45 MAC/cycle against a dense matmul's 2.48, so
+  reusing one kernel across all bins costs nothing per MAC. The ceiling is ~2.5 MAC/cycle,
+  making the real-time budget about 7.5 M MAC/frame before overheads.
+- **`FULLY_CONNECTED` with a 257-wide reduction runs at a third of the rate of a 400-wide
+  one.** 257 is not a multiple of the 8-wide SIMD. Hypothesis, not yet isolated — an
+  `fc_256x400` arm would settle it.
+
+**The law also says what the whole-model numbers above were really measuring.** Applied to
+ConvFSENet 192-384's convolutions it predicts 764,393 cyc/frame against the measured
+2,767,999: **the conv ops are 28 % of that model's time.** The other 72 % is the ~160
+non-conv ops in its 190-op graph. On this chip the tensor shuffling costs more than the
+arithmetic, which is the sharp form of the op-granularity law noted below.
+
+## An architecture designed against that law (2026-09-17, ISS, UNTRAINED)
+
+`host/gen_arch_candidates.py` builds streaming enhancers that obey the rules above: frequency
+as a convolutional axis, a strided stem so blocks work at reduced height, every conv dense
+with `k*Cin >= 144`, ReLU (which fuses into the conv; PReLU would not), and the FIFO held
+host-side as an input tensor so the time convolution is one `Conv2D` with no `Concat` or
+`Slice`. Built in Keras, not torch — ai-edge-torch wraps every conv in NCHW<->NHWC
+`TRANSPOSE`s, the exact op class being avoided.
+
+| model | MAC/frame | ops | cyc/frame | vs budget | weights | arena |
+|---|---:|---:|---:|---:|---:|---:|
+| `blockdiag_full` (deploy pick) | 701,657 | 76 | 1,464,617 | 0.46x | 720 K | 17 K |
+| ConvFSENet 192-384 | 1,448,256 | 190 | 2,767,999 | 0.87x | 1710 K | 160 K |
+| `rt595b_fb_s4_C48_b3` | 4,042,752 | **16** | **2,201,242** | **0.69x** | 64 K | 86 K |
+| `rt595a_fb_s4_C64_b2` | 4,800,512 | 13 | 2,443,176 | 0.77x | 78 K | 87 K |
+
+`rt595b_fb` does **2.8x ConvFSENet's arithmetic in 20 % fewer cycles with 27x smaller
+weights**, from op hygiene alone. The cost law predicted it to within 10 % (against -72 %
+for ConvFSENet), which is the check that the diagnosis above is right.
+
+The `_fb` suffix is a pooled full-band branch on the first block. Without it, a stride-4 stem
+with `k_f = 3` over 2-3 blocks reaches +-8 of 256 bins — N6Net v1's failure exactly (9 of 257),
+and the v2 A/B currently puts that failure at -0.16 PESQ. **Reach costs 2.6 % of cycles here**
+(2,145,056 -> 2,201,242); it is not a close call.
+
+Memory has stopped being the constraint: weights + arena is ~150 K against the 1.24 MB data
+segment, 8x headroom to grow if quality needs it.
+
+**Provenance: cycles are ISS-measured and the weights are UNTRAINED.** int8 timing on this
+core is data-independent (prior frame spread 0.003 %), so the cycle figures are real, but
+there is no quality evidence for this architecture yet — no PESQ, no trained checkpoint.
+
 ## Sparse NSNet2 — the variant that makes NSNet2 deployable
 
 Dense NSNet2 is undeployable on this chip for one reason: 2.89 MB of int8 weights against a

@@ -25,9 +25,20 @@ without re-cloning.
 
 ## What `tflm.patch` does
 
-Comments out the ndsplib **FFT** source block in `ext_libs/xtensa.inc`. Those sources use the
-intrinsics the rt500 core does not have, so the build dies there. None of our models contain
-signal/FFT ops — the STFT is computed on the M33 — so excluding them is free.
+Four changes, all needed for the build to complete on the rt500 core:
+
+1. **`ext_libs/xtensa.inc`** — drops the ndsplib **FFT** source block (`library/fft/fft`,
+   `fft_ie`, `fft_ief`, `twiddles`). Those sources use the intrinsics the rt500 core does not
+   have, so the build dies there. None of our models contain signal/FFT ops — the STFT is
+   computed on the M33 — so excluding them is free.
+2. **`targets/xtensa_makefile.inc`** — removes `-mcoproc`.
+3. **`kernels/internal/types.h`** — adds the `float32_t` typedef the NXP sources expect.
+4. **`micro/debug_log.cc`** — NXP's `DebugLog` variant.
+
+> Until 2026-09-17 the committed patch contained only items 2-4, while this README claimed
+> item 1. A rebuild from the committed state therefore failed on exactly the four intrinsics
+> named above (`AE_MOVBA4`, `AE_ADDANDSUB32S`, `AE_MUL32JS`, `AE_ADDANDSUBRNG32`). The patch
+> now carries the FFT exclusion too, and is verified to apply to the pinned commit.
 
 ## Pinned inputs
 
