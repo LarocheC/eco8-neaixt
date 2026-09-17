@@ -90,7 +90,13 @@ class FullBand(nn.Module):
       summary; C^2 MAC per frame.
     * ``"pool"`` — two 4x1 stride-4 convs (128 -> 32 -> 8 rows at width
       ``c_g``), then a full-height conv to one row, ReLU. Position-aware:
-      each input band has its own weights.
+      each input band has its own weights. **Hangs the NPU on target**: the
+      compiler rewrites the 8x1 full-height kernel into eight masked 1x1
+      sub-convs (see deploy/stm32n6/host/fullband_probes.py).
+    * ``"pool_native"`` — the same idea with no kernel the compiler rewrites:
+      three 4x1 stride-4 convs (128 -> 32 -> 8 -> 2 rows) and a 2x1 conv to
+      one row. Still position-aware: the strided convs do not overlap, so
+      every input row reaches the output through its own weights.
 
     Either way, every output row sees every input row.
     """
@@ -103,9 +109,17 @@ class FullBand(nn.Module):
         elif kind == "pool":
             if rows % 16:
                 raise ValueError(f"'pool' full-band branch needs rows % 16 == 0; got {rows}")
+            # attribute names are checkpoint keys: keep d1 / d2 / fh
             self.d1 = nn.Conv2d(channels, c_g, (4, 1), stride=(4, 1))
             self.d2 = nn.Conv2d(c_g, c_g, (4, 1), stride=(4, 1))
             self.fh = nn.Conv2d(c_g, channels, (rows // 16, 1))
+        elif kind == "pool_native":
+            if rows % 64:
+                raise ValueError(f"'pool_native' needs rows % 64 == 0; got {rows}")
+            self.d1 = nn.Conv2d(channels, c_g, (4, 1), stride=(4, 1))
+            self.d2 = nn.Conv2d(c_g, c_g, (4, 1), stride=(4, 1))
+            self.d3 = nn.Conv2d(c_g, c_g, (4, 1), stride=(4, 1))
+            self.fh = nn.Conv2d(c_g, channels, (rows // 64, 1))
         else:
             raise ValueError(f"unknown full-band branch {kind!r}")
 
@@ -116,7 +130,10 @@ class FullBand(nn.Module):
             # over (H, W) it becomes a HW GlobalAveragePool. Same numbers.
             dims = (2, 3) if y.shape[3] == 1 else 2
             return F.relu(self.proj(y.mean(dim=dims, keepdim=True)))
-        return F.relu(self.fh(F.relu(self.d2(F.relu(self.d1(y))))))
+        for name in ("d1", "d2", "d3", "fh"):
+            if hasattr(self, name):
+                y = F.relu(getattr(self, name)(y))
+        return y
 
 
 class N6BlockV2(nn.Module):

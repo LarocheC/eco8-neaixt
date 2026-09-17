@@ -283,3 +283,49 @@ The phase head's int8 rotation matches fp32 to 0.12° mean angle error on
 untrained weights; the `phase_unit_weight` term keeps its (cos, sin) output
 near unit modulus so that stays true after training (BASENet's `atan2` phase
 path collapsed under static int8).
+
+## The full-band branch hangs on target: suspects and probes
+
+On the board (seeded weights, n6-noextmem-ec), `v2_fullband`, `_nopos` and
+`_lsig` hang the NPU: `validate` times out and the board wedges after about three
+attempts. A five-layer reduction (stride-4 pool → full-height conv → broadcast
+Add onto (1, 96, 128, 1)) reproduces it with and without the epoch
+controller. The same-shape control runs.
+
+Reading what the compiler does with that branch (`network_c_info.json`):
+
+* **The 8×1 full-height conv is the only layer the compiler rewrites.** It
+  becomes eight masked 1×1 sub-convs (`Conv2D_*_subm_0..7`), each reading one
+  row of the 8-row input and writing a height-1 output, summed by an Add tree.
+  The 4×1 stride-4 convs, the stride-2 4×1 stem and the 5×1 trunk convs all
+  stay single native convs.
+* The height-1 result reaches the trunk as a channel-broadcast Add on the
+  second input, a case ST documents as HW-supported.
+* `Resize 1 → 128` followed by `Add` is folded back into that same broadcast
+  Add, so it is no workaround. `Tile` is: it runs as one SW epoch (12 kB on the
+  M55) between two EC blobs.
+
+`deploy/stm32n6/host/fullband_probes.py` generates probes at the real shape to
+split the two suspects:
+
+| probe | tests | compiles to |
+|---|---|---|
+| `control` | trunk only | 1 EC blob |
+| `pool` | the hanging branch | 1 EC blob, 8 rewritten sub-convs |
+| `s4_only` | 4×1 stride-4 conv alone | 1 EC blob |
+| `fullh_only` | the rewritten 8×1 conv alone, no broadcast | 1 EC blob, 8 sub-convs |
+| `gap_only` | GlobalAveragePool + 1×1, height-1 output, no broadcast | 1 EC blob |
+| `gap` | GAP + 1×1 + broadcast Add | 1 EC blob |
+| `pyr3` | seven 3×1 stride-2 convs + broadcast Add | 1 EC blob |
+| `pool_native` | three 4×1 stride-4 + a 2×1 conv + broadcast Add | 1 EC blob, no sub-convs |
+| `pool_tile` / `pool_native_tile` | same branches, broadcast replaced by Tile | 2 EC blobs + 1 SW Tile |
+| `avgpyr3` | AveragePool pyramid | hybrid Pad epochs (excluded) |
+| `pool_resize` / `gap_resize` | Resize before the Add | folded back into the broadcast Add |
+
+How to read the outcome:
+* `fullh_only` hangs, `gap` runs → the rewritten kernel is the cause.
+  `full_band: pool_native` (`configs/n6net_v2_fullband_native.json`) avoids
+  it: 1 EC blob, no sub-convs, reach 256/256, 95.19 M MAC, 778 kB weights.
+  It needs retraining; the `pool` weights do not transfer.
+* `gap` hangs too → the broadcast Add is the cause. The `*_tile` forms are
+  the fallback, at the cost of a SW epoch.

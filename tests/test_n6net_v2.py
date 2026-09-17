@@ -318,3 +318,18 @@ def test_trainer_gan_step_runs_on_the_mpsenet_objective():
     for k in ("loss", "base_loss", "loss_metric", "loss_disc"):
         assert k in metrics and metrics[k] == metrics[k]              # finite, not NaN
     assert not torch.equal(before, model.pha_head.weight)              # the step trained it
+
+
+def test_pool_branch_keeps_its_checkpoint_keys():
+    """Trained full-band checkpoints load by these names; renaming breaks them."""
+    keys = set(_model(channels=8, full_band="pool", full_band_blocks=[1]).state_dict())
+    for k in ("d1", "d2", "fh"):
+        assert f"blocks.1.full_band.{k}.weight" in keys
+
+
+def test_pool_native_reaches_every_bin_without_kernels_the_compiler_rewrites():
+    from n6net.model_v2 import frequency_reach
+    m = _model(channels=8, full_band="pool_native", full_band_blocks=[1], freq_pos_emb=True)
+    assert frequency_reach(m) == 256
+    fb = m.blocks[1].full_band
+    assert [c.kernel_size[0] for c in (fb.d1, fb.d2, fb.d3, fb.fh)] == [4, 4, 4, 2]
