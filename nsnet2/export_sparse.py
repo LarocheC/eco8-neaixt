@@ -19,6 +19,12 @@ Two modes:
                                  achieved sparsity, ragged-tail count, dtype,
                                  and the inference/training N.
 
+For a codebook pattern (``2:4@c1``) each matrix also carries
+``<layer>.pattern_index``: one uint8 per group of 4 holding which of the four
+legal patterns that group uses. That is the packed form — 2 bits per group
+instead of a 4-entry mask — and the manifest states the codebook it indexes
+into, so the mask can be rebuilt from the indices alone.
+
 Usage
 -----
     python -m nsnet2.export_sparse --config configs/sparse_2to4.json --dims-only
@@ -40,7 +46,7 @@ from common.env import AttrDict
 from common.utils import load_checkpoint
 from nsnet2.model import NSNet2
 from nsnet2.sparsity import (MaskedLinear, build_mask, parse_pattern,
-                             tail_elements, verify_pattern)
+                             pattern_indices, tail_elements, verify_pattern)
 
 
 # Which 2-D parameters are the MatMuls that matter, and a stable human name.
@@ -178,6 +184,22 @@ def main() -> None:
         "matrices": [],
     }
 
+    desc = parse_pattern(pattern) if pattern else None
+    if desc and desc["family"] == "codebook":
+        # The codebook is fixed for every matrix, so it belongs at the top level
+        # and the per-matrix payload is just indices into it.
+        manifest["codebook"] = {
+            "name": desc["codebook"],
+            "group": desc["group"],
+            "nonzeros_per_group": desc["n"],
+            "patterns": ["".join(str(b) for b in pat) for pat in desc["allowed"]],
+            "pairing": desc["pairing"],
+            "bits_per_group": max(1, (len(desc["allowed"]) - 1).bit_length()),
+            "index_semantics": ("<layer>.pattern_index[r, g] indexes codebook.patterns "
+                                "for group g of row r; pattern bit k == 1 means column "
+                                "g * group + k is kept"),
+        }
+
     for name, w, b in collect_matrices(model):
         owner = name.rsplit(".weight", 1)[0]
         if owner in masked_linears:
@@ -202,6 +224,10 @@ def main() -> None:
             violations.append((name, check["violations"], check["groups"]))
         arrays[f"{name}.weight"] = w_masked.numpy().astype(np.float32)
         arrays[f"{name}.mask"] = mask.numpy().astype(np.uint8)
+        pat_desc = parse_pattern(pat)
+        if pat_desc["family"] == "codebook" and check["ok"]:
+            idx = pattern_indices(w_masked, pat, axis=axis)
+            arrays[f"{name}.pattern_index"] = idx.numpy().astype(np.uint8)
         if b is not None:
             arrays[f"{name}.bias"] = b.numpy().astype(np.float32)
 
@@ -216,6 +242,9 @@ def main() -> None:
             "has_bias": b is not None,
             "pattern_verified": check["ok"],
         })
+        if f"{name}.pattern_index" in arrays:
+            manifest["matrices"][-1]["pattern_index_shape"] = list(
+                arrays[f"{name}.pattern_index"].shape)
 
     if violations:
         for name, n, groups in violations:

@@ -11,7 +11,7 @@ from nsnet2.export_sparse import collect_matrices, dims_table
 from nsnet2.model import NSNet2
 from nsnet2.sparsity import (MaskedLinear, SparsityController, as_matrix,
                              build_mask, is_pointwise, parse_pattern,
-                             tail_elements, verify_pattern)
+                             pattern_indices, tail_elements, verify_pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -633,3 +633,193 @@ def test_export_roundtrip(tmp_path, baseline_h):
         assert w.shape == (entry["M"], entry["K"])
         assert int((m != 0).sum()) == entry["nonzero"]
         assert np.all(w[m == 0] == 0)          # explicit zeros where masked
+
+
+# ---------------------------------------------------------------------------
+# Codebook-constrained N:M (the Row-Fusion pattern table)
+# ---------------------------------------------------------------------------
+
+CODEBOOKS = {
+    "c1": {"1010", "0101", "1001", "0110"},
+    "c2": {"1100", "0011", "1001", "0110"},
+    "c3": {"1010", "0101", "1100", "0011"},
+}
+
+
+def _supports(mask, group=4):
+    """Every complete group's mask, as a bit string."""
+    rows, K = mask.shape
+    ng = K // group
+    head = mask[:, : ng * group].reshape(rows, ng, group)
+    return {"".join(str(int(b)) for b in g) for row in head for g in row}
+
+
+@pytest.mark.parametrize("cb", ["c1", "c2", "c3"])
+def test_codebook_parse(cb):
+    d = parse_pattern(f"2:4@{cb}")
+    assert d["family"] == "codebook"
+    assert d["sparsity"] == pytest.approx(0.5)
+    assert d["codebook"] == cb
+    assert {"".join(str(b) for b in pat) for pat in d["allowed"]} == CODEBOOKS[cb]
+    assert len(d["pairing"]) == 2                    # two disjoint index pairs
+
+
+def test_codebook_parse_explicit_set():
+    d = parse_pattern("2:4@{1010,0101,1001}")
+    assert d["codebook"] == "custom"
+    assert len(d["allowed"]) == 3
+    assert d["pairing"] is None
+
+
+@pytest.mark.parametrize("bad", ["2:4@c9", "2:4@{101}", "2:4@{1110}", "2:4@{}",
+                                 "4:8@c1", "2:4@"])
+def test_codebook_parse_rejects(bad):
+    with pytest.raises(ValueError):
+        parse_pattern(bad)
+
+
+@pytest.mark.parametrize("K", [400, 257])
+def test_codebook_c1_is_exactly_1to2(K):
+    """c1 pairs (0,1) and (2,3), so keeping one per pair *is* 1:2 — including
+    the ragged tail, since 257 // 4 * 4 == 257 // 2 * 2."""
+    torch.manual_seed(0)
+    w = torch.randn(64, K)
+    assert torch.equal(build_mask(w, "2:4@c1"), build_mask(w, "1:2"))
+
+
+@pytest.mark.parametrize("cb", ["c1", "c2", "c3"])
+def test_codebook_mask_uses_only_legal_patterns(cb):
+    torch.manual_seed(0)
+    w = torch.randn(96, 64)
+    m = build_mask(w, f"2:4@{cb}")
+    assert _supports(m) <= CODEBOOKS[cb]
+    assert m.mean().item() == pytest.approx(0.5)
+    # every codebook mask is also a legal plain 2:4 mask
+    assert verify_pattern(w * m, "2:4")["ok"]
+
+
+def test_codebook_mask_is_the_per_pair_maximum():
+    """The 4-way search is equivalent to keeping the larger of each pair, which
+    is what makes the selection optimal for retained magnitude and the pattern
+    distribution across a matrix unconstrained."""
+    torch.manual_seed(0)
+    w = torch.randn(32, 64)
+    m = build_mask(w, "2:4@c2")                       # pairs (0,2) and (1,3)
+    h = w.reshape(32, 16, 4).abs()
+    expect = torch.zeros_like(h)
+    for i, j in ((0, 2), (1, 3)):
+        keep_i = h[..., i] >= h[..., j]
+        expect[..., i] = keep_i.to(w.dtype)
+        expect[..., j] = (~keep_i).to(w.dtype)
+    assert torch.equal(m, expect.reshape(32, 64))
+
+
+@pytest.mark.parametrize("cb,other", [("c1", "c3"), ("c2", "c1"), ("c3", "c2")])
+def test_codebook_verify_rejects_a_foreign_pattern(cb, other):
+    """The reason the count check is not enough: a c3 group like 1100 holds two
+    nonzeros, passes plain 2:4, and still breaks a c1 kernel."""
+    torch.manual_seed(0)
+    w = torch.randn(48, 64)
+    wm = w * build_mask(w, f"2:4@{other}")
+    assert verify_pattern(wm, f"2:4@{other}")["ok"]
+    assert verify_pattern(wm, "2:4")["ok"]            # generic N:M cannot see it
+    chk = verify_pattern(wm, f"2:4@{cb}")
+    assert not chk["ok"] and chk["violations"] > 0
+
+
+def test_codebook_verify_tolerates_an_incidental_zero():
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    wm = w * build_mask(w, "2:4@c1")
+    wm[0, wm[0].nonzero()[0]] = 0.0                   # one surviving weight dies
+    assert verify_pattern(wm, "2:4@c1")["ok"]
+
+
+@pytest.mark.parametrize("cb", ["c1", "c2", "c3"])
+def test_pattern_indices_rebuild_the_mask(cb):
+    """The index array is the hand-off payload: 2 bits per group must be enough
+    to reconstruct the mask exactly."""
+    torch.manual_seed(0)
+    w = torch.randn(40, 64)
+    m = build_mask(w, f"2:4@{cb}")
+    idx = pattern_indices(w * m, f"2:4@{cb}")
+    allowed = torch.tensor(parse_pattern(f"2:4@{cb}")["allowed"], dtype=m.dtype)
+    assert idx.shape == (40, 16)
+    assert int(idx.max()) < len(allowed)
+    assert torch.equal(allowed[idx].reshape(40, 64), m)
+
+
+def test_pattern_indices_reject_a_nonconforming_weight():
+    torch.manual_seed(0)
+    w = torch.randn(8, 64)
+    wm = w * build_mask(w, "2:4@c3")
+    with pytest.raises(ValueError):
+        pattern_indices(wm, "2:4@c1")
+    with pytest.raises(ValueError):
+        pattern_indices(wm, "2:4")                    # not a codebook pattern
+
+
+def test_codebook_config_files_load_and_build(baseline_h):
+    for cb in ("c1", "c2", "c3"):
+        with open(f"configs/cb_{cb}.json") as f:
+            h = AttrDict(json.load(f))
+        assert h.sparsity["pattern"] == f"2:4@{cb}"
+        model = NSNet2(h)
+        ctrl = SparsityController.from_config(model, h.sparsity)
+        assert ctrl is not None and len(ctrl) == 8, cb
+        ctrl.apply()
+        for name, p in model.named_parameters():
+            if name not in ctrl.masks:
+                continue
+            assert verify_pattern(p.data, h.sparsity["pattern"])["ok"], (cb, name)
+        report = ctrl.report()
+        overall = 1 - sum(r["nonzero"] for r in report) / sum(r["numel"] for r in report)
+        assert overall == pytest.approx(0.5, abs=0.01), cb
+
+
+def test_codebook_export_carries_the_index_array(tmp_path, baseline_h):
+    import subprocess
+    import sys
+
+    import numpy as np
+
+    cfg = tmp_path / "cfg.json"
+    h = dict(baseline_h)
+    h["sparsity"] = {"enabled": True, "pattern": "2:4@c2", "axis": "in",
+                     "tail": "keep", "scope": "matrix", "min_numel": 4096}
+    cfg.write_text(json.dumps(h))
+    out = tmp_path / "export"
+    subprocess.run([sys.executable, "-m", "nsnet2.export_sparse",
+                    "--config", str(cfg), "--out", str(out)],
+                   check=True, capture_output=True)
+
+    manifest = json.loads((out / "manifest.json").read_text())
+    cb = manifest["codebook"]
+    assert cb["name"] == "c2" and cb["bits_per_group"] == 2
+    assert set(cb["patterns"]) == CODEBOOKS["c2"]
+
+    npz = np.load(out / "weights.npz")
+    table = np.array([[int(b) for b in pat] for pat in cb["patterns"]], dtype=np.uint8)
+    for entry in manifest["matrices"]:
+        idx = npz[f"{entry['name']}.pattern_index"]
+        m = npz[f"{entry['name']}.mask"]
+        assert idx.shape == tuple(entry["pattern_index_shape"])
+        assert idx.dtype == np.uint8
+        ng = entry["K"] // 4
+        rebuilt = table[idx].reshape(entry["M"], ng * 4)
+        assert np.array_equal(rebuilt, m[:, : ng * 4])     # indices == the mask
+
+
+@pytest.mark.parametrize("cb", ["c1", "c2", "c3"])
+def test_int8_violations_understands_codebooks(cb):
+    from nsnet2.verify_int8_sparsity import _violations
+
+    torch.manual_seed(0)
+    w = torch.randn(16, 64)
+    wm = (w * build_mask(w, f"2:4@{cb}")).numpy()
+    desc = parse_pattern(f"2:4@{cb}")
+    assert _violations(wm, desc, 1) == 0
+    assert _violations(wm.T, desc, 0) == 0
+    others = [o for o in ("c1", "c2", "c3") if o != cb]
+    for o in others:
+        assert _violations(wm, parse_pattern(f"2:4@{o}"), 1) > 0

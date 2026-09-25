@@ -56,6 +56,20 @@ def _violations(a: np.ndarray, desc: dict, axis: int) -> int | None:
         counts = nz[:, : ng * g].reshape(rows, ng, g).sum(-1)
         return int((counts > n).sum())
 
+    if desc["family"] == "codebook":
+        # Counting nonzeros is not the contract here: 1100 holds two and is
+        # still illegal under c1. Each group's support must fit inside one of
+        # the legal patterns. Quantization only adds zeros, which shrinks a
+        # support and therefore keeps it inside whatever pattern held it.
+        g = desc["group"]
+        ng = K // g
+        if ng == 0:
+            return None
+        allowed = np.array(desc["allowed"], dtype=bool)            # (P, g)
+        head = nz[:, : ng * g].reshape(rows, ng, g)
+        fits = ~(head[:, :, None, :] & ~allowed).any(axis=-1)      # (rows, ng, P)
+        return int((~fits.any(axis=-1)).sum())
+
     return None            # block support and unstructured are graph-level checks
 
 
@@ -92,7 +106,7 @@ def density_shortfall(zeros_fraction: float, desc: dict) -> float:
     this is one-sided. Apply it to the graph as a whole (see module docstring on
     granularity), never to a single initializer.
     """
-    if desc["family"] == "nm":
+    if desc["family"] in ("nm", "codebook"):
         return 0.0
     return max(0.0, desc["sparsity"] - zeros_fraction)
 

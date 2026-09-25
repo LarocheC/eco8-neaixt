@@ -14,6 +14,32 @@ semi-structured families used by hardware sparse units:
     * ``"unstructured:80"`` — plain magnitude pruning to 80% sparsity; kept as
                     a control, since arbitrary sparsity buys memory but not
                     necessarily kernel speed.
+    * ``"2:4@c1"`` — 2:4 restricted to a *codebook*: only four of the six 2:4
+                    patterns are legal, so each group's choice fits in 2 bits.
+                    A packer/codegen that indexes a fixed pattern table needs
+                    this, and plain ``"2:4"`` does not give it.
+
+Codebooks
+---------
+``c1``/``c2``/``c3`` are the three named 4-pattern codebooks. Each turns out to
+be exactly "keep one weight from each of two disjoint index pairs" — the three
+ways of splitting ``{0,1,2,3}`` into two pairs:
+
+    ==== ================== ==================================
+    name pairs              patterns
+    ==== ================== ==================================
+    c1   (0,1) (2,3)        1010 0101 1001 0110
+    c2   (0,2) (1,3)        1100 0011 1001 0110
+    c3   (0,3) (1,2)        1010 0101 1100 0011
+    ==== ================== ==================================
+
+So a codebook-constrained 2:4 mask is 1:2 over a permuted K axis, and ``c1`` is
+bit-for-bit the same mask as plain ``"1:2"``. Two things follow. Selection stays
+independent *per pair* — keeping the larger of each pair is optimal for retained
+magnitude, no search needed — and no group constrains any other, which is why
+the distribution of patterns across a matrix is free. An arbitrary set can also
+be spelled out, e.g. ``"2:4@{1010,0101,1001}"``, for when the kernel side
+changes which patterns it supports.
 
 Nothing here accelerates *training*. The mask is a fixed binary tensor applied
 to dense weights, so the forward/backward still run dense GEMMs on the GPU at
@@ -50,6 +76,7 @@ Fine-tune an existing dense checkpoint under a fixed mask::
 
 from __future__ import annotations
 
+import itertools
 import re
 from typing import Iterable, Optional
 
@@ -61,6 +88,7 @@ __all__ = [
     "parse_pattern",
     "build_mask",
     "verify_pattern",
+    "pattern_indices",
     "is_pointwise",
     "as_matrix",
     "MaskedLinear",
@@ -76,6 +104,27 @@ _NM_RE = re.compile(r"^(\d+):(\d+)$")
 _BLOCK_RE = re.compile(r"^1x(\d+):(\d+(?:\.\d+)?)$")
 _UNSTRUCT_RE = re.compile(r"^unstructured:(\d+(?:\.\d+)?)$")
 _BLOCKDIAG_RE = re.compile(r"^blockdiag:(\d+)$")
+_CODEBOOK_RE = re.compile(r"^(\d+):(\d+)@(.+)$")
+
+# The three named 2:4 codebooks, held as their pair decomposition (see the
+# module docstring): a codebook is "one nonzero from each pair".
+_CODEBOOKS = {
+    "c1": ((0, 1), (2, 3)),
+    "c2": ((0, 2), (1, 3)),
+    "c3": ((0, 3), (1, 2)),
+}
+
+
+def _patterns_from_pairing(pairing: tuple) -> list[tuple[int, ...]]:
+    """Every mask that keeps exactly one index out of each pair."""
+    width = sum(len(pair) for pair in pairing)
+    out = []
+    for combo in itertools.product(*pairing):
+        bits = [0] * width
+        for i in combo:
+            bits[i] = 1
+        out.append(tuple(bits))
+    return sorted(out)
 
 
 def parse_pattern(pattern: str) -> dict:
@@ -114,6 +163,41 @@ def parse_pattern(pattern: str) -> dict:
         return {"family": "blockdiag", "pattern": p, "nblocks": nblocks,
                 "sparsity": 1.0 - 1.0 / nblocks}
 
+    m = _CODEBOOK_RE.match(p)
+    if m:
+        n, group, spec = int(m.group(1)), int(m.group(2)), m.group(3).strip()
+        if not 0 < n < group:
+            raise ValueError(f"N:M pattern needs 0 < N < M, got {pattern!r}")
+        if spec in _CODEBOOKS:
+            if (n, group) != (2, 4):
+                raise ValueError(
+                    f"named codebook {spec!r} is defined for 2:4 only, got {pattern!r}")
+            pairing = _CODEBOOKS[spec]
+            allowed, name = _patterns_from_pairing(pairing), spec
+        elif spec.startswith("{") and spec.endswith("}"):
+            pairing, name, allowed = None, "custom", []
+            for tok in spec[1:-1].split(","):
+                tok = tok.strip()
+                if len(tok) != group or set(tok) - {"0", "1"}:
+                    raise ValueError(
+                        f"codebook entry {tok!r} must be {group} bits of 0/1, "
+                        f"got {pattern!r}")
+                if tok.count("1") != n:
+                    raise ValueError(
+                        f"codebook entry {tok!r} must hold exactly {n} ones, "
+                        f"got {pattern!r}")
+                allowed.append(tuple(int(c) for c in tok))
+            allowed = sorted(set(allowed))
+            if not allowed:
+                raise ValueError(f"empty codebook in {pattern!r}")
+        else:
+            raise ValueError(
+                f"unknown codebook {spec!r} in {pattern!r}; expected one of "
+                f"{sorted(_CODEBOOKS)} or an explicit set like '{{1010,0101}}'")
+        return {"family": "codebook", "pattern": p, "n": n, "group": group,
+                "sparsity": 1.0 - n / group, "codebook": name,
+                "allowed": tuple(allowed), "pairing": pairing}
+
     m = _UNSTRUCT_RE.match(p)
     if m:
         pct = float(m.group(1))
@@ -123,8 +207,8 @@ def parse_pattern(pattern: str) -> dict:
 
     raise ValueError(
         f"Unknown sparsity pattern {pattern!r}; expected 'N:M' (e.g. '2:4'), "
-        f"'1xB:PCT' (e.g. '1x4:80'), 'blockdiag:N' (e.g. 'blockdiag:4'), "
-        f"'unstructured:PCT', or 'dense'."
+        f"'N:M@CODEBOOK' (e.g. '2:4@c1'), '1xB:PCT' (e.g. '1x4:80'), "
+        f"'blockdiag:N' (e.g. 'blockdiag:4'), 'unstructured:PCT', or 'dense'."
     )
 
 
@@ -207,6 +291,24 @@ def build_mask(weight: torch.Tensor, pattern: str, *, axis: str = "in",
             gmask = torch.zeros_like(head)
             gmask.scatter_(-1, keep, 1.0)
             mask[:, : n_groups * group] = gmask.reshape(rows, n_groups * group)
+        if K % group and tail == "drop":
+            mask[:, n_groups * group:] = 0.0
+
+    elif fam == "codebook":
+        # 2:4 (or any N:M) narrowed to a fixed table of legal patterns, so each
+        # group's choice is an index into that table rather than an arbitrary
+        # combination. Score every legal pattern by the magnitude it keeps and
+        # take the best: for the pair-decomposable codebooks (c1/c2/c3) that is
+        # the same answer as keeping the larger of each pair, but the search
+        # form also covers a codebook that does not decompose.
+        group = desc["group"]
+        n_groups = K // group
+        mask = torch.ones_like(w)
+        if n_groups > 0:
+            allowed = torch.tensor(desc["allowed"], dtype=w.dtype, device=w.device)
+            head = mag[:, : n_groups * group].reshape(rows, n_groups, group)
+            best = (head @ allowed.t()).argmax(dim=-1)           # (rows, n_groups)
+            mask[:, : n_groups * group] = allowed[best].reshape(rows, n_groups * group)
         if K % group and tail == "drop":
             mask[:, n_groups * group:] = 0.0
 
@@ -311,6 +413,21 @@ def verify_pattern(weight: torch.Tensor, pattern: str, *, axis: str = "in",
             counts = head.sum(dim=-1)
             result["groups"] = rows * n_groups
             result["violations"] = int((counts > n).sum().item())
+    elif desc["family"] == "codebook":
+        # The count check that N:M uses is not enough here: a group holding
+        # 1100 has two nonzeros and still breaks a c1 kernel, which only ever
+        # emits 1010/0101/1001/0110. Require the support to fit inside at least
+        # one legal pattern -- subset, not equality, since a surviving weight
+        # may be exactly zero by chance (int8 rounding makes that routine).
+        group = desc["group"]
+        n_groups = K // group
+        if n_groups:
+            head = nz[:, : n_groups * group].reshape(rows, n_groups, group)
+            allowed = torch.tensor(desc["allowed"], dtype=torch.bool, device=w.device)
+            fits = ~(head.unsqueeze(-2) & ~allowed).any(dim=-1)     # (rows, g, P)
+            result["groups"] = rows * n_groups
+            result["violations"] = int((~fits.any(dim=-1)).sum().item())
+
     elif desc["family"] == "block":
         block = desc["block"]
         n_blocks = K // block
@@ -345,6 +462,41 @@ def verify_pattern(weight: torch.Tensor, pattern: str, *, axis: str = "in",
 
     result["ok"] = result["violations"] == 0 and result["sparsity_shortfall"] <= 0.02
     return result
+
+
+@torch.no_grad()
+def pattern_indices(weight: torch.Tensor, pattern: str, *, axis: str = "in") -> torch.Tensor:
+    """Per-group codebook index for a codebook-masked weight.
+
+    Returns an ``(rows, K // group)`` int64 tensor whose ``[r, g]`` entry is the
+    position in ``parse_pattern(pattern)["allowed"]`` of the pattern that group
+    uses. This is the form a packer wants — 2 bits per group for a 4-pattern
+    codebook — rather than a full uint8 mask, and it is only meaningful because
+    the codebook is fixed for the whole matrix.
+
+    A group at full density matches exactly one legal pattern (all legal
+    patterns hold the same number of nonzeros, so a subset of that size is an
+    equality). A group with an incidental zero fits several; it resolves to the
+    lowest index, which is always a legal superset of the support. Raises if any
+    group's support is not inside any legal pattern — i.e. if the weight does not
+    obey the codebook in the first place.
+    """
+    desc = parse_pattern(pattern)
+    if desc["family"] != "codebook":
+        raise ValueError(f"pattern_indices needs a codebook pattern, got {pattern!r}")
+    w = _as_km(weight, axis)
+    rows, K = w.shape
+    group = desc["group"]
+    n_groups = K // group
+    allowed = torch.tensor(desc["allowed"], dtype=torch.bool, device=w.device)
+    head = (w[:, : n_groups * group] != 0).reshape(rows, n_groups, group)
+    fits = ~(head.unsqueeze(-2) & ~allowed).any(dim=-1)             # (rows, g, P)
+    bad = int((~fits.any(dim=-1)).sum().item())
+    if bad:
+        raise ValueError(
+            f"{bad}/{rows * n_groups} groups do not obey codebook "
+            f"{desc['codebook']!r} ({desc['pattern']})")
+    return fits.to(torch.uint8).argmax(dim=-1).to(torch.int64)
 
 
 def tail_elements(weight: torch.Tensor, pattern: str, *, axis: str = "in") -> int:
