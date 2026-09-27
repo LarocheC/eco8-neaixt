@@ -32,6 +32,57 @@ except ImportError:
 torch.backends.cudnn.benchmark = False
 
 
+class LinearWarmup:
+    """Linear LR warmup for one optimizer, layered over a per-epoch scheduler.
+
+    The first ``warmup_steps`` optimizer steps (global step index ``s``) run at
+    ``lr_epoch * (s + 1) / warmup_steps``, where ``lr_epoch`` is the group's lr
+    recorded by ``epoch_start()`` (i.e. whatever the per-epoch scheduler set);
+    afterwards they run at ``lr_epoch`` itself. ``epoch_end()`` restores the
+    unscaled lr BEFORE ``scheduler.step()``, so a chainable scheduler such as
+    ExponentialLR (which multiplies the current group lr) never sees a scaled
+    value and its per-epoch trajectory is exactly the no-warmup one.
+    ``warmup_steps <= 0`` makes every method a no-op.
+    """
+
+    def __init__(self, optimizer, warmup_steps):
+        self.optimizer = optimizer
+        self.warmup_steps = int(warmup_steps or 0)
+        self.base_lrs = None
+
+    @property
+    def enabled(self):
+        return self.warmup_steps > 0
+
+    def epoch_start(self):
+        if self.enabled:
+            self.base_lrs = [g['lr'] for g in self.optimizer.param_groups]
+
+    def scale(self, step):
+        if not self.enabled or step >= self.warmup_steps:
+            return 1.0
+        return (step + 1) / self.warmup_steps
+
+    def before_step(self, step):
+        """Set the lr used by the optimizer step at global step ``step``."""
+        if not self.enabled:
+            return
+        if step >= self.warmup_steps:
+            self._restore()
+            return
+        k = self.scale(step)
+        for g, lr in zip(self.optimizer.param_groups, self.base_lrs):
+            g['lr'] = lr * k
+
+    def epoch_end(self):
+        if self.enabled:
+            self._restore()
+
+    def _restore(self):
+        for g, lr in zip(self.optimizer.param_groups, self.base_lrs):
+            g['lr'] = lr
+
+
 def train(rank, a, h):
     if h.num_gpus > 1:
         init_process_group(backend=h.dist_config['dist_backend'], init_method=h.dist_config['dist_url'],
@@ -147,6 +198,11 @@ def train(rank, a, h):
     best_pesq = state_dict_do.get('best_pesq', 0) if state_dict_do is not None else 0
     quant_first_cycle_done = False    # Phase 6 (TRN-03)
 
+    # Generator-only linear LR warmup (h.warmup_steps, default 0 = off).
+    warmup_g = LinearWarmup(optim_g, h.get("warmup_steps", 0))
+    if rank == 0 and warmup_g.enabled:
+        print('Generator LR warmup: {} steps'.format(warmup_g.warmup_steps))
+
     for epoch in range(max(0, last_epoch), a.training_epochs):
         if rank == 0:
             start = time.time()
@@ -154,6 +210,8 @@ def train(rank, a, h):
 
         if h.num_gpus > 1:
             train_sampler.set_epoch(epoch)
+
+        warmup_g.epoch_start()
 
         for i, batch in enumerate(train_loader):
 
@@ -193,6 +251,7 @@ def train(rank, a, h):
             optim_d.step()
 
             # Generator
+            warmup_g.before_step(steps)
             optim_g.zero_grad()
 
             # L2 Magnitude Loss
@@ -331,6 +390,7 @@ def train(rank, a, h):
 
             steps += 1
 
+        warmup_g.epoch_end()     # unscaled lr back before the scheduler reads it
         scheduler_g.step()
         scheduler_d.step()
 

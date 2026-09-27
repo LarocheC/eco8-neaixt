@@ -168,6 +168,56 @@ def _get_feature_extractor(extractor_type, compress_factor=None):
     raise ValueError(f"unsupported extractor_type {extractor_type!r}")
 
 
+def _check_frontend_norm(frontend_norm):
+    """'batch' -> 'batch'; None / 'none' -> None; anything else is an error."""
+    if frontend_norm in (None, "none"):
+        return None
+    if frontend_norm == "batch":
+        return "batch"
+    raise ValueError(f"unsupported frontend_norm {frontend_norm!r}; use 'batch' or null")
+
+
+def load_input_mean(input_norm, h):
+    """Resolve the config's `input_norm` block to a (n_features,) mean tensor, or None.
+
+    input_norm: null (off) or {"kind": "mean", "path": "<stats json>"} where the
+    JSON is written by convfsenet/input_stats.py. The file's provenance must
+    match the model's feature pipeline (n_fft, hop, window, extractor,
+    compress factor, n_features) -- a mean measured on other features is refused.
+    """
+    if input_norm in (None, {}, "none"):
+        return None
+    if not isinstance(input_norm, dict) or input_norm.get("kind") != "mean":
+        raise ValueError(f"unsupported input_norm {input_norm!r}; use {{'kind': 'mean', 'path': ...}} or null")
+    import json
+    import os
+    path = input_norm["path"]
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"input_norm stats file {path!r} not found (relative paths resolve against the cwd; "
+            f"build it with `python -m convfsenet.input_stats`)")
+    with open(path) as f:
+        stats = json.load(f)
+    feat = stats.get("features", {})
+    n_fft = int(h.get("n_fft", 512))
+    want = {
+        "n_fft": n_fft,
+        "win_length": int(h.get("win_length", n_fft)),
+        "hop_size": int(h.get("hop_size", n_fft // 2)),
+        "n_features": int(h.get("n_features", n_fft // 2 + 1)),
+        "extractor_type": h.get("extractor_type", "mag"),
+        "compress_factor": h.get("compress_factor", None),
+    }
+    bad = {k: (feat.get(k), v) for k, v in want.items() if feat.get(k) != v}
+    if bad:
+        raise ValueError(f"input_norm stats {path!r} were measured on other features: "
+                         + ", ".join(f"{k}: file {a!r} vs model {b!r}" for k, (a, b) in bad.items()))
+    mean = torch.tensor(stats["mean"], dtype=torch.float32)
+    if mean.numel() != want["n_features"]:
+        raise ValueError(f"input_norm stats {path!r} hold {mean.numel()} bins, expected {want['n_features']}")
+    return mean
+
+
 def _get_masker(extractor_type):
     # The mask is a real gain applied to the complex STFT — independent of how
     # input features were extracted, so 'mag' and 'mag_compressed' share it.
@@ -354,7 +404,7 @@ class ConvFSENet(BaseModel):
                  n_channels_res, n_channels_conv, kernel_size,
                  n_blocks, n_stacks, dropout, norm_type,
                  extractor_type, compress_factor, causal,
-                 loss, preproc, postproc):
+                 loss, preproc, postproc, *, frontend_norm=None, input_mean=None):
         super().__init__(loss, preproc, postproc)
         self.n_fft = n_fft
         self.win_length = win_length
@@ -371,14 +421,48 @@ class ConvFSENet(BaseModel):
         self.causal = causal
         # layers
         self.features_extractor = _get_feature_extractor(extractor_type, compress_factor)
-        self.frontend = nn.Sequential(nn.Conv1d(n_features, n_channels_res, 1), nn.ReLU())
+        # Block-design options (both default off; off builds exactly the modules,
+        # state_dict keys and init RNG draws of the original model):
+        #   frontend_norm='batch' -> Conv1d -> BatchNorm1d -> ReLU. The conv stays
+        #       'frontend.0' so sparsity / export code that addresses it by name
+        #       keeps working; convfsenet/fold.py folds the BN (and the centring)
+        #       back into it for export.
+        #   input_mean (n_features,) -> a frozen per-bin mean subtracted from the
+        #       features right before the frontend. The masker still multiplies
+        #       the ORIGINAL noisy STFT.
+        self.frontend_norm = _check_frontend_norm(frontend_norm)
+        if self.frontend_norm == "batch":
+            self.frontend = nn.Sequential(
+                nn.Conv1d(n_features, n_channels_res, 1),
+                nn.BatchNorm1d(n_channels_res),
+                nn.ReLU(),
+            )
+        else:
+            self.frontend = nn.Sequential(nn.Conv1d(n_features, n_channels_res, 1), nn.ReLU())
+        self.input_centering = input_mean is not None
+        if self.input_centering:
+            mu = torch.as_tensor(input_mean, dtype=torch.float32).reshape(-1)
+            if mu.numel() != n_features:
+                raise ValueError(f"input_mean has {mu.numel()} values, expected n_features={n_features}")
+            # Persistent: the checkpoint carries mu, so eval / fold never need the stats file.
+            self.register_buffer("input_mean", mu.clone())
         self.backend = nn.Sequential(nn.Conv1d(n_channels_res, n_features, 1), nn.Sigmoid())
         self.tcm = TCM(n_channels_res, n_channels_conv, kernel_size, n_blocks, n_stacks, dropout, norm_type, causal)
         self.masker = _get_masker(extractor_type)
 
+    def frontend_features(self, stft_noisy):
+        """The real features the frontend conv sees: extractor output, centred if enabled.
+
+        stft_noisy: (B, F, T) complex -> (B, F, T) real.
+        """
+        feats = self.features_extractor(stft_noisy)
+        if self.input_centering:
+            feats = feats - self.input_mean.view(-1, 1)
+        return feats
+
     def forward(self, stft_noisy):
         stft_noisy = stft_noisy.squeeze(1)
-        feats = self.features_extractor(stft_noisy)
+        feats = self.frontend_features(stft_noisy)
         x = self.frontend(feats)
         x = self.tcm(x)
         mask = self.backend(x)
@@ -393,13 +477,14 @@ class ConvFSENet_QuantFriendly(ConvFSENet):
                  n_channels_res, n_channels_conv, kernel_size,
                  n_blocks, n_stacks,
                  extractor_type, compress_factor, causal,
-                 loss, preproc, postproc):
+                 loss, preproc, postproc, *, frontend_norm=None, input_mean=None):
         super().__init__(
             n_fft, win_length, n_features,
             n_channels_res, n_channels_conv, kernel_size,
             n_blocks, n_stacks, 0.0, "batch",
             extractor_type, compress_factor, causal,
             loss, preproc, postproc,
+            frontend_norm=frontend_norm, input_mean=input_mean,
         )
         for i, m in enumerate(self.tcm):
             self.tcm[i] = TCMBlock_QuantFriendly(
@@ -520,6 +605,11 @@ def build_causal_model(h=None):
     pull a new dependency. Hyperparams default to the quant_td.yaml values;
     pass an AttrDict / dict-like `h` to override (e.g., from configs/*.json).
 
+    Block-design keys (all default off -> the original model, byte-identical):
+        frontend_norm = "batch"   frontend becomes Conv1d -> BatchNorm1d -> ReLU
+        input_norm    = {"kind": "mean", "path": ...}  subtract a frozen per-bin
+                        feature mean (convfsenet/input_stats.py) before the frontend
+
     Defaults flipped from build_model():
         causal     = True       (required for the streaming wrapper)
         bias       = matches the parent class definition
@@ -539,6 +629,9 @@ def build_causal_model(h=None):
     causal = bool(h.get("causal", True))                                  # default True for the trainer
     extractor_type = h.get("extractor_type", "mag")
     compress_factor = h.get("compress_factor", None)
+    # Block-design options, both off unless the config sets them (see ConvFSENet).
+    frontend_norm = h.get("frontend_norm", None)
+    input_mean = load_input_mean(h.get("input_norm", None), h)
 
     preproc = _TorchSpectrogram(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
     postproc = _TorchInverseSpectrogram(n_fft=n_fft, win_length=win_length, hop_length=hop_length)
@@ -558,6 +651,7 @@ def build_causal_model(h=None):
         extractor_type=extractor_type, compress_factor=compress_factor,
         causal=causal,
         loss=loss, preproc=preproc, postproc=postproc,
+        frontend_norm=frontend_norm, input_mean=input_mean,
     )
 
 

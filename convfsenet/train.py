@@ -55,6 +55,56 @@ def _to_dev(t, device):
     return t.to(device, non_blocking=True)
 
 
+class LinearWarmup:
+    """Linear LR warmup of one optimizer on top of a per-epoch scheduler.
+
+    Global step s (0-based) trains at lr_epoch * min(1, (s + 1) / warmup_steps),
+    where lr_epoch is whatever the scheduler set for the current epoch; the
+    peak lr is unchanged. The per-epoch scheduler is never disturbed:
+
+        warmup.epoch_start()        # record the scheduler's lr for this epoch
+        warmup.step(steps)          # before each optimizer step: scale it
+        ...
+        warmup.epoch_end()          # restore the unscaled lr ...
+        scheduler.step()            # ... BEFORE the scheduler reads it
+
+    (CosineAnnealingLR.step() is recursive in the param group's current lr, so
+    stepping it on a scaled lr would bend the whole schedule.) warmup_steps=0
+    makes every call a no-op: the optimizer's lr is never written.
+    """
+
+    def __init__(self, optim, warmup_steps):
+        self.optim = optim
+        self.warmup_steps = int(warmup_steps or 0)
+        if self.warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be >= 0, got {warmup_steps}")
+        self._epoch_lrs = None
+
+    @property
+    def enabled(self):
+        return self.warmup_steps > 0
+
+    def factor(self, global_step):
+        return min(1.0, (int(global_step) + 1) / self.warmup_steps) if self.enabled else 1.0
+
+    def epoch_start(self):
+        if self.enabled:
+            self._epoch_lrs = [g["lr"] for g in self.optim.param_groups]
+
+    def step(self, global_step):
+        if not self.enabled:
+            return
+        f = self.factor(global_step)
+        for g, lr in zip(self.optim.param_groups, self._epoch_lrs):
+            g["lr"] = lr * f
+
+    def epoch_end(self):
+        if not self.enabled:
+            return
+        for g, lr in zip(self.optim.param_groups, self._epoch_lrs):
+            g["lr"] = lr
+
+
 def train(a, h):
     torch.manual_seed(h.seed)
     if torch.cuda.is_available():
@@ -170,6 +220,12 @@ def train(a, h):
             for grp, lr in zip(optim_d.param_groups, scheduler_d.get_last_lr()):
                 grp["lr"] = lr
 
+    # Optional linear warmup of the GENERATOR optimizer (h.warmup_steps, default
+    # 0 = off: the lr is never touched). The discriminator is not warmed up.
+    warmup = LinearWarmup(optim, h.get("warmup_steps", 0))
+    if warmup.enabled:
+        print(f"generator lr warmup: linear over {warmup.warmup_steps} steps")
+
     # ----- datasets ----------------------------------------------------------
     hf = load_voicebank_demand(cache_dir=a.hf_cache_dir)
     trainset = Dataset(
@@ -201,9 +257,11 @@ def train(a, h):
         model.train()
         start = time.time()
         print(f"Epoch: {epoch + 1}")
+        warmup.epoch_start()
 
         for i, batch in enumerate(train_loader):
             start_b = time.time()
+            warmup.step(steps)
             clean_audio, noisy_audio = batch
             clean_audio = _to_dev(clean_audio, device).unsqueeze(1)   # (B, 1, samples)
             noisy_audio = _to_dev(noisy_audio, device).unsqueeze(1)
@@ -275,6 +333,7 @@ def train(a, h):
 
             steps += 1
 
+        warmup.epoch_end()                      # unscaled lr back before the scheduler reads it
         scheduler.step()
         if use_gan:
             scheduler_d.step()

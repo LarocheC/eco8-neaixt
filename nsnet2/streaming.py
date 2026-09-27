@@ -50,6 +50,12 @@ class NSNet2Streaming(nn.Module):
 
     def __init__(self, base: NSNet2):
         super().__init__()
+        # The streaming path calls fc_in/fc1/fc2 with an inline ReLU, so it
+        # would silently skip block-design input centring / BatchNorm.
+        if getattr(base, "input_norm", False) or getattr(base, "block_norm", False):
+            raise ValueError(
+                "NSNet2Streaming needs a plain NSNet2; fold the block-design "
+                "model first (python -m nsnet2.fold / nsnet2.fold.fold_for_export)")
         # D-01: hold base by reference; FC layers are reused without cloning.
         self.base = base
         self.gru_kind = base.gru_kind

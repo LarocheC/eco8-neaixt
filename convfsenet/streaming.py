@@ -138,6 +138,7 @@ class ConvFSENetStreaming(nn.Module):
 
     def __init__(self, base: ConvFSENet_QuantFriendly):
         super().__init__()
+        _require_plain(base, "ConvFSENetStreaming")
         if not base.causal:
             raise ValueError(
                 "ConvFSENetStreaming requires causal=True on the base model "
@@ -211,6 +212,15 @@ class ConvFSENetStreaming(nn.Module):
 # =============================================================================
 # Step 3: efficient streaming — BN folded, dilation absorbed into the gather.
 # =============================================================================
+
+
+def _require_plain(base, who: str) -> None:
+    """Refuse an unfolded block-design model: the streaming paths rebuild the
+    frontend as frontend[0] + ReLU on the raw features, silently skipping the
+    input centring and the frontend BatchNorm."""
+    if getattr(base, "frontend_norm", None) is not None or getattr(base, "input_centering", False):
+        raise ValueError(f"{who} needs a plain ConvFSENet; fold the block-design model first "
+                         "(python -m convfsenet.fold / convfsenet.fold.fold_model)")
 
 
 def _fold_bn_into_conv(conv: nn.Conv1d, bn: nn.BatchNorm1d) -> nn.Conv1d:
@@ -383,6 +393,7 @@ class ConvFSENetStreamingFast(nn.Module):
 
     def __init__(self, base: ConvFSENet_QuantFriendly):
         super().__init__()
+        _require_plain(base, "ConvFSENetStreamingFast")
         if not base.causal:
             raise ValueError(
                 "ConvFSENetStreamingFast requires causal=True on the base model."
@@ -624,6 +635,7 @@ class ConvFSENetWindowedONNX(nn.Module):
 
     def __init__(self, base: ConvFSENet_QuantFriendly, T: int = 1, drop_nyquist: bool = False):
         super().__init__()
+        _require_plain(base, "ConvFSENetWindowedONNX")
         if not base.causal:
             raise ValueError(
                 "ConvFSENetWindowedONNX requires causal=True on the base model "
