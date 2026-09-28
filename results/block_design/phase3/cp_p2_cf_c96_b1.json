@@ -1,0 +1,69 @@
+{
+ "ckpt": "/home/clement/eco8-neaixt-blockdesign/cp_p2_cf_c96_b1/g_best",
+ "seed": 1234,
+ "block_design": true,
+ "pesq_dense_asis": 2.8601135452395505,
+ "fold_xpred_maxrel_20utt_strict": 1.0902245997655705e-06,
+ "pesq_dense_folded": 2.8600890571341933,
+ "frontend_dead": {
+  "units": 96,
+  "train": 0,
+  "test": 0,
+  "both": 0,
+  "min_train_fires_of_train_alive": 952863
+ },
+ "params": 395297,
+ "free_2:4": {
+  "nonzeros": 204785,
+  "pruned": 190512,
+  "energy_err_pruned": 0.06069,
+  "energy_err_refit": 0.01756,
+  "pesq": 2.834710099743408
+ },
+ "c1_noperm": {
+  "nonzeros": 204785,
+  "pruned": 190512,
+  "energy_err_pruned": 0.08671,
+  "energy_err_refit": 0.02471,
+  "pesq": 2.8365776881720257
+ },
+ "c1_perm": {
+  "nonzeros": 204785,
+  "pruned": 190512,
+  "matched_over_identity_gain": {
+   "res": 1.0171,
+   "bins": 1.1876,
+   "tcm.0.conv1x1_out.weight": 1.0624,
+   "tcm.1.conv1x1_out.weight": 1.06,
+   "tcm.2.conv1x1_out.weight": 1.058,
+   "tcm.3.conv1x1_out.weight": 1.0563,
+   "tcm.4.conv1x1_out.weight": 1.0631,
+   "tcm.5.conv1x1_out.weight": 1.0473,
+   "tcm.6.conv1x1_out.weight": 1.062,
+   "tcm.7.conv1x1_out.weight": 1.0538,
+   "tcm.8.conv1x1_out.weight": 1.0533
+  },
+  "energy_err_pruned": 0.06134,
+  "energy_err_refit": 0.02284,
+  "permuted_model_c1_violations": 0,
+  "permuted_vs_unpermuted_mask_maxabs_100utt": 3.6954879760742188e-06,
+  "maxrel": 3.6954879760742188e-06,
+  "pesq": 2.835490871256995
+ },
+ "int8_sparse": {
+  "w8a8_dynamic_evalptq": 2.8306622482040553,
+  "w8a8_static_minmax": 2.831836082692285,
+  "n_weight_fq": 29,
+  "n_act_fq": 29,
+  "drop_dynamic": -0.00482862305293974,
+  "drop_static": -0.003654788564710021
+ },
+ "int8_dense": {
+  "w8a8_dynamic_evalptq": 2.856151353821014,
+  "w8a8_static_minmax": 2.8528917028197966,
+  "n_weight_fq": 29,
+  "n_act_fq": 29,
+  "drop_dynamic": -0.00393770331317933,
+  "drop_static": -0.007197354314396609
+ }
+}

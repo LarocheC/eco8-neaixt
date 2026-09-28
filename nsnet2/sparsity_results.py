@@ -106,12 +106,15 @@ _EPOCH = re.compile(r"Time taken for epoch \d+ is")
 _INIT = re.compile(r"Warm-started (?:generator|weights) from (\S+)")
 
 
-def _log_text(run: str) -> str:
-    """The run's own log; the older size-sweep runs live inside a shared log."""
+def _log_text(run: str, root: str = ".") -> str:
+    """The run's own log; the older size-sweep runs live inside a shared log.
+
+    ``root`` is the checkout holding ``cp_<run>`` (runs of one study can live in
+    different worktrees)."""
     for path in (f"cp_{run}.log", f"cp_{run}/train.log"):
-        if os.path.exists(path):
-            return open(path).read()
-    shared = open("cp_dense_matched_sweep.log").read()
+        if os.path.exists(os.path.join(root, path)):
+            return open(os.path.join(root, path)).read()
+    shared = open(os.path.join(root, "cp_dense_matched_sweep.log")).read()
     blocks = re.split(r"=== \[[^\]]*\] Run: ", shared)[1:]
     for block in blocks:
         if block.split()[0] == run:
@@ -119,9 +122,9 @@ def _log_text(run: str) -> str:
     raise FileNotFoundError(f"no log for {run}")
 
 
-def _params(run: str) -> tuple[int, int]:
+def _params(run: str, root: str = ".") -> tuple[int, int]:
     with contextlib.redirect_stdout(sys.stderr):      # load_checkpoint prints a banner
-        ckpt = load_checkpoint(f"cp_{run}/g_best", torch.device("cpu"))
+        ckpt = load_checkpoint(os.path.join(root, f"cp_{run}/g_best"), torch.device("cpu"))
     sd = ckpt.get("generator", ckpt)
     total = nonzero = 0
     for name, v in sd.items():

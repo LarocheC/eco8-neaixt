@@ -1,0 +1,60 @@
+{
+ "B0/g_00005784": {
+  "frames": 2130583,
+  "dead": 25,
+  "units": 96,
+  "rare": 44,
+  "dead_max_pre": -0.00486007472500205,
+  "alive_min_fire": 1
+ },
+ "B0/g_best": {
+  "frames": 2130583,
+  "dead": 25,
+  "units": 96,
+  "rare": 44,
+  "dead_max_pre": -0.004857167135924101,
+  "alive_min_fire": 1
+ },
+ "A0/g_00000600": {
+  "fc_in": {
+   "dead": 123,
+   "units": 192,
+   "rare": 127,
+   "dead_max_pre": -0.0032440368086099625
+  },
+  "fc1": {
+   "dead": 23,
+   "units": 192,
+   "rare": 55,
+   "dead_max_pre": -0.00769457221031189
+  },
+  "fc2": {
+   "dead": 36,
+   "units": 192,
+   "rare": 48,
+   "dead_max_pre": -0.005890004336833954
+  },
+  "frames": 2119011
+ },
+ "A1/g_00000600": {
+  "fc_in": {
+   "dead": 0,
+   "units": 192,
+   "rare": 0,
+   "dead_max_pre": null
+  },
+  "fc1": {
+   "dead": 0,
+   "units": 192,
+   "rare": 0,
+   "dead_max_pre": null
+  },
+  "fc2": {
+   "dead": 5,
+   "units": 192,
+   "rare": 12,
+   "dead_max_pre": -0.0026677586138248444
+  },
+  "frames": 2119011
+ }
+}

@@ -1,0 +1,94 @@
+{
+ "ckpt": "/home/clement/eco8-neaixt-blockdesign/cp_p2_ns_sq192_a1_s2345/g_best",
+ "hidden": 192,
+ "fc_hidden": 192,
+ "input_norm": true,
+ "seed": 2345,
+ "dead_fc_in": {
+  "units": 192,
+  "train": 0,
+  "test": 0,
+  "both": 0,
+  "train_only_fires_on_test": 0,
+  "test_only_fires_on_train": 0,
+  "min_train_fires_of_train_alive": 536911
+ },
+ "dead_fc2": {
+  "units": 192,
+  "train": 10,
+  "test": 10,
+  "both": 10,
+  "train_only_fires_on_test": 0,
+  "test_only_fires_on_train": 0,
+  "min_train_fires_of_train_alive": 49394
+ },
+ "params_dense": 617921,
+ "params_compacted": 613421,
+ "compacted_dims": {
+  "fc_in_out/gru_in": 192,
+  "fc2_out/fc_out_in": 182
+ },
+ "compaction_maxabs_test_strictfp32": 1.5497207641601562e-05,
+ "compaction_maxrel_test_strictfp32": 2.8911285880894866e-06,
+ "compaction_maxabs_test_trainerTF32": 0.0008120536804199219,
+ "pesq_dense": 2.8472161654708454,
+ "pesq_compacted": 2.8472188792182402,
+ "2:4": {
+  "nonzeros": 308627,
+  "pruned": 304794,
+  "energy_err_pruned": 0.05569,
+  "energy_err_refit": 0.01206,
+  "pesq": 2.8294755441760553
+ },
+ "c1_noperm": {
+  "nonzeros": 308627,
+  "pruned": 304794,
+  "energy_err_pruned": 0.07971,
+  "energy_err_refit": 0.01693,
+  "pesq": 2.8324849819674074
+ },
+ "c1_perm": {
+  "nonzeros": 308627,
+  "pruned": 304794,
+  "matched_over_identity_gain": {
+   "bins": 1.1757,
+   "hin": 1.0311,
+   "h0": 1.0197,
+   "h1": 1.024,
+   "f1": 1.044,
+   "f2": 1.0522
+  },
+  "energy_err_pruned": 0.053,
+  "energy_err_refit": 0.01484,
+  "permuted_model_c1_violations": 0,
+  "permuted_vs_unpermuted_maxabs": 8.106231689453125e-06,
+  "permuted_vs_unpermuted_maxrel": 1.4318151215775288e-06,
+  "pesq": 2.8269843072856515
+ },
+ "int8_sparse_c1perm": {
+  "pesq_fp32_onnx": 2.8269772905747867,
+  "pesq_int8": 2.815439904777749,
+  "drop_int8_minus_fp32onnx": -0.011537385797037558,
+  "n_utts": 824,
+  "torch_vs_fp32onnx_mask_maxabs_5utt": 2.086162567138672e-06,
+  "calib_hash": "1f47d2096215a779ff60078d5b96d5d5ffcdd93e081f245778f4df421f2165fa",
+  "calib_method": "MinMax",
+  "calib_seed": 2345,
+  "n_quantizelinear": 45,
+  "int8_bytes": 692405,
+  "secs": 576
+ },
+ "int8_dense": {
+  "pesq_fp32_onnx": 2.8472009487811802,
+  "pesq_int8": 2.8177052402091256,
+  "drop_int8_minus_fp32onnx": -0.029495708572054635,
+  "n_utts": 824,
+  "torch_vs_fp32onnx_mask_maxabs_5utt": 2.1457672119140625e-06,
+  "calib_hash": "1f47d2096215a779ff60078d5b96d5d5ffcdd93e081f245778f4df421f2165fa",
+  "calib_method": "MinMax",
+  "calib_seed": 2345,
+  "n_quantizelinear": 45,
+  "int8_bytes": 692423,
+  "secs": 160
+ }
+}
