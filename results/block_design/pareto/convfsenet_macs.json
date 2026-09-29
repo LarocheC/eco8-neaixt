@@ -1,0 +1,296 @@
+{
+ "cp_p3_cf_c64_b1": {
+  "res": 64,
+  "conv": 128,
+  "params_plain": 189889,
+  "nnz_c1": 99745,
+  "macs_frame_dense": 183808.0,
+  "macs_frame_c1": 93663.99951171875,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_p2_cf_c96_b1": {
+  "res": 96,
+  "conv": 192,
+  "params_plain": 395297,
+  "nnz_c1": 204785,
+  "macs_frame_dense": 386304.0,
+  "macs_frame_c1": 195791.99926757812,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_p2_cf_c96_b1_s2345": {
+  "res": 96,
+  "conv": 192,
+  "params_plain": 395297,
+  "nnz_c1": 204785,
+  "macs_frame_dense": 386304.0,
+  "macs_frame_c1": 195791.99926757812,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_p3_cf_c128_b1": {
+  "res": 128,
+  "conv": 256,
+  "params_plain": 674433,
+  "nnz_c1": 346689,
+  "macs_frame_dense": 662528.0,
+  "macs_frame_c1": 334783.9990234375,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_p3_cf_c160_b1": {
+  "res": 160,
+  "conv": 320,
+  "params_plain": 1027297,
+  "nnz_c1": 525457,
+  "macs_frame_dense": 1012480.0,
+  "macs_frame_c1": 510639.9987792969,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_p3_cf_c192_b1": {
+  "res": 192,
+  "conv": 384,
+  "params_plain": 1453889,
+  "nnz_c1": 741089,
+  "macs_frame_dense": 1436160.0,
+  "macs_frame_c1": 723359.9985351562,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_cfs_c96_dense": {
+  "res": 96,
+  "conv": 192,
+  "params_plain": 395297,
+  "nnz_c1": 204785,
+  "macs_frame_dense": 386304.0,
+  "macs_frame_c1": 195791.99926757812,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_p2_cf_c96_old_s2345": {
+  "res": 96,
+  "conv": 192,
+  "params_plain": 395297,
+  "nnz_c1": 204785,
+  "macs_frame_dense": 386304.0,
+  "macs_frame_c1": 195791.99926757812,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_cfs_c64_dense": {
+  "res": 64,
+  "conv": 128,
+  "params_plain": 189889,
+  "nnz_c1": 99745,
+  "macs_frame_dense": 183808.0,
+  "macs_frame_c1": 93663.99951171875,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_cfs_dense_r67": {
+  "res": 67,
+  "conv": 134,
+  "params_plain": 206014,
+  "nnz_c1": 110824,
+  "macs_frame_dense": 199660.0,
+  "macs_frame_c1": 104469.99715441465,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_cfs_dense_r83": {
+  "res": 83,
+  "conv": 166,
+  "params_plain": 302958,
+  "nnz_c1": 161040,
+  "macs_frame_dense": 295148.0,
+  "macs_frame_c1": 153230.0051817298,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_cfs_dense_r108": {
+  "res": 108,
+  "conv": 216,
+  "params_plain": 491333,
+  "nnz_c1": 253679,
+  "macs_frame_dense": 481248.0,
+  "macs_frame_c1": 243593.9991760254,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_cfs_dense_r146": {
+  "res": 146,
+  "conv": 292,
+  "params_plain": 863847,
+  "nnz_c1": 445595,
+  "macs_frame_dense": 850304.0,
+  "macs_frame_c1": 432051.9878807068,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ },
+ "cp_cfs_dense": {
+  "res": 192,
+  "conv": 384,
+  "params_plain": 1453889,
+  "nnz_c1": 741089,
+  "macs_frame_dense": 1436160.0,
+  "macs_frame_c1": 723359.9985351562,
+  "n_conv": 29,
+  "n_masked": 20,
+  "unmasked_convs": [
+   "tcm.0.dconv",
+   "tcm.1.dconv",
+   "tcm.2.dconv",
+   "tcm.3.dconv",
+   "tcm.4.dconv",
+   "tcm.5.dconv",
+   "tcm.6.dconv",
+   "tcm.7.dconv",
+   "tcm.8.dconv"
+  ]
+ }
+}

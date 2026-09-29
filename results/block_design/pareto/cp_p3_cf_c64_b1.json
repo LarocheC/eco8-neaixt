@@ -1,0 +1,53 @@
+{
+ "ckpt": "/home/clement/eco8-neaixt-blockdesign/cp_p3_cf_c64_b1/g_best",
+ "seed": 1234,
+ "block_design": true,
+ "pesq_dense_asis": 2.8628535201248613,
+ "fold_xpred_maxrel_20utt_strict": 1.5714309113422935e-06,
+ "pesq_dense_folded": 2.8628571126067524,
+ "frontend_dead": {
+  "units": 64,
+  "train": 0,
+  "test": 0,
+  "both": 0,
+  "min_train_fires_of_train_alive": 1039757
+ },
+ "params": 189889,
+ "free_2:4": {
+  "nonzeros": 99745,
+  "pruned": 90144,
+  "energy_err_pruned": 0.05755,
+  "energy_err_refit": 0.01695,
+  "pesq": 2.7790049900418348
+ },
+ "c1_noperm": {
+  "nonzeros": 99745,
+  "pruned": 90144,
+  "energy_err_pruned": 0.08579,
+  "energy_err_refit": 0.02401,
+  "pesq": 2.741794086341719
+ },
+ "c1_perm": {
+  "nonzeros": 99745,
+  "pruned": 90144,
+  "matched_over_identity_gain": {
+   "res": 1.0297,
+   "bins": 1.1932,
+   "tcm.0.conv1x1_out.weight": 1.0712,
+   "tcm.1.conv1x1_out.weight": 1.0733,
+   "tcm.2.conv1x1_out.weight": 1.0608,
+   "tcm.3.conv1x1_out.weight": 1.0681,
+   "tcm.4.conv1x1_out.weight": 1.0598,
+   "tcm.5.conv1x1_out.weight": 1.0544,
+   "tcm.6.conv1x1_out.weight": 1.0709,
+   "tcm.7.conv1x1_out.weight": 1.0649,
+   "tcm.8.conv1x1_out.weight": 1.05
+  },
+  "energy_err_pruned": 0.0524,
+  "energy_err_refit": 0.01988,
+  "permuted_model_c1_violations": 0,
+  "permuted_vs_unpermuted_mask_maxabs_100utt": 5.9604644775390625e-06,
+  "maxrel": 5.9604644775390625e-06,
+  "pesq": 2.8049252121483237
+ }
+}

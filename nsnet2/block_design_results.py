@@ -13,12 +13,17 @@ Outputs:
 * ``BLOCK_DESIGN_PHASE3.csv``: one row per Phase-3 parent, built from
   ``results/block_design/phase3/<parent>.json`` (dead units, parameter and
   nonzero counts, dense / c1+perm+refit / free 2:4+refit / int8 PESQ).
+* ``BLOCK_DESIGN_PARETO.csv``: one row per point of the dense vs 2:4 Pareto
+  study (dense, 2:4@c1+perm+refit, free 2:4+refit, 2:4@c1 no perm), with
+  nonzeros, MACs per frame and the parent's validation summary. New widths
+  come from ``results/block_design/pareto/``, reused parents from ``phase3/``.
 * ``--update-doc`` / ``--check-doc``: rewrite, or verify against a fresh
   regeneration, every generated table in BLOCK_DESIGN.md (between
   ``<!-- BEGIN generated:NAME -->`` and ``<!-- END generated:NAME -->``).
 
     python -m nsnet2.block_design_results --runs-csv BLOCK_DESIGN_RUNS.csv \\
-        --phase3-csv BLOCK_DESIGN_PHASE3.csv --update-doc BLOCK_DESIGN.md
+        --phase3-csv BLOCK_DESIGN_PHASE3.csv --pareto-csv BLOCK_DESIGN_PARETO.csv \\
+        --update-doc BLOCK_DESIGN.md
     python -m nsnet2.block_design_results --check-doc BLOCK_DESIGN.md
 """
 
@@ -59,6 +64,12 @@ RUNS = [
     ("phase2", "convfsenet", "B1", "p2_cf_c96_b1_s2345"),
     # Old-block NSNet2 128/128: a Phase-3 point on the old sparse curve only.
     ("old-curve", "nsnet2", "old", "sq128_dense"),
+    # Pareto widths of the new designs (Phase-2 recipes, only the widths changed).
+    *[("pareto", "nsnet2", "A1", f"p3_ns_sq{h}_a1") for h in (64, 96, 128, 256, 384)],
+    *[("pareto", "convfsenet", "B1", f"p3_cf_c{c}_b1") for c in (64, 128, 160, 192)],
+    # Old-block ConvFSENet dense widths from the Row-Fusion study: dense-only context.
+    *[("old-dense", "convfsenet", "old", r) for r in ("cfs_c64_dense", "cfs_dense_r67", "cfs_dense_r83",
+                                                     "cfs_dense_r108", "cfs_dense_r146", "cfs_dense")],
 ]
 
 # Phase-2 comparisons: (label, old runs, new runs).
@@ -201,6 +212,186 @@ def verdicts(p3: list[dict]) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ pareto
+# (model, family, design, run, record dir). "square" = NSNet2 hidden = fc = H; ConvFSENet res = C, conv = 2C.
+PARETO = [
+    *[("nsnet2", "square", "A1", f"p3_ns_sq{h}_a1", "pareto") for h in (64, 96, 128)],
+    ("nsnet2", "square", "A1", "p2_ns_sq192_a1", "phase3"), ("nsnet2", "square", "A1", "p2_ns_sq192_a1_s2345", "phase3"),
+    *[("nsnet2", "square", "A1", f"p3_ns_sq{h}_a1", "pareto") for h in (256, 384)],
+    ("nsnet2", "h68", "A1", "p2_ns_h68_a1", "phase3"), ("nsnet2", "h68", "A1", "p2_ns_h68_a1_s2345", "phase3"),
+    *[("nsnet2", "square" if s != "h68" else "h68", "old", r, "phase3")
+      for m, s, d, r in PARENTS if m == "nsnet2" and d == "old"],
+    ("convfsenet", "square", "B1", "p3_cf_c64_b1", "pareto"),
+    ("convfsenet", "square", "B1", "p2_cf_c96_b1", "phase3"), ("convfsenet", "square", "B1", "p2_cf_c96_b1_s2345", "phase3"),
+    *[("convfsenet", "square", "B1", f"p3_cf_c{c}_b1", "pareto") for c in (128, 160, 192)],
+    ("convfsenet", "square", "old", "cfs_c96_dense", "phase3"), ("convfsenet", "square", "old", "p2_cf_c96_old_s2345", "phase3"),
+    *[("convfsenet", "square", "old", r, "pareto/dense_only") for study, _, _, r in RUNS if study == "old-dense"],
+]
+SPARSE_POINTS = (("c1_perm_refit", "c1_perm"), ("free24_refit", None), ("c1_noperm_refit", "c1_noperm"))
+
+
+def _ns_macs(x: dict) -> int:
+    """Weight multiply-accumulates per frame in NSNet2's 8 GEMMs after dead-unit compaction
+    (fc_in, 2 GRUs x input/recurrent, fc1, fc2, fc_out); biases and gate elementwise ops excluded."""
+    h, f = x["hidden"], x["fc_hidden"]
+    ni, nf = x["compacted_dims"]["fc_in_out/gru_in"], x["compacted_dims"]["fc2_out/fc_out_in"]
+    return 257 * ni + 3 * h * (ni + h) + 6 * h * h + h * f + f * nf + nf * 257
+
+
+def collect_pareto(runs: list[dict], data: str = DATA) -> list[dict]:
+    """One row per (parent, point). x = nonzero weights as Phase 3 defines them (dense: compacted
+    parameters incl. biases; sparse: that minus the pruned weights). MACs/frame count weight
+    multiplies only; a pruned weight is a multiply saved."""
+    by = {r["run"]: r for r in runs}
+    cf_macs = json.load(open(os.path.join(data, "pareto", "convfsenet_macs.json")))
+    rows = []
+    for model, family, design, run, where in PARETO:
+        x = json.load(open(os.path.join(data, where, f"cp_{run}.json")))
+        r = by[run]
+        if model == "nsnet2":
+            nnz, macs, dense = x["params_compacted"], _ns_macs(x), x["pesq_dense"]
+            assert x.get("macs_dense_compacted", macs) == macs, run
+            size = f"{x['hidden']}/{x['fc_hidden']}"
+        else:
+            m = cf_macs[f"cp_{run}"]
+            nnz, macs, dense = x["params"], round(m["macs_frame_dense"]), x.get("pesq_dense_folded", x["pesq_dense_asis"])
+            assert m["params_plain"] == nnz, run
+            size = f"{m['res']}/{m['conv']}"
+        base = {"model": model, "family": family, "design": design, "width": size, "run": f"cp_{run}",
+                "seed": x["seed"], "record": f"{where}/cp_{run}.json"}
+        par = {"dense_pesq": dense, "dense_val_best": r["best"], "dense_last5": r["last5"], "n_val": r["n_val"]}
+        rows.append({**base, "point": "dense", "nonzeros": nnz, "macs_per_frame": macs, "pesq": dense, **par})
+        if "c1_perm" not in x:
+            continue
+        for point, key in SPARSE_POINTS:
+            rec = x[key] if key else x.get("2:4", x.get("free_2:4"))
+            if model == "convfsenet" and key:     # 2:4@c1: the masked-MAC count measured on the folded model
+                smacs = round(cf_macs[f"cp_{run}"]["macs_frame_c1"])
+                assert rec["nonzeros"] == cf_macs[f"cp_{run}"]["nnz_c1"], run
+            else:
+                smacs = macs - rec["pruned"]
+            assert rec["nonzeros"] == nnz - rec["pruned"], run
+            rows.append({**base, "point": point, "nonzeros": rec["nonzeros"], "macs_per_frame": smacs,
+                         "pesq": rec["pesq"], **par})
+    return rows
+
+
+def _pw(pts: list[tuple[float, float]], lx: float) -> tuple[float, str]:
+    """Piecewise linear through sorted (ln x, y), extended linearly past its ends."""
+    i = max(0, min(len(pts) - 2, sum(p[0] <= lx for p in pts) - 1))
+    (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+    kind = "below range" if lx < pts[0][0] - 1e-12 else "above range" if lx > pts[-1][0] + 1e-12 else "interpolated"
+    return y0 + (y1 - y0) * (lx - x0) / (x1 - x0), kind
+
+
+def _front(rows: list[dict], x: str = "nonzeros") -> list[tuple[float, float]]:
+    """Dense curve of the given parents: per-width means of (ln x, PESQ)."""
+    g = {}
+    for r in rows:
+        g.setdefault(r["width"], []).append(r)
+    return sorted((st.mean(math.log(r[x]) for r in v), st.mean(r["pesq"] for r in v)) for v in g.values())
+
+
+def pareto_analysis(pts: list[dict]) -> dict:
+    """Sparse minus the new-design dense front at equal nonzeros.
+
+    PW = piecewise linear in ln(nonzeros) through the per-width means of the new dense parents.
+    NSNet2 also: LS = straight line through every new dense parent, and paired = the LS cost of
+    the parent's own nonzero ratio minus the sparse model's loss against that parent."""
+    out = {}
+    for model in ("nsnet2", "convfsenet"):
+        sel = lambda d, p: [r for r in pts if r["model"] == model and r["design"] == d and r["point"] == p  # noqa: E731
+                            and r["family"] == "square"]
+        new_design = "A1" if model == "nsnet2" else "B1"
+        dense = sel(new_design, "dense")
+        front, front_m = _front(dense), _front(dense, "macs_per_frame")
+        lx = np.array([math.log(r["nonzeros"]) for r in dense])
+        ly = np.array([r["pesq"] for r in dense])
+        b1, b0 = np.polyfit(lx, ly, 1)
+        res = ly - (b0 + b1 * lx)
+        sd = math.sqrt(float((res ** 2).sum()) / (len(lx) - 2))
+        se = sd / math.sqrt(float(((lx - lx.mean()) ** 2).sum()))
+        b1_l5 = np.polyfit(lx, [r["dense_last5"] for r in dense], 1)[0]
+        parent = {r["run"]: r for r in pts if r["model"] == model and r["point"] == "dense"}
+        rows = []
+        for design in (new_design, "old"):
+            for point in ("c1_perm_refit", "free24_refit"):
+                for r in sel(design, point):
+                    ref, kind = _pw(front, math.log(r["nonzeros"]))
+                    ref_m, kind_m = _pw(front_m, math.log(r["macs_per_frame"]))
+                    p = parent[r["run"]]
+                    ls = b0 + b1 * math.log(r["nonzeros"])
+                    rows.append({"run": r["run"], "design": design, "width": r["width"], "seed": r["seed"],
+                                 "point": point, "nonzeros": r["nonzeros"], "pesq": r["pesq"],
+                                 "own_dense": p["pesq"], "loss": p["pesq"] - r["pesq"],
+                                 "pw": ref, "kind": kind, "d_pw": r["pesq"] - ref,
+                                 "d_pw_macs": r["pesq"] - ref_m, "kind_macs": kind_m, "d_ls": r["pesq"] - ls,
+                                 "paired": b1 * math.log(p["nonzeros"] / r["nonzeros"]) - (p["pesq"] - r["pesq"])})
+        out[model] = {"front": front, "b0": b0, "b1": b1, "resid_sd": sd, "se_b1": se, "b1_last5": b1_l5,
+                      "n_dense": len(dense), "rows": rows}
+    return out
+
+
+def _mean_se(v: list[float]) -> str:
+    return f"{st.mean(v):+.3f} ± {st.stdev(v) / math.sqrt(len(v)):.3f} SE"
+
+
+def md_pareto_runs(pts: list[dict], model: str) -> str:
+    by = {}
+    for r in pts:
+        if r["model"] == model:
+            by.setdefault(r["run"], {})[r["point"]] = r
+    f4 = lambda g, k: f"{g[k]['pesq']:.4f}" if k in g else "-"  # noqa: E731
+    rows = []
+    for run, g in by.items():
+        d = g["dense"]
+        sp = g.get("c1_perm_refit")
+        rows.append([f"`{run}`", d["design"], d["width"], d["seed"],
+                     f"{d['nonzeros']:,} → {sp['nonzeros']:,}" if sp else f"{d['nonzeros']:,}",
+                     f"{d['macs_per_frame']:,} → {sp['macs_per_frame']:,}" if sp else f"{d['macs_per_frame']:,}",
+                     f"{d['pesq']:.4f}", f"{d['dense_val_best']:.3f}", f"{d['dense_last5']:.4f}",
+                     f4(g, "c1_perm_refit"), f4(g, "free24_refit"), f4(g, "c1_noperm_refit"),
+                     f"{sp['pesq'] - d['pesq']:+.4f}" if sp else "-"])
+    return _t(["Parent", "Design", "Width", "Seed", "Nonzeros dense → 2:4", "MACs/frame dense → 2:4",
+               "Dense (g_best)", "Val max", "Dense last-5", "2:4@c1+perm+refit", "Free 2:4+refit", "2:4@c1 no perm",
+               "c1 − own dense"], "lllrrrrrrrrrr", rows)
+
+
+def md_pareto_front(an: dict, model: str) -> str:
+    a = an[model]
+    rows, c1, fr = [], {}, {}
+    for r in a["rows"]:
+        (c1 if r["point"] == "c1_perm_refit" else fr)[r["run"]] = r
+    fmt = lambda r, k: f"{r[k]:+.4f}"  # noqa: E731
+    for run, c in c1.items():
+        f = fr[run]
+        below = c["kind"] == "below range"
+        pw = lambda r: f"{r['d_pw']:+.4f}" + (" (extrapolated)" if r["kind"] != "interpolated" else "")  # noqa: E731
+        if model == "nsnet2":
+            rows.append([f"`{run}`", c["design"], f"{c['nonzeros']:,}", pw(c), fmt(c, "d_ls"),
+                         fmt(c, "paired") if c["design"] != "old" else "-", pw(f), fmt(f, "d_ls"),
+                         fmt(f, "paired") if f["design"] != "old" else "-"])
+        else:
+            rows.append([f"`{run}`", c["design"], f"{c['nonzeros']:,}",
+                         "below the dense range" if below else f"{c['pw']:.4f}",
+                         "-" if below else pw(c), "-" if below else pw(f),
+                         "-" if c["kind_macs"] == "below range" else f"{c['d_pw_macs']:+.4f}"])
+    new = [r for r in a["rows"] if r["design"] != "old"]
+    mean = lambda p, k, interp=False: [r[k] for r in new if r["point"] == p  # noqa: E731
+                                       and (not interp or r["kind"] == "interpolated")]
+    if model == "nsnet2":
+        rows.append(["mean, new design", "", "", f"{st.mean(mean('c1_perm_refit', 'd_pw', True)):+.4f} (interpolated only)",
+                     _mean_se(mean("c1_perm_refit", "d_ls")), f"{st.mean(mean('c1_perm_refit', 'paired')):+.4f}",
+                     f"{st.mean(mean('free24_refit', 'd_pw', True)):+.4f} (interpolated only)",
+                     _mean_se(mean("free24_refit", "d_ls")), f"{st.mean(mean('free24_refit', 'paired')):+.4f}"])
+        return _t(["Sparse model (parent)", "Design", "2:4 nonzeros", "c1: Δ PW", "c1: Δ LS", "c1: paired",
+                   "free: Δ PW", "free: Δ LS", "free: paired"], "llrrrrrrr", rows)
+    rows.append(["mean, new design (interpolated)", "", "", "", f"{st.mean(mean('c1_perm_refit', 'd_pw', True)):+.4f}",
+                 f"{st.mean(mean('free24_refit', 'd_pw', True)):+.4f}", ""])
+    return _t(["Sparse model (parent)", "Design", "2:4 nonzeros", "B1 dense curve at those nonzeros",
+               "c1+perm+refit − curve", "free 2:4+refit − curve", "c1 − curve, equal MACs/frame"], "llrrrrr", rows)
+
+
 # ------------------------------------------------------------------ markdown
 def _t(header: list[str], align: str, rows: list[list]) -> str:
     lines = ["| " + " | ".join(header) + " |", "| " + " | ".join("---:" if c == "r" else "---" for c in align) + " |"]
@@ -314,9 +505,12 @@ def md_refit(p3: list[dict], sparse_csv: str) -> str:
                "Fine-tune epochs", "Fine-tune nonzeros", "Fine-tune last-5"], "llrrlrrr", rows)
 
 
-def blocks(runs: list[dict], p3: list[dict], sparse_csv: str) -> dict[str, str]:
+def blocks(runs: list[dict], p3: list[dict], sparse_csv: str, pts: list[dict]) -> dict[str, str]:
+    an = pareto_analysis(pts)
     return {"pilot": md_pilot(runs), "phase2": md_phase2(runs), "phase3-verdicts": md_verdicts(p3),
-            "phase3": md_phase3(p3), "front": md_front(p3), "refit": md_refit(p3, sparse_csv), "runs": md_runs(runs)}
+            "phase3": md_phase3(p3), "front": md_front(p3), "refit": md_refit(p3, sparse_csv), "runs": md_runs(runs),
+            "pareto-ns": md_pareto_runs(pts, "nsnet2"), "pareto-ns-front": md_pareto_front(an, "nsnet2"),
+            "pareto-cf": md_pareto_runs(pts, "convfsenet"), "pareto-cf-front": md_pareto_front(an, "convfsenet")}
 
 
 _BLOCK = re.compile(r"(<!-- BEGIN generated:(\S+) -->\n)(.*?)(<!-- END generated:\2 -->)", re.S)
@@ -341,6 +535,7 @@ def main() -> None:
     ap.add_argument("--sparse-csv", default="SPARSE_MATMUL_RUNS.csv", help="fine-tuned masked runs")
     ap.add_argument("--runs-csv", default="")
     ap.add_argument("--phase3-csv", default="")
+    ap.add_argument("--pareto-csv", default="")
     ap.add_argument("--update-doc", default="", help="rewrite the generated tables in this file")
     ap.add_argument("--check-doc", default="", help="exit 1 if this file's tables differ from a fresh regeneration")
     ap.add_argument("--markdown", action="store_true")
@@ -350,7 +545,10 @@ def main() -> None:
         _write_csv(a.runs_csv, runs)
     if a.phase3_csv:
         _write_csv(a.phase3_csv, p3)
-    gen = blocks(runs, p3, a.sparse_csv)
+    pts = collect_pareto(runs)
+    if a.pareto_csv:
+        _write_csv(a.pareto_csv, pts)
+    gen = blocks(runs, p3, a.sparse_csv, pts)
     if a.markdown:
         print("\n\n".join(f"### {k}\n\n{v}" for k, v in gen.items()))
     if a.update_doc:

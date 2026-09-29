@@ -1,0 +1,7 @@
+{
+ "ckpt": "/home/clement/eco8-neaixt/cp_cfs_c64_dense/g_best",
+ "seed": 1234,
+ "block_design": false,
+ "params": 189889,
+ "pesq_dense_asis": 2.834262139588884
+}
