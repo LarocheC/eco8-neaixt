@@ -534,3 +534,44 @@ split); last-5 is the mean of the final five validations.
   mask tests; the pruned runs were still rising slowly at the end.
 * **ConvFSENet knee.** It rested on a single-seed `r67` point that came in low: the
   new parents landed 0.019 apart against 0.048 predicted.
+
+## Summary and where the models are
+
+1. **The kernel's constraints are free on the original NSNet2**: the 4-pattern 2:4
+   codebook (one weight per pair) and square, multiple-of-32 matrices cost nothing
+   measurable, and every mask pattern was free up to 80% sparsity.
+2. **Below the capacity knee**, 2:4 NSNet2 beat a same-nonzero dense model by
+   +0.042 PESQ, while ConvFSENet did the opposite (-0.020; plain 2:4 tied).
+3. **Why**: 55-72% of NSNet2's `fc_in` ReLUs died early (raw all-positive
+   |X|^0.3 input, Adam lr 3e-3), so its layer inputs were redundant. A
+   least-squares refit recovers pruned NSNet2, and refit at pruning (+ channel
+   permutation for the codebook) matched or beat fine-tuning. ConvFSENet's inputs
+   are full-rank.
+4. **Fix** (`BLOCK_DESIGN.md`): input-mean subtraction + LR warmup (+ frontend
+   BatchNorm for ConvFSENet), all folding exactly into plain models, leave 0 dead
+   units. NSNet2 gains +0.02-0.025 dense and ~+0.03 per nonzero after 2:4 (adopted
+   at 68/102; a near-miss at 192/192); ConvFSENet +0.028 sparse, no evidence.
+5. **Pareto front on the new designs**: 2:4@c1 sits on the dense front at equal
+   nonzeros (NSNet2 -0.007 ± 0.013; ConvFSENet -0.018, ties at c128/c160).
+   2:4's value is kernel speed at equal nonzeros, not quality; old-design sparse
+   models lie below the new dense front.
+
+Caveats: `g_best` is selected on the test split; mostly one seed per width;
+nonzeros stand in for latency.
+
+**Models** (Hugging Face, [`claroche1/nsnet2-sparse-rowfusion`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion),
+folder [`new_design/`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion/tree/main/new_design)):
+
+* [`new_design/nsnet2/`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion/tree/main/new_design/nsnet2):
+  A1 square family, H = 64, 96, 128, 192 (2 seeds), 256, 384; `dense/` folded
+  plain NSNet2 checkpoints and `sparse24/` 2:4@c1 + permutation + refit versions.
+* [`new_design/convfsenet/`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion/tree/main/new_design/convfsenet):
+  B1, C = 64, 96 (2 seeds), 128, 160, 192; same `dense/` and `sparse24/` split.
+* [`new_design/rowfusion_export/`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion/tree/main/new_design/rowfusion_export):
+  hand-off exports (`weights.npz` + `manifest.json` with masks, 2-bit
+  `pattern_index` and golden vectors) for NSNet2 192 and 384 and ConvFSENet 96
+  and 192.
+* [`new_design/results/`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion/tree/main/new_design/results):
+  every run and Pareto point (`BLOCK_DESIGN_*.csv`, `SPARSE_MATMUL_RUNS.csv`).
+
+2:4 models are stored dense, with explicit zeros, alongside their masks.

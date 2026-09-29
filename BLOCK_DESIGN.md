@@ -1,6 +1,32 @@
 # Dead units and a better block
 
-Answer: yes for NSNet2, not proven for ConvFSENet. Centring NSNet2's input and warming up the learning rate
+**Summary.** This study closes the sparse-kernel arc of `SPARSE_MATMUL_COLLAB.md`:
+
+1. **The kernel's constraints are free on the original NSNet2.** A 2:4 codebook of 4 patterns (one weight kept
+   per pair) and square, multiple-of-32 matrices cost nothing measurable, and every mask pattern was free up to
+   80% sparsity.
+2. **Below the capacity knee the two models disagreed.** 2:4 NSNet2 beat a dense model with the same nonzero
+   count by +0.042 PESQ; 2:4@c1 ConvFSENet lost by 0.020 (plain 2:4 tied).
+3. **Mechanism: dead units.** 55-72% of NSNet2's `fc_in` ReLUs died early (raw, all-positive |X|^0.3 input,
+   Adam at lr 3e-3), so its layer inputs were redundant: a least-squares refit recovers pruned NSNet2, and
+   refit at pruning (+ channel permutation for the codebook) matched or beat fine-tuning. ConvFSENet's layer
+   inputs are full-rank, so there was nothing free to prune.
+4. **Fix: a better block.** Input-mean subtraction + LR warmup (A1, NSNet2), plus a frontend BatchNorm (B1,
+   ConvFSENet), all folding exactly into plain models, leave 0 dead units. NSNet2 gains +0.02-0.025 dense and
+   about +0.03 after 2:4 at equal nonzeros (adopted at 68/102, +0.040; 0.0005 short of the bar at 192/192).
+   ConvFSENet gains +0.028 sparse but loses 0.016 dense: no evidence.
+5. **On the new designs 2:4 sits on the dense Pareto front, not above it.** At equal nonzeros, 2:4@c1 + permutation
+   + refit minus the dense line is -0.007 ± 0.013 for NSNet2 and -0.018 for ConvFSENet (ties at c128/c160).
+   Old-design sparse models lie below the new dense front. 2:4's value is kernel speed at equal nonzeros, not
+   quality.
+
+Caveats: `g_best` is selected on the test split; mostly one seed per width; nonzeros stand in for latency.
+
+The models (new-design dense parents folded to plain checkpoints, their 2:4@c1 versions, and Row-Fusion hand-off
+exports) are on Hugging Face in
+[`claroche1/nsnet2-sparse-rowfusion/new_design`](https://huggingface.co/claroche1/nsnet2-sparse-rowfusion/tree/main/new_design).
+
+Block-design verdict: yes for NSNet2, not proven for ConvFSENet. Centring NSNet2's input and warming up the learning rate
 keeps every first-layer ReLU alive, and after the full deploy pipeline (2:4@c1 + int8) it gives +0.040 PESQ at
 equal nonzeros for NSNet2 68/102 (adopted). NSNet2 192/192 gains +0.0295, 0.0005 short of the pre-registered
 +0.03. ConvFSENet gains +0.028 sparse but loses 0.016 dense, so there is no evidence for it.
