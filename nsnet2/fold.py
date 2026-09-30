@@ -13,6 +13,11 @@ is exactly ``y = W' x + b'`` with
     b' = (g / s) (b - W mu - m) + beta
 
 (``mu`` only on fc_in; ``g/s = 1, m = beta = 0`` where a layer has no BN).
+
+A structured layer (butterfly, block-diagonal, ...) has no weight matrix to
+rescale, so only the input mean folds into it: ``b' = b - W mu`` needs just
+``W mu``, which is ``layer(mu) - b`` for any linear operator. BatchNorm on a
+structured layer is refused.
 ``fold_for_export`` returns a flags-off ``NSNet2`` holding those weights, so
 it goes through the existing export paths (``nsnet2.export_onnx`` etc.)
 unchanged, and its state_dict loads strictly into NSNet2 built from the
@@ -85,6 +90,20 @@ def fold_affine(layer: nn.Module, bn: nn.BatchNorm1d | None,
 
 
 @torch.no_grad()
+def fold_structured_bias(layer: nn.Module, mu: torch.Tensor) -> torch.Tensor:
+    """Return ``b - W mu`` (float64) for a linear operator without a weight matrix."""
+    if layer.bias is None:
+        raise NotImplementedError(f"{type(layer).__name__} has no bias to absorb the input mean")
+    b = layer.bias.double()
+    try:
+        lay = copy.deepcopy(layer).double()
+        Wmu = lay(mu.double()[None])[0] - b
+    except (RuntimeError, TypeError, NotImplementedError):
+        Wmu = (layer(mu[None].to(layer.bias.dtype))[0] - layer.bias).double()
+    return b - Wmu
+
+
+@torch.no_grad()
 def fold_for_export(model: NSNet2):
     """Fold ``model`` (block-design NSNet2) into an equivalent plain NSNet2.
 
@@ -106,7 +125,16 @@ def fold_for_export(model: NSNet2):
             ("fc1", model.bn1 if bnorm else None, None),
             ("fc2", model.bn2 if bnorm else None, None)]
     for name, bn, m in plan:
+        if bn is None and m is None:
+            continue                      # nothing to fold into this layer
         layer = getattr(model, name)
+        if not isinstance(layer, (nn.Linear, MaskedLinear)):
+            if bn is not None:
+                raise NotImplementedError(
+                    f"fold cannot absorb BatchNorm into structured {type(layer).__name__} {name}")
+            b_key = f"{name}.bias"
+            sd[b_key] = fold_structured_bias(layer, m).to(sd[b_key].dtype)
+            continue
         W2, b2 = fold_affine(layer, bn, m)
         w_key, b_key = f"{name}.weight", f"{name}.bias"
         sd[w_key] = W2.to(sd[w_key].dtype)
