@@ -1,0 +1,40 @@
+{
+    "_comment": "Cadence NNE kernel-shape variant of lisennet_hybrid_nc24 (conv-freq / GRU-time). Probes of the NNE scheduler (xnneSched) showed it hands five convs to the HiFi: the two 1x11 intra depthwise convs (any kernel width >= 7 stays on the DSP) and the three encoder high-band (2,5) stride-(1,3) convs (stride 3 never offloads; width 5 on the 195-wide first-stage input doesn't either). Two changes, everything else identical: intra_kernel 11 -> [5, 5] (two stacked 1x5 depthwise, RF 9) and downsample 'slice' ((2,3) conv at stride 1 + keep every 3rd bin; same 64/32/16 widths). Train into cp_lisennet_hybrid_nc24_nne.",
+    "num_gpus": 0,
+    "batch_size": 16,
+    "learning_rate": 0.0005,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.98,
+    "seed": 1234,
+    "sampling_rate": 16000,
+    "segment_size": 32000,
+    "n_fft": 512,
+    "hop_size": 256,
+    "win_size": 512,
+    "num_channels": 24,
+    "n_blocks": 2,
+    "compress_factor": 0.3,
+    "gradient_clip": 5.0,
+    "bottleneck": "hybrid",
+    "hidden_dim": 18,
+    "norm": "batchnorm",
+    "act": "relu",
+    "upsample": "convtranspose",
+    "intra_kernel": [
+        5,
+        5
+    ],
+    "loss": {
+        "complex": 0.1,
+        "mag": 0.9,
+        "adv": 0.05
+    },
+    "num_workers": 4,
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    },
+    "downsample": "slice"
+}

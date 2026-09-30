@@ -182,6 +182,25 @@ class DualPathRNN(nn.Module):
         return x.permute(0, 3, 1, 2)                         # (b, d, t, f)
 
 
+def _make_intra_dw(emb_dim, intra_kernel):
+    """Depthwise frequency conv(s) of the intra-frequency mixer, symmetric padding.
+
+    An ``int`` builds the single ``(1, k)`` depthwise conv (the original layer and its
+    checkpoint keys). A sequence builds a linear stack of ``(1, k_i)`` depthwise convs
+    — receptive field ``1 + sum(k_i - 1)`` — for targets whose accelerator caps the
+    kernel width: Cadence NNE runs a ``1x5`` depthwise but hands ``1x7`` and wider to
+    the HiFi, so ``[5, 5]`` (RF 9) replaces ``11`` there.
+    """
+    if isinstance(intra_kernel, int):
+        return nn.Conv2d(emb_dim, emb_dim, (1, intra_kernel),
+                         padding=(0, intra_kernel // 2), groups=emb_dim)
+    for k in intra_kernel:
+        assert k % 2 == 1, f"intra kernels must be odd for symmetric padding, got {k}"
+    return nn.Sequential(*[
+        nn.Conv2d(emb_dim, emb_dim, (1, k), padding=(0, k // 2), groups=emb_dim)
+        for k in intra_kernel])
+
+
 class _CausalTimeConv(nn.Module):
     """Causal dilated depthwise time-conv + pointwise mix, streamable.
 
@@ -336,8 +355,7 @@ class DualPathHybrid(nn.Module):
                  norm="layernorm", act="prelu"):
         super().__init__()
         self.intra_norm = _make_norm(norm, emb_dim, (emb_dim, n_freqs))
-        self.intra_dw = nn.Conv2d(emb_dim, emb_dim, (1, intra_kernel),
-                                  padding=(0, intra_kernel // 2), groups=emb_dim)   # symmetric over freq
+        self.intra_dw = _make_intra_dw(emb_dim, intra_kernel)       # symmetric over freq
         self.intra_pw = nn.Conv2d(emb_dim, emb_dim, 1)
         self.intra_act = _make_act(act, emb_dim)
 
@@ -374,8 +392,7 @@ class DualPathConv(nn.Module):
                  inter_dilations=(1, 2, 4), norm="layernorm", act="prelu"):
         super().__init__()
         self.intra_norm = _make_norm(norm, emb_dim, (emb_dim, n_freqs))
-        self.intra_dw = nn.Conv2d(emb_dim, emb_dim, (1, intra_kernel),
-                                  padding=(0, intra_kernel // 2), groups=emb_dim)   # symmetric over freq
+        self.intra_dw = _make_intra_dw(emb_dim, intra_kernel)       # symmetric over freq
         self.intra_pw = nn.Conv2d(emb_dim, emb_dim, 1)
         self.intra_act = _make_act(act, emb_dim)
 
@@ -497,17 +514,33 @@ class SPConvTranspose2d(nn.Module):
 class DSConv(nn.Module):
     """Down-sampling sub-band conv: low band kept dense, high band strided (÷3)."""
 
-    def __init__(self, in_channels, out_channels, n_freqs, norm="layernorm", act="prelu"):
+    def __init__(self, in_channels, out_channels, n_freqs, norm="layernorm", act="prelu",
+                 downsample="stride"):
         super().__init__()
         self.low_freqs = n_freqs // 4
         self.low_conv = nn.Sequential(
             nn.ConstantPad2d((1, 1, 1, 0), value=0.0),
             nn.Conv2d(in_channels, out_channels, kernel_size=(2, 3)),
         )
-        self.high_conv = nn.Sequential(
-            nn.ConstantPad2d((1, 1, 1, 0), value=0.0),
-            nn.Conv2d(in_channels, out_channels, kernel_size=(2, 5), stride=(1, 3)),
-        )
+        # High-band ÷3. "stride" = the original (2,5) conv at stride (1,3). "slice" =
+        # a (2,3) conv at stride 1, unpadded over freq, then keep every 3rd bin: the
+        # kept outputs tile the band in non-overlapping 3-bin patches and give the
+        # same widths (193->64, 96->32, 48->16). For Cadence NNE, which hands any
+        # stride-3 conv — and a width-5 kernel on the 195-wide first-stage input —
+        # to the HiFi; the strided Slice is a cheap copy.
+        self.downsample = downsample
+        if downsample == "slice":
+            self.high_conv = nn.Sequential(
+                nn.ConstantPad2d((0, 0, 1, 0), value=0.0),
+                nn.Conv2d(in_channels, out_channels, kernel_size=(2, 3)),
+            )
+        elif downsample == "stride":
+            self.high_conv = nn.Sequential(
+                nn.ConstantPad2d((1, 1, 1, 0), value=0.0),
+                nn.Conv2d(in_channels, out_channels, kernel_size=(2, 5), stride=(1, 3)),
+            )
+        else:
+            raise ValueError(f"unknown downsample {downsample!r} (expected 'stride' or 'slice')")
         self.norm = _make_norm(norm, out_channels, (1, n_freqs // 2))
         self.act = _make_act(act, out_channels)
         # Streaming: low and high sub-band convs each keep their own ring buffer.
@@ -528,6 +561,8 @@ class DSConv(nn.Module):
         else:
             x_low = self.low_conv(x[..., :self.low_freqs])
             x_high = self.high_conv(x[..., self.low_freqs:])
+        if self.downsample == "slice":
+            x_high = x_high[..., ::3]
         return self.act(self.norm(torch.cat([x_low, x_high], dim=-1)))
 
 
@@ -560,16 +595,20 @@ class USConv(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, in_channels, num_channels=16, norm="layernorm", act="prelu"):
+    def __init__(self, in_channels, num_channels=16, norm="layernorm", act="prelu",
+                 downsample="stride"):
         super().__init__()
         self.conv_1 = nn.Sequential(
             nn.Conv2d(in_channels, num_channels // 4, (1, 1), (1, 1)),
             _make_norm(norm, num_channels // 4, (1, 257)),
             _make_act(act, num_channels // 4),
         )
-        self.conv_2 = DSConv(num_channels // 4, num_channels // 2, n_freqs=257, norm=norm, act=act)
-        self.conv_3 = DSConv(num_channels // 2, num_channels // 4 * 3, n_freqs=128, norm=norm, act=act)
-        self.conv_4 = DSConv(num_channels // 4 * 3, num_channels, n_freqs=64, norm=norm, act=act)
+        self.conv_2 = DSConv(num_channels // 4, num_channels // 2, n_freqs=257, norm=norm, act=act,
+                             downsample=downsample)
+        self.conv_3 = DSConv(num_channels // 2, num_channels // 4 * 3, n_freqs=128, norm=norm, act=act,
+                             downsample=downsample)
+        self.conv_4 = DSConv(num_channels // 4 * 3, num_channels, n_freqs=64, norm=norm, act=act,
+                             downsample=downsample)
 
     def forward(self, x):
         out_list = []
@@ -621,7 +660,8 @@ class MaskDecoder(nn.Module):
 class LiSenNet(nn.Module):
     def __init__(self, num_channels=16, n_blocks=2, n_fft=512, hop_length=256, compress_factor=0.3,
                  bottleneck="rnn", intra_kernel=7, inter_kernel=3, inter_dilations=(1, 2, 4),
-                 norm="layernorm", act="prelu", upsample="subpixel", hidden_dim=None):
+                 norm="layernorm", act="prelu", upsample="subpixel", hidden_dim=None,
+                 downsample="stride"):
         super().__init__()
         self.n_fft = n_fft
         self.n_freqs = n_fft // 2 + 1
@@ -633,7 +673,8 @@ class LiSenNet(nn.Module):
         # conv bottleneck's parameter budget, so the two differ only in the time mixer.
         self.hidden_dim = num_channels // 2 * 3 if hidden_dim is None else int(hidden_dim)
 
-        self.encoder = Encoder(in_channels=3, num_channels=num_channels, norm=norm, act=act)
+        self.encoder = Encoder(in_channels=3, num_channels=num_channels, norm=norm, act=act,
+                               downsample=downsample)
         self.blocks = nn.Sequential(*[
             DPR(emb_dim=num_channels, hidden_dim=self.hidden_dim,
                 n_freqs=self.n_freqs // (2 ** 3), dropout_p=0.1,
@@ -763,14 +804,20 @@ def build_lisennet(h=None):
         hop_length=int(g("hop_length", 256)),
         compress_factor=float(g("compress_factor", 0.3)),
         bottleneck=str(g("bottleneck", "rnn")),
-        intra_kernel=int(g("intra_kernel", 7)),
+        intra_kernel=_intra_kernel(g("intra_kernel", 7)),
         inter_kernel=int(g("inter_kernel", 3)),
         inter_dilations=tuple(g("inter_dilations", (1, 2, 4))),
         norm=str(g("norm", "layernorm")),
         act=str(g("act", "prelu")),
         upsample=str(g("upsample", "subpixel")),
         hidden_dim=g("hidden_dim", None),
+        downsample=str(g("downsample", "stride")),
     )
+
+
+def _intra_kernel(v):
+    """Config ``intra_kernel``: an int (one depthwise conv) or a list (a stack)."""
+    return int(v) if isinstance(v, (int, float, str)) else tuple(int(k) for k in v)
 
 
 if __name__ == "__main__":
