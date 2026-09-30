@@ -11,8 +11,11 @@
 # butterfly_* checkpoints were trained with: triton_butterfly is per-gate, a different model at
 # 400 wide (identical function class at 512). Seed 1234, 200 epochs, validation every 10 epochs on
 # the full test split, same flags as the NSNet2 block-design waves, so best / last-5 compare.
-# ~3 GiB GPU each; all five run at once (the per-step CPU batch_pesq dominates epoch time).
-#   DRY=1 ./run_bfly_wave.sh    print the commands, launch nothing
+# Training peaks at ~5.9 GiB GPU per arm (400/600), so five do not fit in 24 GiB at once: an arm
+# starts only when MIN_FREE_MIB of GPU memory is free, re-checked GRACE s after each launch (let the
+# new job reach its peak) and then every POLL s.
+#   DRY=1 ./run_bfly_wave.sh                   print the commands, launch nothing
+#   ARMS="bf_a bf_b" ./run_bfly_wave.sh        run a subset (e.g. to relaunch arms that failed)
 set -u
 cd "$(dirname "$0")"
 PY="${PY:-/home/clement/eco8-neaixt/.venv/bin/python}"
@@ -20,6 +23,9 @@ export PYTHONPATH="$PWD"
 DRY="${DRY:-0}"
 NS=(--training_epochs 200 --stdout_interval 45 --validation_interval 450 --checkpoint_interval 1800 --best_checkpoint_start_epoch 0)
 JOBS=("bf_2b_a1_w512" "bf_full_old" "bf_full_a1" "bf_full_a1_w512" "bf_full_a1_w512_ortho")
+[ -n "${ARMS:-}" ] && read -r -a JOBS <<< "$ARMS"
+MIN_FREE_MIB="${MIN_FREE_MIB:-7500}"; GRACE="${GRACE:-180}"; POLL="${POLL:-60}"
+free_mib() { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1; }
 
 for arm in "${JOBS[@]}"; do   # never resume or overwrite a stale run
   [ -f "configs/${arm}.json" ] || { echo "refusing: configs/${arm}.json missing"; exit 1; }
@@ -27,17 +33,18 @@ for arm in "${JOBS[@]}"; do   # never resume or overwrite a stale run
   if [ -s "cp_${arm}.log" ] && [ "$DRY" != 1 ]; then echo "refusing: cp_${arm}.log exists (move it away first)"; exit 1; fi
 done
 
-MAX=5; running=0
+first=1
 for arm in "${JOBS[@]}"; do
   if [ "$DRY" = 1 ]; then
     echo "$PY -m nsnet2.train --config configs/${arm}.json --checkpoint_path cp_${arm} ${NS[*]} > cp_${arm}.log 2>&1"
     continue
   fi
-  if [ "$running" -ge "$MAX" ]; then wait -n; running=$((running - 1)); fi
-  echo "$(date '+%F %H:%M:%S')  start  $arm"
+  [ "$first" = 1 ] || sleep "$GRACE"
+  first=0
+  until [ "$(free_mib)" -ge "$MIN_FREE_MIB" ]; do sleep "$POLL"; done
+  echo "$(date '+%F %H:%M:%S')  start  $arm  (free $(free_mib) MiB)"
   ( $PY -m nsnet2.train --config "configs/${arm}.json" --checkpoint_path "cp_${arm}" "${NS[@]}" > "cp_${arm}.log" 2>&1
-    echo "$(date '+%F %H:%M:%S')  end    $arm  rc=$?" ) &
-  running=$((running + 1))
+    rc=$?; echo "$(date '+%F %H:%M:%S')  end    $arm  rc=$rc" ) &
 done
 [ "$DRY" = 1 ] && exit 0
 wait
