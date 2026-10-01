@@ -14,6 +14,7 @@ from torch.nn.parallel import DistributedDataParallel
 from common.env import AttrDict, build_env
 from common.dataset import Dataset, mag_pha_stft, mag_pha_istft, load_voicebank_demand
 from nsnet2.model import NSNet2
+from nsnet2.bfly_arch import build_generator
 from common.metrics import pesq_score
 from common.discriminator import MetricDiscriminator, batch_pesq
 from nsnet2.layers import butterfly_ortho_penalty
@@ -104,7 +105,7 @@ def train(rank, a, h):
     torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(rank)) if torch.cuda.is_available() else torch.device('cpu')
 
-    generator = NSNet2(h).to(device)
+    generator = build_generator(h).to(device)   # NSNet2 unless h.arch is set
     discriminator = MetricDiscriminator().to(device)
 
     if rank == 0:
