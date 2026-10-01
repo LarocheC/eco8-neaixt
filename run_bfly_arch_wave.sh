@@ -15,10 +15,15 @@ PY="${PY:-/home/clement/eco8-neaixt/.venv/bin/python}"
 export PYTHONPATH="$PWD" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 DRY="${DRY:-0}"; EPOCHS="${EPOCHS:-100}"; CAP_MIB="${CAP_MIB:-22500}"; MAX_JOBS="${MAX_JOBS:-4}"; POLL="${POLL:-30}"
 NS=(--training_epochs "$EPOCHS" --stdout_interval 45 --validation_interval 450 --checkpoint_interval 1800 --best_checkpoint_start_epoch 0)
-# arm:MiB, biggest first (MiB = measured peak + 10 %, see BUTTERFLY_ARCH.md)
+# arm:MiB in launch-priority order. MiB = measured training peak + 10 %: one real epoch incl.
+# a full-test validation, expandable segments, nvidia-smi sampled every 2 s (2026-10-01).
+# First-fit: whenever memory frees, the first pending arm that fits starts. The order puts
+# the GPU-heavy arms first (F, D, E) so the CPU-bound small ones fill around them (~15 h
+# simulated makespan vs ~18 h for D/E first).
+PLAN="${PLAN:-ba_F_wide:14124 ba_D_grid:9379 ba_E_unet:9665 ba_A_res:6708 ba_C_lru:6398 ba_B_cep:5982 ba_R2b:5852 ba_R:5828 ba_C_mingru:4706}"
 declare -A NEED
 JOBS=()
-for j in ${PLAN:?PLAN must list arm:MiB pairs}; do JOBS+=("${j%%:*}"); NEED[${j%%:*}]="${j##*:}"; done
+for j in $PLAN; do JOBS+=("${j%%:*}"); NEED[${j%%:*}]="${j##*:}"; done
 [ -n "${ARMS:-}" ] && read -r -a JOBS <<< "$ARMS"
 RUN=.arch_running; mkdir -p "$RUN"
 exec 3>&1
@@ -33,18 +38,27 @@ done
 ledger() { local t=0 f; for f in "$RUN"/*; do [ -e "$f" ] && t=$((t + $(cat "$f"))); done; echo $t; }
 running() { ls "$RUN" | wc -l; }
 
-for arm in "${JOBS[@]}"; do
-  need=${NEED[$arm]}
-  if [ "$DRY" = 1 ]; then echo "$arm  needs ${need} MiB  ->  $PY -m nsnet2.train --config configs/${arm}.json --checkpoint_path cp_${arm} ${NS[*]}"; continue; fi
-  until [ $(( $(ledger) + need )) -le "$CAP_MIB" ] && [ "$(running)" -lt "$MAX_JOBS" ]; do sleep "$POLL"; done
-  echo "$need" > "$RUN/$arm"
-  echo "$(date '+%F %H:%M:%S')  start  $arm  (needs $need MiB, ledger now $(ledger) MiB, $(running) running)"
-  ( exec > "cp_${arm}.log" 2>&1
-    $PY -m nsnet2.train --config "configs/${arm}.json" --checkpoint_path "cp_${arm}" "${NS[@]}"
-    rc=$?; rm -f "$RUN/$arm"; echo "$(date '+%F %H:%M:%S')  end    $arm  rc=$rc" >&3 ) &
-  sleep 20
+if [ "$DRY" = 1 ]; then
+  for arm in "${JOBS[@]}"; do echo "$arm  needs ${NEED[$arm]} MiB  ->  $PY -m nsnet2.train --config configs/${arm}.json --checkpoint_path cp_${arm} ${NS[*]}"; done
+  exit 0
+fi
+rm -f "$RUN"/*
+pending=("${JOBS[@]}")
+while [ ${#pending[@]} -gt 0 ]; do
+  started=0
+  for i in "${!pending[@]}"; do                       # first fit, in priority order
+    arm=${pending[$i]}; need=${NEED[$arm]}
+    [ $(( $(ledger) + need )) -le "$CAP_MIB" ] && [ "$(running)" -lt "$MAX_JOBS" ] || continue
+    echo "$need" > "$RUN/$arm"
+    echo "$(date '+%F %H:%M:%S')  start  $arm  (needs $need MiB, ledger now $(ledger) MiB, $(running) running)"
+    ( exec > "cp_${arm}.log" 2>&1
+      $PY -m nsnet2.train --config "configs/${arm}.json" --checkpoint_path "cp_${arm}" "${NS[@]}"
+      rc=$?; rm -f "$RUN/$arm"; echo "$(date '+%F %H:%M:%S')  end    $arm  rc=$rc" >&3 ) &
+    unset 'pending[i]'; pending=("${pending[@]}"); started=1
+    sleep "${LAUNCH_GAP:-20}"; break
+  done
+  [ "$started" = 1 ] || sleep "$POLL"
 done
-[ "$DRY" = 1 ] && exit 0
 wait
 
 echo "=== stage 1: best / last-3 (epochs 80-100) validation PESQ, engine pairs/frame ==="
