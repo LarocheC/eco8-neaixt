@@ -25,6 +25,19 @@ try:
 except ImportError:
     _Butterfly = None
 
+# torch_structured's Triton butterfly backward launches its kernels through
+# torch.library's wrap_triton, and in eager mode every launch registers the
+# kernel and its constant args in PyTorch's global kernel_side_table, which
+# nothing ever clears: ~8 KiB of host RAM per butterfly backward, ~4 MiB per
+# NSNet2 step with a butterfly GRU (500 per-timestep calls), i.e. ~36 GiB per
+# 200-epoch run -- three such runs got OOM-killed. The table only serves
+# torch.compile tracing; this trainer is eager-only, so it is cleared after
+# every step (a no-op for models without user Triton kernels).
+try:
+    from torch._higher_order_ops.triton_kernel_wrap import kernel_side_table as _kernel_side_table
+except ImportError:
+    _kernel_side_table = None
+
 # Determinism over autotuning: benchmark picks algorithms nondeterministically
 # per input shape, which (with the fixed seeds below) is the main remaining
 # source of run-to-run drift. The input shapes here are static, so autotuning
@@ -292,6 +305,8 @@ def train(rank, a, h):
             if sparsity is not None:
                 sparsity.mask_grads()
             optim_g.step()
+            if _kernel_side_table is not None:
+                _kernel_side_table.reset_table()
             if sparsity is not None:
                 # Re-project onto the mask: AdamW's momentum/decay would
                 # otherwise drift pruned weights off exactly zero.

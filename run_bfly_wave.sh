@@ -18,19 +18,25 @@
 # cannot hold (this killed bf_full_a1 and bf_2b_a1_w512 at epoch 10 on the first launch).
 #   DRY=1 ./run_bfly_wave.sh                   print the commands, launch nothing
 #   ARMS="bf_a bf_b" ./run_bfly_wave.sh        run a subset (e.g. to relaunch arms that failed)
+#   RESUME=1 ./run_bfly_wave.sh                continue from each arm's latest g_/do_ checkpoint, appending
+#                                              to its log; the summary keeps the LAST validation per step, so
+#                                              steps re-run after a crash replace the lost timeline's values
 set -u
 cd "$(dirname "$0")"
 PY="${PY:-/home/clement/eco8-neaixt/.venv/bin/python}"
 export PYTHONPATH="$PWD"
 DRY="${DRY:-0}"
+exec 3>&1   # driver output, kept for the "end" lines of jobs whose stdout goes to their own log
 NS=(--training_epochs 200 --stdout_interval 45 --validation_interval 450 --checkpoint_interval 1800 --best_checkpoint_start_epoch 0)
 JOBS=("bf_2b_a1_w512" "bf_full_old" "bf_full_a1" "bf_full_a1_w512" "bf_full_a1_w512_ortho")
 [ -n "${ARMS:-}" ] && read -r -a JOBS <<< "$ARMS"
 MAX_GPU_JOBS="${MAX_GPU_JOBS:-3}"; GRACE="${GRACE:-180}"; POLL="${POLL:-60}"
 gpu_jobs() { nvidia-smi --query-compute-apps=pid --format=csv,noheader | grep -c .; }
 
-for arm in "${JOBS[@]}"; do   # never resume or overwrite a stale run
+RESUME="${RESUME:-0}"
+for arm in "${JOBS[@]}"; do   # never resume or overwrite a stale run unless RESUME=1
   [ -f "configs/${arm}.json" ] || { echo "refusing: configs/${arm}.json missing"; exit 1; }
+  [ "$RESUME" = 1 ] && continue
   if compgen -G "cp_${arm}/g_*" >/dev/null || compgen -G "cp_${arm}/do_*" >/dev/null; then echo "refusing: cp_${arm} has checkpoints"; exit 1; fi
   if [ -s "cp_${arm}.log" ] && [ "$DRY" != 1 ]; then echo "refusing: cp_${arm}.log exists (move it away first)"; exit 1; fi
 done
@@ -45,8 +51,10 @@ for arm in "${JOBS[@]}"; do
   first=0
   until [ "$(gpu_jobs)" -lt "$MAX_GPU_JOBS" ]; do sleep "$POLL"; done
   echo "$(date '+%F %H:%M:%S')  start  $arm  ($(gpu_jobs) other GPU jobs)"
-  ( $PY -m nsnet2.train --config "configs/${arm}.json" --checkpoint_path "cp_${arm}" "${NS[@]}" > "cp_${arm}.log" 2>&1
-    rc=$?; echo "$(date '+%F %H:%M:%S')  end    $arm  rc=$rc" ) &
+  if [ "$RESUME" = 1 ]; then echo "=== $(date '+%F %H:%M:%S') RESUME from $(ls cp_${arm}/do_???????? | tail -1) ===" >> "cp_${arm}.log"; fi
+  ( if [ "$RESUME" = 1 ]; then exec >> "cp_${arm}.log" 2>&1; else exec > "cp_${arm}.log" 2>&1; fi
+    $PY -m nsnet2.train --config "configs/${arm}.json" --checkpoint_path "cp_${arm}" "${NS[@]}"
+    rc=$?; echo "$(date '+%F %H:%M:%S')  end    $arm  rc=$rc" >&3 ) &
 done
 [ "$DRY" = 1 ] && exit 0
 wait
@@ -54,6 +62,6 @@ wait
 echo "=== butterfly wave: best / last-5 validation PESQ ==="
 for arm in "${JOBS[@]}"; do
   [ -f "cp_${arm}.log" ] || { echo "$arm  no log"; continue; }
-  $PY -c "import re,statistics as s,sys; t=[float(x) for x in re.findall(r'PESQ Score: ([\d.]+)', open('cp_'+sys.argv[1]+'.log').read())]; print(f'{sys.argv[1]:<24} n={len(t):>2} best={max(t):.3f} last5={s.mean(t[-5:]):.3f}' if len(t)>=5 else sys.argv[1]+' too few validations')" "$arm"
+  $PY -c "import re,statistics as s,sys; v=dict((int(a),float(b)) for a,b in re.findall(r'Steps : (\d+), PESQ Score: ([\d.]+)', open('cp_'+sys.argv[1]+'.log').read())); t=[v[k] for k in sorted(v)]; print(f'{sys.argv[1]:<24} n={len(t):>2} best={max(t):.3f} last5={s.mean(t[-5:]):.3f}' if len(t)>=5 else sys.argv[1]+' too few validations')" "$arm"
 done
 echo "$(date '+%F %H:%M:%S')  done"
