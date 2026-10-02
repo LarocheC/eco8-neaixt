@@ -39,6 +39,7 @@ package = false
 [tool.uv.sources]
 torch = { index = "pytorch-cu118" }
 torchaudio = { index = "pytorch-cu118" }
+triton-pesq = { git = "https://github.com/LarocheC/triton-pesq", rev = "5b858473e5ac3126262d4b827e6232f26139a9c5" }
 
 [[tool.uv.index]]
 name = "pytorch-cu118"
@@ -48,6 +49,11 @@ explicit = true
 [dependency-groups]
 dev = [
     "pytest>=7.0",
+]
+# Differentiable PESQ loss for finetune_pesq.py (common/pesq_loss.py): `uv sync --group pesq-loss`.
+# Provides the `torch_pesq` module; do not also install the upstream `torch-pesq` package.
+pesq-loss = [
+    "triton-pesq",
 ]
 
 [tool.pytest.ini_options]

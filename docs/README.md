@@ -7,7 +7,7 @@ Everything this repository has measured, in two views: **how good a model is**, 
 | --- | --- |
 | [models/](models/) | One page per family — [NSNet2](models/nsnet2.md), [ConvFSENet](models/convfsenet.md), [LiSenNet](models/lisennet.md), [BASENet](models/basenet.md). Architecture, sweeps, FP32 vs int8, streaming. |
 | [targets/](targets/) | One page per chip — [NXP RT595](targets/rt595.md), [ST STM32N6](targets/stm32n6.md). What ran on the hardware, at what cost, and how to point your own checkpoint at it. |
-| [studies/](studies/) | [Structured factorisation](studies/structured-factorisation.md) (block-diagonal vs genuine two-factor Monarch) and [cross-family metrics](studies/cross-family-metrics.md) (every published model under one harness). |
+| [studies/](studies/) | [Structured factorisation](studies/structured-factorisation.md) (block-diagonal vs genuine two-factor Monarch), [cross-family metrics](studies/cross-family-metrics.md) (every published model under one harness), and [PESQ-loss fine-tuning](studies/pesq-finetune.md) (set up, not yet run). |
 | [publishing/](publishing/) | [HuggingFace model cards](publishing/hf-nsnet2.md). |
 
 **Provenance is part of every hardware number here.** `SILICON` means read off a board with

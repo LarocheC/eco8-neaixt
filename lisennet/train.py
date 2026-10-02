@@ -11,6 +11,10 @@ Losses (upstream model/model.py):
   discriminator (MetricGAN) = MSE(D(tgt,tgt), 1) + MSE(D(tgt,est), PESQ(tgt,est))
 The CMGAN MetricDiscriminator is reused from common/discriminator.py (identical
 to LiSenNet's). Phase is not learned (Griffin-Lim), so there is no phase loss.
+
+Optional differentiable-PESQ term (common/pesq_loss.py, off by default): with
+``"pesq_loss": {"weight": w}`` in the config the generator also minimises
+``w * PesqLoss(clean, est)`` on the waveform. Used by finetune_pesq.py.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from common.dataset import Dataset, data_generator, load_voicebank_demand, seed_
 from common.env import AttrDict, build_env
 from common.discriminator import MetricDiscriminator, batch_pesq
 from common.metrics import pesq_score
+from common.pesq_loss import build_pesq_loss, pesq_loss, pesq_loss_config
 from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -86,12 +91,13 @@ def discriminator_loss(results, discriminator, device):
 
 
 def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, clip,
-             teacher=None, distill_weight=0.0):
+             teacher=None, distill_weight=0.0, pesq_fn=None, pesq_weight=0.0):
     """One CMGAN step: discriminator then generator (one shared forward).
 
     With ``teacher`` set, adds ``distill_weight * MSE(est_mag, teacher_est_mag)``
     to the generator loss — mask-level knowledge distillation from a stronger
     (e.g. longer-receptive-field) model into this deployment architecture.
+    With ``pesq_fn`` set, adds ``pesq_weight * PesqLoss(clean, est)`` on the waveform.
     """
     results = model(noisy, clean)
     device = clean.device
@@ -112,6 +118,10 @@ def gan_step(model, discriminator, optim_g, optim_d, noisy, clean, h, weights, c
         loss_distill = F.mse_loss(results["est_mag"], teacher_mag)
         g_loss = g_loss + distill_weight * loss_distill
         parts["distill"] = float(loss_distill.item())
+    if pesq_fn is not None:
+        loss_pesq = pesq_loss(pesq_fn, results["tgt"], results["est"])
+        g_loss = g_loss + pesq_weight * loss_pesq
+        parts["pesq"] = float(loss_pesq.item())
     g_loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
     optim_g.step()
@@ -138,6 +148,12 @@ def train(a, h):
 
     weights = _loss_weights(h)
     clip = float(h.get("gradient_clip", 5.0))
+
+    pesq_weight, pesq_backend = pesq_loss_config(h)
+    pesq_fn = None
+    if pesq_weight > 0:
+        pesq_fn = build_pesq_loss(h.sampling_rate, device, pesq_backend)
+        print(f"Differentiable PESQ loss on: weight={pesq_weight}, {type(pesq_fn).__name__}.")
 
     # ----- distillation teacher (optional, frozen) ---------------------------
     teacher = None
@@ -202,17 +218,20 @@ def train(a, h):
             noisy_audio = _to_dev(noisy_audio, device)
             metrics = gan_step(model, discriminator, optim_g, optim_d,
                                noisy_audio, clean_audio, h, weights, clip,
-                               teacher=teacher, distill_weight=a.distill_weight)
+                               teacher=teacher, distill_weight=a.distill_weight,
+                               pesq_fn=pesq_fn, pesq_weight=pesq_weight)
 
             if steps % a.stdout_interval == 0:
+                pesq_part = f", PESQ-loss: {metrics['pesq']:.4f}" if "pesq" in metrics else ""
                 print(f"Steps : {steps:d}, G: {metrics['loss']:.4f}, D: {metrics['d_loss']:.4f}, "
-                      f"Mag: {metrics['mag']:.4f}, Com: {metrics['complex']:.4f}, "
+                      f"Mag: {metrics['mag']:.4f}, Com: {metrics['complex']:.4f}{pesq_part}, "
                       f"s/b : {time.time() - start_b:.3f}")
             if steps % a.summary_interval == 0:
                 sw.add_scalar("Training/Generator Loss", metrics["loss"], steps)
                 sw.add_scalar("Training/Discriminator Loss", metrics["d_loss"], steps)
-                for k in ("mag", "complex", "adv"):
-                    sw.add_scalar(f"Training/{k}", metrics[k], steps)
+                for k in ("mag", "complex", "adv", "pesq"):
+                    if k in metrics:
+                        sw.add_scalar(f"Training/{k}", metrics[k], steps)
 
             if steps % a.checkpoint_interval == 0 and steps != 0:
                 save_checkpoint(f"{a.checkpoint_path}/g_{steps:08d}", {
@@ -253,8 +272,7 @@ def _validate(model, validation_loader, device, h) -> float:
     return float(pesq_score(audios_r, audios_g, h))
 
 
-def main():
-    print("Initializing LiSenNet Training Process..")
+def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/lisennet.json")
     parser.add_argument("--checkpoint_path", default="cp_lisennet")
@@ -271,7 +289,12 @@ def main():
                              "(its config.json is read from the sibling directory).")
     parser.add_argument("--distill_weight", default=0.45, type=float,
                         help="Weight of the MSE(est_mag, teacher_est_mag) distillation term.")
-    a = parser.parse_args()
+    return parser
+
+
+def main():
+    print("Initializing LiSenNet Training Process..")
+    a = build_parser().parse_args()
 
     with open(a.config) as f:
         h = AttrDict(json.load(f))

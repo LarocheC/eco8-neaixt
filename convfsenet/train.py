@@ -16,6 +16,10 @@ with weight `gan.metric_loss_lambda`. This mirrors the MP-SENet / NSNet2
 recipe. The discriminator is TRAINING-ONLY — it never touches the
 streaming / ONNX / int8 inference path.
 
+Optional differentiable-PESQ term (config block `pesq_loss`, off by default; see
+common/pesq_loss.py): adds `pesq_loss.weight * PesqLoss(clean, pred)` on the
+time-domain pair, in both the plain and the metric-GAN step. Used by finetune_pesq.py.
+
 Validation:
   - Offline causal forward (ConvFSENet.forward, with chomp) on the VBD test
     split. For this strictly-causal model that is numerically equivalent to
@@ -45,6 +49,7 @@ from common.dataset import (
 from common.env import AttrDict, build_env
 from common.discriminator import MetricDiscriminator, batch_pesq
 from common.metrics import pesq_score
+from common.pesq_loss import build_pesq_loss, pesq_loss, pesq_loss_config
 from common.utils import load_checkpoint, save_checkpoint, scan_checkpoint
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
@@ -141,6 +146,12 @@ def train(a, h):
         print(f"metric-GAN enabled: lambda={metric_lambda}, "
               f"disc_compress_factor={disc_compress}")
 
+    pesq_weight, pesq_backend = pesq_loss_config(h)
+    pesq_fn = None
+    if pesq_weight > 0:
+        pesq_fn = build_pesq_loss(h.sampling_rate, device, pesq_backend)
+        print(f"Differentiable PESQ loss on: weight={pesq_weight}, {type(pesq_fn).__name__}.")
+
     # Resume the LR schedule exactly. Reconstructing with last_epoch advances
     # the schedule one step past the saved position (and clobbers the lr that
     # optim.load_state_dict just restored), so for checkpoints that carry the
@@ -198,22 +209,32 @@ def train(a, h):
                 metrics = _gan_step(
                     model, discriminator, optim, optim_d,
                     noisy_audio, clean_audio, h, metric_lambda,
-                    disc_compress, device,
+                    disc_compress, device, pesq_fn=pesq_fn, pesq_weight=pesq_weight,
                 )
             else:
                 optim.zero_grad()
-                loss_dict = model.train_step(noisy_audio, clean_audio)
-                loss = loss_dict["loss"]
+                loss_pesq = None
+                if pesq_fn is not None:
+                    x_pred, loss_dict = model.process_data(noisy_audio, clean_audio, crop_signals=True)
+                    loss_pesq = pesq_loss(pesq_fn, clean_audio, x_pred)
+                    loss = loss_dict["loss"] + pesq_weight * loss_pesq
+                else:
+                    loss_dict = model.train_step(noisy_audio, clean_audio)
+                    loss = loss_dict["loss"]
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
                 optim.step()
                 metrics = {"loss": float(loss.item())}
+                if loss_pesq is not None:
+                    metrics["pesq"] = float(loss_pesq.item())
 
             if steps % a.stdout_interval == 0:
                 extra = ""
                 if use_gan:
                     extra = (f", Metric: {metrics['loss_metric']:.4f}"
                              f", Disc: {metrics['loss_disc']:.4f}")
+                if "pesq" in metrics:
+                    extra += f", PESQ-loss: {metrics['pesq']:.4f}"
                 print(
                     f"Steps : {steps:d}, Loss: {metrics['loss']:.4f}{extra}, "
                     f"s/b : {time.time() - start_b:.3f}"
@@ -224,6 +245,8 @@ def train(a, h):
                     sw.add_scalar("Training/Base Loss", metrics["base_loss"], steps)
                     sw.add_scalar("Training/Metric Loss", metrics["loss_metric"], steps)
                     sw.add_scalar("Training/Discriminator Loss", metrics["loss_disc"], steps)
+                if "pesq" in metrics:
+                    sw.add_scalar("Training/PESQ Loss", metrics["pesq"], steps)
 
             # rolling checkpoint
             if steps % a.checkpoint_interval == 0 and steps != 0:
@@ -265,7 +288,7 @@ def train(a, h):
 
 def _gan_step(model, discriminator, optim, optim_d,
               noisy_audio, clean_audio, h,
-              metric_lambda, disc_compress, device):
+              metric_lambda, disc_compress, device, pesq_fn=None, pesq_weight=0.0):
     """One metric-GAN training step.
 
     Generator forward is end-to-end (audio -> audio_pred). The discriminator
@@ -313,16 +336,23 @@ def _gan_step(model, discriminator, optim, optim_d,
     metric_g = discriminator(clean_mag, pred_mag)                  # pred_mag keeps grad
     loss_metric = F.mse_loss(metric_g.flatten(), one_labels)
     loss_gen = base_loss + metric_lambda * loss_metric
+    loss_pesq = None
+    if pesq_fn is not None:
+        loss_pesq = pesq_loss(pesq_fn, clean_c, x_pred)
+        loss_gen = loss_gen + pesq_weight * loss_pesq
     loss_gen.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
     optim.step()
 
-    return {
+    out = {
         "loss": float(loss_gen.item()),
         "base_loss": float(base_loss.item()),
         "loss_metric": float(loss_metric.item()),
         "loss_disc": float(loss_disc.item()),
     }
+    if loss_pesq is not None:
+        out["pesq"] = float(loss_pesq.item())
+    return out
 
 
 @torch.no_grad()
@@ -347,9 +377,7 @@ def _validate(model, validation_loader, device, h) -> float:
     return val_pesq
 
 
-def main():
-    print("Initializing ConvFSENet Training Process..")
-
+def build_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/convfsenet.json")
     parser.add_argument("--checkpoint_path", default="cp_convfsenet")
@@ -366,7 +394,12 @@ def main():
                              "starts with a fresh optimizer + step counter. "
                              "Ignored if --checkpoint_path already contains a "
                              "rolling checkpoint (resume takes priority).")
-    a = parser.parse_args()
+    return parser
+
+
+def main():
+    print("Initializing ConvFSENet Training Process..")
+    a = build_parser().parse_args()
 
     with open(a.config) as f:
         h = AttrDict(json.load(f))
