@@ -1,6 +1,6 @@
 # tests/
 
-Test suite for the sparse-nsnet2 streaming + ONNX export pipeline. Phase 1
+Test suite for the eco8-neaixt streaming + ONNX export pipeline. Phase 1
 gates the FP32 ground truth (cuDNN-vs-unrolled parity) and the ONNX export
 path (no opaque GRU op survives) — every downstream phase compares against
 these gates.
