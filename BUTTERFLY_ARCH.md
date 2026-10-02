@@ -71,7 +71,9 @@ Engine mapping notes (to check with the engine owner before deploying a winner):
 
 **Stage 1 — screen.** All nine arms, seed 1234, 100 epochs, validation every 10 epochs on the
 full 824-utterance test split. No resume: an arm that dies is rerun from scratch.
-- Primary metric: **last-3** = mean of the validations at epochs 80, 90, 100. Secondary: best.
+- Primary metric: **last-3** = mean of the last three validations. Secondary: best.
+  *Correction (2026-10-02, before any reference result existed):* validation runs every 450 steps and
+  100 epochs end at step 4,499, so there is no epoch-100 validation; last-3 is epochs **70, 80, 90**.
 - Reference noise: an identical-config, identical-seed rerun differed by ≤ 0.02 per validation
   between epochs 40 and 90 (0.06 at epoch 10), so single-seed differences < ~0.03 are not
   readable.
