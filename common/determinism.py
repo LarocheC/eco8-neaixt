@@ -19,9 +19,11 @@ and different blast radii (see ``nsnet2/train.py``):
 ``exact_resume``
     Resuming mid-epoch must land on the same weights as never having stopped.
     That needs more than the optimizer and LR schedule (both of which were
-    already verified to restore exactly, and a crash+resume still cost the
-    butterfly control ~0.07 PESQ): it needs every RNG stream and the position
-    within the epoch. The discriminator contains ``nn.Dropout(0.3)`` and trains
+    already verified to restore exactly): it needs every RNG stream and the
+    position within the epoch. See DETERMINISM.md for why the ~0.07 PESQ a
+    crash+resume cost the butterfly control is probably NOT these bugs -- that
+    checkpoint fell on the first batch of an epoch, so the old resume replayed
+    only one batch. The discriminator contains ``nn.Dropout(0.3)`` and trains
     in ``.train()`` mode, so the CUDA RNG advances on *every* step -- restoring
     it is not optional.
 

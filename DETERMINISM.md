@@ -33,7 +33,7 @@ implementation.
 ## Why exact resume needs more than the optimizer
 
 The LR schedule and the Adam state were already verified to restore exactly,
-and a crash+resume still cost the butterfly control ~0.07 PESQ. Three things
+and a crash+resume still cost the butterfly control ~0.07 PESQ. Four things
 were missing:
 
 1. **Position within the epoch.** The old resume restarted the interrupted
@@ -57,6 +57,16 @@ were missing:
    by one batch. That bug was caught by `test_resume_replays_the_same_batches[0]`,
    which is why that test is parametrised over `num_workers` 0 and 2 — today's
    configs all use `num_workers: 5`, where the bug is invisible.
+
+> **These are real bugs, but they are probably not the cause of that ~0.07.**
+> The crash checkpoints in question were `do_00003600`, and 3600 = 80 x 45 at
+> the 45-batch epoch of batch 256 — the *first* batch of epoch 80, so the old
+> resume replayed exactly one batch, not a large slice of the epoch. The
+> likelier explanation is the compounding kernel drift measured below
+> (max abs 1.9e-04 at 6 steps, 2.8e-01 at 50) together with the restarted run
+> drawing a *different data stream*: without a seeded loader generator the
+> worker base seed is redrawn in the fresh process. Correction contributed
+> from the 4090 box, 2026-10-02.
 
 Checkpoints written by this branch carry `next_batch`, `rng` and
 `epoch_start_rng` unconditionally (a few KB), so a run started without
@@ -127,6 +137,20 @@ covered by construction.
 | `ba_R` | twin | **bitwise equal** | not runnable on sm_61 |
 | `ba_R` | resume | **bitwise equal** | not runnable on sm_61 |
 
+Independently verified on the **RTX 4090 with the real Triton butterfly
+backward** (torch 2.14, torch-structured 1.3.0), `ba_R`, batch 32,
+`--subset 640` (20 batches/epoch), 50 steps — this is exactly the flags-off
+`ba_R` column sm_61 cannot produce:
+
+| config | test | flags ON | flags OFF (control) |
+|---|---|---|---|
+| `ba_R` | twin | **bitwise equal** | differ, gen max abs 4.2e-05, disc 2.3e-04 |
+| `ba_R` | resume, cut on an epoch boundary | **bitwise equal** | — |
+
+So the atomics in the Triton backward are confirmed to be doing real damage,
+and `deterministic` is confirmed to remove it on the hardware that actually
+runs that kernel.
+
 The drift compounds: the same flags-off `ba_D_grid` twin differs by max abs
 1.9e-04 after 6 steps and 2.8e-01 after 50. That is the mechanism behind the
 +0.046 PESQ at epoch 90 — not a fixed noise floor.
@@ -158,7 +182,10 @@ measure. The handoff's own figure from the 4090 (+0–19 % step time, up to
 python -m nsnet2.determinism_accept bench --config configs/ba_R.json --batch 256
 ```
 
-there is the one outstanding measurement.
+there is the one outstanding measurement. Queued on the 4090: it needs ~6-7 GB
+and that box is running a ~2-day training wave with only ~2-4 GB headroom until
+~Mon 2026-10-05 08:00. Correctness on that hardware is already confirmed (the
+`ba_R` table above); what is missing is only the cost number.
 
 ## Known residuals
 
