@@ -193,3 +193,12 @@ same config and seed, yet differ by +0.022 / +0.038 / +0.046 at epochs 60 / 80 /
 Triton butterfly backward accumulates the twiddle gradient with atomics), and trajectories diverge.
 Stage-1 single-seed deltas below ~0.05 should be read with that in mind; the 2-seed rule of stage 2
 is the guard.
+
+*Follow-up (branch `deterministic-training`):* both sources are now fixed behind opt-in config flags
+— the Triton butterfly backward's atomics **and** the MetricDiscriminator's cuDNN conv backward,
+which is a second, independent source (either one alone still drifts). A third bug was found on the
+way: the train DataLoader had no seeded `generator=`, so its worker seeds were drawn from the global
+RNG *after* model init and two architectures with the same seed saw **different crops**. With
+`"deterministic"`, `"data_generator"` and `"exact_resume"` set, two runs of the real trainer agree
+bitwise, and resume-from-step-k equals the uninterrupted run. See DETERMINISM.md. The flags default
+to off, so the numbers above and the runs that produced them are unaffected.
