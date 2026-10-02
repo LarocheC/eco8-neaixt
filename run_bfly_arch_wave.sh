@@ -61,7 +61,7 @@ while [ ${#pending[@]} -gt 0 ]; do
 done
 wait
 
-echo "=== stage 1: best / last-3 (epochs 80-100) validation PESQ, engine pairs/frame ==="
+echo "=== stage 1: best / last-3 (last three validations: epochs 70, 80, 90) PESQ, engine pairs/frame ==="
 for arm in "${JOBS[@]}"; do
   $PY - "$arm" <<'PYEOF'
 import json, re, statistics as st, sys

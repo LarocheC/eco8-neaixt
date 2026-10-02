@@ -108,3 +108,28 @@ Combinations of winners (e.g. A + B) are stage 3.
   ~4 MiB/step. The trainer clears it each step.
 - The Triton butterfly forward itself is exact: 1e-7 vs the pure-PyTorch backend, deterministic,
   at every shape used here.
+
+## Stage 1 results (2026-10-02, all nine arms, seed 1234, 100 epochs, no crash or resume)
+
+Last-3 = mean of the epoch 70 / 80 / 90 validations (full 824-utterance test split). Pareto =
+not beaten by an arm that is both better and cheaper on the engine.
+
+| arm | last-3 | Δ vs R | best | params | engine pairs/frame | verdict (pre-registered rule) | Pareto |
+|---|---:|---:|---:|---:|---:|---|:---:|
+| `ba_R2b` | **2.818** | +0.062 | 2.842 | 301k | 73.2k | promising | ✓ |
+| `ba_A_res` | 2.808 | +0.052 | 2.830 | 196k | 45.8k | promising | ✓ |
+| `ba_F_wide` | 2.796 | +0.041 | 2.810 | 740k | 177.2k | promising | ✗ (R2b, A) |
+| `ba_D_grid` | 2.783 | +0.027 | 2.792 | 150k | 29.7k | advance | ✓ |
+| `ba_E_unet` | 2.768 | +0.012 | 2.776 | 150k | 29.7k | advance | ✗ (D) |
+| `ba_R` | 2.756 | — | 2.759 | 154k | 36.6k | reference | ✗ (D) |
+| `ba_B_cep` | 2.744 | −0.012 | 2.761 | 156k | 36.9k | drop (< R − 0.01) | ✗ (D) |
+| `ba_C_lru` | 2.741 | −0.015 | 2.745 | 116k | 27.4k | drop | ✓ |
+| `ba_C_mingru` | 2.733 | −0.023 | 2.764 | 77k | 18.2k | drop | ✓ |
+
+Readings (single seed; differences < ~0.03 are not resolved):
+- **Rule 1 holds**: identity paths (A, +0.052) and more butterfly factors (R2b, +0.062) are the two
+  big wins; they are within noise of each other, A at 0.63× R2b's engine cost.
+- **Rule 3 partly**: keeping a frequency axis (D) beats R (+0.027) at 0.81× R's engine cost, the
+  best PESQ per engine cycle. Multi-resolution skips (E) did not add to it (−0.015 vs D).
+- Width (F) helps but is dominated by A and R2b at 2.4–3.9× their engine cost.
+- Cepstral side path (B) and diagonal recurrences (LRU, minGRU) do not beat the butterfly GRU.
