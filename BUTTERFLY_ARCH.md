@@ -180,3 +180,16 @@ Stage-1 runs are not reused: they stopped at 100 epochs and the schedule (×0.99
 **Scheduling.** First-fit on measured per-arm training peaks (+10 %) under 22.5 GiB, at most 4
 jobs; the reference R goes first so comparisons are available early. Throughput in stage 1 was
 ~62 run-epochs/hour, so 10 × 200 epochs ≈ 32 h (F and E would add ~15 h).
+
+**Scope change (2026-10-02 19:40, Clément):** the F and E confirmations are added back
+(`s2_E_unet_s1234/2345`, `s2_F_wide_s1234/2345`), same rules. They are queued behind the ten runs
+above (a second driver sharing the first one's memory ledger, started once the first has launched
+everything), so the core results arrive on the original schedule; F cannot share the GPU with E
+(14.1 + 9.7 GiB > the cap), which puts the end of the wave at ~64 h after launch.
+
+**Noise note (2026-10-02, observed, rules unchanged):** `s2_R_s1234` and stage-1 `ba_R` are the
+same config and seed, yet differ by +0.022 / +0.038 / +0.046 at epochs 60 / 80 / 90 — larger than the
+≤ 0.02 measured on the butterfly-a1 control rerun. Training is not reproducible run to run (the
+Triton butterfly backward accumulates the twiddle gradient with atomics), and trajectories diverge.
+Stage-1 single-seed deltas below ~0.05 should be read with that in mind; the 2-seed rule of stage 2
+is the guard.

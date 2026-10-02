@@ -9,6 +9,9 @@
 # validation's empty_cache() makes a running job look small.
 #   DRY=1 ./run_bfly_arch_wave.sh        print the plan
 #   ARMS="ba_R ba_A_res" ./...           a subset
+#   KEEP_LEDGER=1 RUN_DIR=<dir> ...       append arms behind a running driver: start it only once that
+#                                        driver has launched all its arms (two drivers launching from
+#                                        one ledger at once could race past CAP_MIB)
 set -u
 cd "$(dirname "$0")"
 PY="${PY:-/home/clement/eco8-neaixt/.venv/bin/python}"
@@ -42,7 +45,7 @@ if [ "$DRY" = 1 ]; then
   for arm in "${JOBS[@]}"; do echo "$arm  needs ${NEED[$arm]} MiB  ->  $PY -m nsnet2.train --config configs/${arm}.json --checkpoint_path cp_${arm} ${NS[*]}"; done
   exit 0
 fi
-rm -f "$RUN"/*
+[ "${KEEP_LEDGER:-0}" = 1 ] || rm -f "$RUN"/*     # KEEP_LEDGER=1: share a running driver's ledger (append arms)
 pending=("${JOBS[@]}")
 while [ ${#pending[@]} -gt 0 ]; do
   started=0
