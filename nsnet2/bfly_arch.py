@@ -22,7 +22,8 @@ Shared by every arm: 256 frequency bins (Nyquist dropped, its gain copied from b
      "rnn": "gru" | "mingru" | "lru"}         # C
 
     {"type": "bflygrid",                      # D / E: frequency axis kept inside
-     "channels": 4, "skips": false}           # E: skips = true
+     "channels": 4, "skips": false,           # E: skips = true
+     "residual": false}                       # Dres: x + ReLU(BN(B x)) per square level
 
 The cepstral path's DCT is a fixed orthonormal DCT-II: a real butterfly cannot hold
 it (a 256-point fit leaves >= 48 % relative error even with input reorderings), but
@@ -379,6 +380,10 @@ class BflyGridNet(nn.Module):
         n = C * F
         ch = [F * 2 ** i for i in range(int(math.log2(C)))]          # channel strides
         self.skips = bool(a.get("skips", False))
+        # residual: each square level (enc1, enc2, dec2, dec1, dec0) becomes x + ReLU(BN(B x)),
+        # an identity path at no extra butterfly cost (on the engine: the level's ReLU task,
+        # then a K = 0 element-wise add of x).
+        self.residual = bool(a.get("residual", False))
         mean = _load_mean(h)
         self.input_norm = mean is not None
         if self.input_norm:
@@ -399,16 +404,20 @@ class BflyGridNet(nn.Module):
         x = noisy_mag.transpose(1, 2)[..., :N_BINS]
         if self.input_norm:
             x = x - self.in_mean
+        def level(b, bn, v):
+            y = torch.relu(bn(b(v)))
+            return v + y if self.residual else y
+
         e0 = torch.relu(self.bn_e[0](self.enc0(x)))
-        e1 = torch.relu(self.bn_e[1](self.enc1(e0)))
-        e2 = torch.relu(self.bn_e[2](self.enc2(e1)))
+        e1 = level(self.enc1, self.bn_e[1], e0)
+        e2 = level(self.enc2, self.bn_e[2], e1)
         g = e2
         for layer in self.rnn:
             g = layer(g)
         d = g
         for dec, bn, e in ((self.dec2, self.bn_d[0], e2), (self.dec1, self.bn_d[1], e1),
                            (self.dec0, self.bn_d[2], e0)):
-            d = torch.relu(bn(dec(d + e if self.skips else d)))
+            d = level(dec, bn, d + e if self.skips else d)
         return _finish(noisy_mag, noisy_pha, torch.sigmoid(self.out(d)))
 
 

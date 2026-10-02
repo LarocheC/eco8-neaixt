@@ -133,3 +133,50 @@ Readings (single seed; differences < ~0.03 are not resolved):
   best PESQ per engine cycle. Multi-resolution skips (E) did not add to it (−0.015 vs D).
 - Width (F) helps but is dominated by A and R2b at 2.4–3.9× their engine cost.
 - Cepstral side path (B) and diagonal recurrences (LRU, minGRU) do not beat the butterfly GRU.
+
+## Stage 2 protocol (pre-registered 2026-10-02, before any stage-2 run)
+
+**Purpose.** Confirm the stage-1 winners at full length with two seeds, and pilot the two
+combinations of winners.
+
+**Scope decided with Clément (2026-10-02).** The stage-1 rule advances five arms (R2b, A, F, D,
+E). Stage 2 confirms four of them and drops two on cost/benefit, not on the rule:
+- `ba_F_wide` dropped: beaten by both R2b and A at 2.4–3.9× their engine cost (Pareto-dominated).
+- `ba_E_unet` dropped: −0.015 vs the D it extends; skips added nothing.
+Their 2-seed configs exist (`configs/s2_F_wide_s*`, `configs/s2_E_unet_s*`) and can be appended
+to the queue without disturbing the rest.
+
+**Runs (10).** 200 epochs, everything else exactly as stage 1 (recipe, 256 bins, A1, validation
+every 10 epochs on the full test split, no resume — a run that dies is rerun from scratch).
+
+| run | arm | seeds | role |
+|---|---|---|---|
+| `s2_R_s*` | R | 1234, 2345 | reference |
+| `s2_R2b_s*` | R2b (nblocks 2) | 1234, 2345 | confirm |
+| `s2_A_res_s*` | A (residual blocks) | 1234, 2345 | confirm |
+| `s2_D_grid_s*` | D (frequency grid) | 1234, 2345 | confirm |
+| `s2_A2b_s1234` | **A + R2b**: residual blocks, nblocks 2 everywhere (380k params, 91.6k pairs/frame) | 1234 | pilot |
+| `s2_Dres_s1234` | **D + identity paths**: each square grid level is `x + ReLU(BN(B x))`, no extra butterflies (150k, 29.7k pairs/frame) | 1234 | pilot |
+
+Stage-1 runs are not reused: they stopped at 100 epochs and the schedule (×0.99/epoch) makes a
+200-epoch run a different trajectory after epoch 100.
+
+**Metrics.** Validations exist at epochs 10…190 (none at 200; see the stage-1 correction).
+- Primary: **last-5** = mean of the epoch 150–190 validations.
+- Secondary: best (a best-of-19 on the test split, biased up), params, engine pairs/frame.
+- Same-seed noise floor measured here: ≤ 0.02 per validation late in training.
+
+**Decision rules.**
+1. **Confirmed improvement**: an arm's 2-seed mean last-5 ≥ R's 2-seed mean last-5 + 0.02,
+   **and** for each seed its last-5 > R's last-5 with that seed.
+2. **Ranking among confirmed arms** is by PESQ at matched engine cost (pairs/frame); two arms
+   within 0.02 of each other are reported as tied, and the cheaper one is preferred.
+3. **Pilots** (one seed): a pilot earns a 2-seed confirmation (stage 3) if its last-5 ≥ the
+   better of its parents' seed-1234 last-5 + 0.02 (A2b vs A and R2b; Dres vs D). Otherwise
+   the combination is reported as not additive at this precision and stopped.
+4. No rule is changed after a stage-2 result exists; corrections that are needed for a rule to
+   be measurable are recorded with their date, as in stage 1.
+
+**Scheduling.** First-fit on measured per-arm training peaks (+10 %) under 22.5 GiB, at most 4
+jobs; the reference R goes first so comparisons are available early. Throughput in stage 1 was
+~62 run-epochs/hour, so 10 × 200 epochs ≈ 32 h (F and E would add ~15 h).

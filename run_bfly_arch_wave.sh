@@ -13,7 +13,7 @@ set -u
 cd "$(dirname "$0")"
 PY="${PY:-/home/clement/eco8-neaixt/.venv/bin/python}"
 export PYTHONPATH="$PWD" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-DRY="${DRY:-0}"; EPOCHS="${EPOCHS:-100}"; CAP_MIB="${CAP_MIB:-22500}"; MAX_JOBS="${MAX_JOBS:-4}"; POLL="${POLL:-30}"
+DRY="${DRY:-0}"; EPOCHS="${EPOCHS:-100}"; LASTN="${LASTN:-3}"; CAP_MIB="${CAP_MIB:-22500}"; MAX_JOBS="${MAX_JOBS:-4}"; POLL="${POLL:-30}"
 NS=(--training_epochs "$EPOCHS" --stdout_interval 45 --validation_interval 450 --checkpoint_interval 1800 --best_checkpoint_start_epoch 0)
 # arm:MiB in launch-priority order. MiB = measured training peak + 10 %: one real epoch incl.
 # a full-test validation, expandable segments, nvidia-smi sampled every 2 s (2026-10-01).
@@ -25,7 +25,7 @@ declare -A NEED
 JOBS=()
 for j in $PLAN; do JOBS+=("${j%%:*}"); NEED[${j%%:*}]="${j##*:}"; done
 [ -n "${ARMS:-}" ] && read -r -a JOBS <<< "$ARMS"
-RUN=.arch_running; mkdir -p "$RUN"
+RUN="${RUN_DIR:-.arch_running}"; mkdir -p "$RUN"
 exec 3>&1
 
 for arm in "${JOBS[@]}"; do
@@ -61,18 +61,18 @@ while [ ${#pending[@]} -gt 0 ]; do
 done
 wait
 
-echo "=== stage 1: best / last-3 (last three validations: epochs 70, 80, 90) PESQ, engine pairs/frame ==="
+echo "=== best / last-$LASTN validations (every 10 epochs; a run of E epochs has none at epoch E) PESQ, engine pairs/frame ==="
 for arm in "${JOBS[@]}"; do
-  $PY - "$arm" <<'PYEOF'
+  $PY - "$arm" "$LASTN" <<'PYEOF'
 import json, re, statistics as st, sys
 from common.env import AttrDict
 from nsnet2.bfly_arch import build_generator, engine_pairs
-arm = sys.argv[1]
+arm, k = sys.argv[1], int(sys.argv[2])
 v = dict((int(a), float(b)) for a, b in re.findall(r"Steps : (\d+), PESQ Score: ([\d.]+)", open(f"cp_{arm}.log").read()))
 t = [v[k] for k in sorted(v)]
 m = build_generator(AttrDict(json.load(open(f"configs/{arm}.json"))))
 npar, pairs = sum(p.numel() for p in m.parameters()), engine_pairs(m)
-print(f"{arm:<14} n={len(t):>2} best={max(t) if t else float('nan'):.3f} last3={st.mean(t[-3:]) if len(t) >= 3 else float('nan'):.4f} "
+print(f"{arm:<18} n={len(t):>2} best={max(t) if t else float('nan'):.3f} last{k}={st.mean(t[-k:]) if len(t) >= k else float('nan'):.4f} "
       f"params={npar/1e3:.0f}k pairs/frame={pairs/1e3:.1f}k")
 PYEOF
 done 2>&1 | grep -v -i 'warn\|routing\|from \.\|@torch'
