@@ -42,17 +42,18 @@ python -m lisennet.eval_deploy --checkpoint_file cp_lisennet/g_best --n_utts 824
 
 ## Status
 As of 2026-10-02:
-- `main` last changed on 2026-09-04 (`b72d38e`).
+- Code on `main` last changed on 2026-09-04 (`b72d38e`).
   [#5](https://github.com/LarocheC/eco8-neaixt/pull/5) made the RT595 a first-class deploy target, and
   `36aa725` split the results by model and by target.
-- Earlier merged PRs:
+- Merged PRs:
   - [#1](https://github.com/LarocheC/eco8-neaixt/pull/1) LiSenNet (2026-07-03).
   - [#2](https://github.com/LarocheC/eco8-neaixt/pull/2) "monarch" renamed to "blockdiag", plus a
     genuine Monarch (2026-07-14).
   - [#3](https://github.com/LarocheC/eco8-neaixt/pull/3) DNSMOS, NISQA and SCOREQ (2026-07-14).
   - [#4](https://github.com/LarocheC/eco8-neaixt/pull/4) LiSenNet hybrid bottleneck (2026-07-14).
-- Open: [#6](https://github.com/LarocheC/eco8-neaixt/pull/6), which drops the references to the old
-  pre-public repo. Newer work sits on unmerged branches:
+  - [#6](https://github.com/LarocheC/eco8-neaixt/pull/6) drops the references to the old pre-public
+    repo, and [#7](https://github.com/LarocheC/eco8-neaixt/pull/7) adds this file (2026-10-02).
+- No open PRs. Newer work sits on unmerged branches:
   - `feat/pesq-finetune` (2026-10-02): an optional differentiable PESQ loss (triton-pesq) and a
     fine-tune study runner.
   - `block-design` (2026-09-29): the sparse-kernel write-up and a ConvFSENet hand-off exporter.
