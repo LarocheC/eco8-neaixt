@@ -12,7 +12,9 @@ import torch.multiprocessing as mp
 from torch.distributed import init_process_group
 from torch.nn.parallel import DistributedDataParallel
 from common.env import AttrDict, build_env
-from common.dataset import Dataset, mag_pha_stft, mag_pha_istft, load_voicebank_demand
+from common.dataset import (Dataset, data_generator, load_voicebank_demand, mag_pha_istft,
+                            mag_pha_stft, seed_worker)
+from common.determinism import apply_determinism, rng_state, seed_everything, set_rng_state
 from nsnet2.model import NSNet2
 from nsnet2.bfly_arch import build_generator
 from common.metrics import pesq_score
@@ -102,6 +104,18 @@ def train(rank, a, h):
         init_process_group(backend=h.dist_config['dist_backend'], init_method=h.dist_config['dist_url'],
                            world_size=h.dist_config['world_size'] * h.num_gpus, rank=rank)
 
+    # Opt-in reproducibility. All three default to false, so a config written
+    # before they existed trains bit for bit as it did -- running and queued
+    # studies are unaffected. See common/determinism.py for what each fixes.
+    det_on = apply_determinism(h.get("deterministic", False))
+    use_data_gen = h.get("data_generator", False)
+    exact_resume = h.get("exact_resume", False)
+    if det_on:
+        seed_everything(h.seed)
+    if rank == 0 and (det_on or use_data_gen or exact_resume):
+        print('Reproducibility: deterministic={} data_generator={} exact_resume={}'
+              .format(det_on or False, use_data_gen, exact_resume))
+
     torch.cuda.manual_seed(h.seed)
     device = torch.device('cuda:{:d}'.format(rank)) if torch.cuda.is_available() else torch.device('cpu')
 
@@ -185,13 +199,31 @@ def train(rank, a, h):
     trainset = Dataset(hf['train'], h.segment_size, h.sampling_rate,
                        split=True, shuffle=False if h.num_gpus > 1 else True, seed=h.seed)
 
+    # Test hook (default off): shorten the epoch so the determinism acceptance
+    # tests can cross several epoch boundaries in a handful of steps. At the
+    # real batch 256 an epoch is only ~45 batches, so epoch-boundary handling is
+    # on the normal resume path and has to be covered.
+    if h.get("train_subset", 0):
+        trainset.indices = trainset.indices[:int(h["train_subset"])]
+        if rank == 0:
+            print('train_subset: epoch truncated to {} utterances'.format(len(trainset.indices)))
+
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
+
+    # Without a generator the loader draws its worker base seed from the global
+    # RNG at iterator creation -- i.e. AFTER model init, so two architectures
+    # with the same seed consume different amounts of RNG and see different
+    # crops. A seeded generator pins the base seed; seed_worker then pins the
+    # per-worker python/numpy RNGs that Dataset.__getitem__ crops with.
+    data_gen = data_generator(h.seed) if use_data_gen else None
+    loader_kw = dict(worker_init_fn=seed_worker, generator=data_gen) if use_data_gen else {}
 
     train_loader = DataLoader(trainset, num_workers=h.num_workers, shuffle=False,
                               sampler=train_sampler,
                               batch_size=h.batch_size,
                               pin_memory=True,
-                              drop_last=True)
+                              drop_last=True,
+                              **loader_kw)
     if rank == 0:
         validset = Dataset(hf['test'], h.segment_size, h.sampling_rate,
                            split=False, shuffle=False, seed=h.seed)
@@ -210,6 +242,24 @@ def train(rank, a, h):
     # Restore best_pesq on resume so a resumed run can't overwrite g_best with
     # an inferior model (the checkpoint persists it; default 0 for fresh runs).
     best_pesq = state_dict_do.get('best_pesq', 0) if state_dict_do is not None else 0
+
+    # Exact resume: how far into the epoch we got, plus every RNG stream as of
+    # that batch. Checkpoints written before this existed carry no 'next_batch',
+    # and fall back to the old behaviour of restarting the epoch from batch 0.
+    resume_epoch = resume_skip = None
+    pending_rng = epoch_entry_rng = None
+    if exact_resume and state_dict_do is not None:
+        if 'next_batch' in state_dict_do:
+            resume_epoch = state_dict_do['epoch']
+            resume_skip = state_dict_do['next_batch']
+            pending_rng = state_dict_do.get('rng')
+            epoch_entry_rng = state_dict_do.get('epoch_start_rng')
+            if rank == 0:
+                print('Exact resume: epoch {}, skipping {} batches already trained on'
+                      .format(resume_epoch, resume_skip))
+        elif rank == 0:
+            print('Exact resume requested but this checkpoint predates it; '
+                  'restarting epoch {} from its first batch'.format(last_epoch))
     quant_first_cycle_done = False    # Phase 6 (TRN-03)
 
     # Generator-only linear LR warmup (h.warmup_steps, default 0 = off).
@@ -225,9 +275,37 @@ def train(rank, a, h):
         if h.num_gpus > 1:
             train_sampler.set_epoch(epoch)
 
+        # Rewind before the iterator exists: the worker base seed is drawn when
+        # the DataLoader iterator is created, once per epoch, so restoring the
+        # epoch-start snapshot here is what makes the workers replay this
+        # epoch's crops in the same order.
+        skip = 0
+        if resume_epoch is not None and epoch == resume_epoch:
+            skip = resume_skip
+            set_rng_state(epoch_entry_rng, data_gen)
+        epoch_start_rng = rng_state(data_gen)
+
         warmup_g.epoch_start()
 
-        for i, batch in enumerate(train_loader):
+        # Drive the iterator by hand. The batches already trained on must be
+        # replayed -- that is what walks the loader's workers forward to where
+        # they were -- and the checkpointed RNG must go back BEFORE the next
+        # batch is drawn. With num_workers=0 there are no workers and the crop
+        # happens inside next(), so restoring from inside the loop body (i.e.
+        # after the draw) would rewind the stream by one batch.
+        train_iter = iter(train_loader)
+        for _ in range(skip):
+            try:
+                next(train_iter)
+            except StopIteration:      # the cut fell on the epoch's last batch
+                break
+        if pending_rng is not None:
+            set_rng_state(pending_rng, data_gen)
+            pending_rng = None
+
+        for i, batch in enumerate(train_iter, start=skip):
+            if a.max_steps and steps >= a.max_steps:
+                break
 
             if rank == 0:
                 start_b = time.time()
@@ -334,7 +412,13 @@ def train(rank, a, h):
                                      'optim_g': optim_g.state_dict(), 'optim_d': optim_d.state_dict(), 'steps': steps,
                                      'epoch': epoch,
                                      'scheduler_g': scheduler_g.state_dict(), 'scheduler_d': scheduler_d.state_dict(),
-                                     'best_pesq': best_pesq})
+                                     'best_pesq': best_pesq,
+                                     # Written unconditionally (a few KB) so a run
+                                     # started without exact_resume can still be
+                                     # resumed exactly later.
+                                     'next_batch': i + 1,
+                                     'rng': rng_state(data_gen),
+                                     'epoch_start_rng': epoch_start_rng})
 
                 if steps % a.summary_interval == 0:
                     sw.add_scalar("Training/Generator Loss", loss_gen_all, steps)
@@ -406,6 +490,13 @@ def train(rank, a, h):
 
             steps += 1
 
+        if a.max_steps and steps >= a.max_steps:
+            # Stop inside the epoch, before the schedulers step: a partial epoch
+            # must not advance the per-epoch LR schedule.
+            if rank == 0:
+                print('Reached max_steps={}; stopping.'.format(a.max_steps))
+            break
+
         warmup_g.epoch_end()     # unscaled lr back before the scheduler reads it
         scheduler_g.step()
         scheduler_d.step()
@@ -434,6 +525,10 @@ def main():
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=5000, type=int)
     parser.add_argument('--best_checkpoint_start_epoch', default=40, type=int)
+    parser.add_argument('--max_steps', default=0, type=int,
+                        help='Stop once this many optimizer steps have run '
+                             '(0 = no limit). Used by the determinism '
+                             'acceptance tests to land on an exact step.')
 
     a = parser.parse_args()
 
