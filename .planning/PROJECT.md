@@ -1,8 +1,8 @@
-# sparse-nsnet2 — Quantization & Streaming Export
+# eco8-neaixt — Quantization & Streaming Export
 
 ## What This Is
 
-sparse-nsnet2 is a research codebase exploring sparse / structured weight matrices in NSNet2 speech-enhancement models (dense, butterfly, monarch GRU/Linear variants, trained on VoiceBank-DEMAND-16k). This milestone adds an **int8 ONNX deployment path** so that any trunk variant can be exported as a streaming, frame-by-frame model with a stable `[frame_in, states] → [mask, states]` interface and evaluated under static quantization both at export time and periodically during training.
+eco8-neaixt is a research codebase exploring sparse / structured weight matrices in NSNet2 speech-enhancement models (dense, butterfly, monarch GRU/Linear variants, trained on VoiceBank-DEMAND-16k). This milestone adds an **int8 ONNX deployment path** so that any trunk variant can be exported as a streaming, frame-by-frame model with a stable `[frame_in, states] → [mask, states]` interface and evaluated under static quantization both at export time and periodically during training.
 
 ## Core Value
 

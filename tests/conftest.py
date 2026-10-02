@@ -1,4 +1,4 @@
-"""Pytest configuration for the sparse-nsnet2 test suite.
+"""Pytest configuration for the eco8-neaixt test suite.
 
 Session-scoped determinism fixture (D-09). The CUBLAS_WORKSPACE_CONFIG
 environment variable MUST be set BEFORE ``import torch`` (top-of-file,

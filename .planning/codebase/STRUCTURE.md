@@ -5,7 +5,7 @@
 ## Directory Layout
 
 ```
-sparse-nsnet2/
+eco8-neaixt/
 ├── train.py                     # Training entry point (GAN loop, DDP-aware)
 ├── inference.py                 # Single-checkpoint inference entry point
 ├── dataset.py                   # HF VoiceBank-DEMAND-16k Dataset + STFT helpers
