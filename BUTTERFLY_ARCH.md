@@ -19,8 +19,13 @@ driver `run_bfly_arch_wave.sh`. Branch `butterfly-arch` (off `butterfly-a1`).
   4096-entry LUT (sigmoid, tanh, or any curve). K = 0 tasks do element-wise versions.
 - **Hadamard unit**: element-wise products (`r ⊙ CN`, `h' = z ⊙ (h − n) + n`).
 - **FFT pair words** (§14): 16-bit complex FFT stages for the STFT / iSTFT.
-- **Not available**: data-dependent normalisation (LayerNorm), permutations inside the net.
-  BatchNorm is fine at inference (a fixed affine that folds into the butterfly next to it).
+- **Not available**: data-dependent normalisation (LayerNorm). BatchNorm is fine at inference (a
+  fixed affine that folds into the butterfly next to it).
+- *Correction (2026-10-03, from the literature review):* this section first said permutations were
+  not available. They are, as butterfly tasks: a Beneš network (BB* stride order, ~2·log₂n − 1
+  stages) realises **any** permutation with twiddles that are only I or the 2×2 swap — zero
+  multiplies, ~1.9K pairs at n = 256. To confirm with the engine owner: the 0/1 twiddle encoding
+  and a RAW epilogue on routing stages so requant passes values through exactly.
 
 ## Evidence the designs start from (branch `butterfly-a1`)
 
@@ -28,6 +33,15 @@ driver `run_bfly_arch_wave.sh`. Branch `butterfly-arch` (off `butterfly-a1`).
    3e5–2e8 vs 24 dense; 99 %-energy rank of fc_out 14–89 of 257 vs 104). Forcing
    orthogonality fixed conditioning but cost ~0.07 PESQ → keep the layers full-rank with
    **identity paths**, not constraints.
+   *Corrections (2026-10-03):* (i) the collapse is present **at initialisation** — torch_structured's
+   randn twiddles (N(0, ½) per entry) compose to cond ~1e10 and a 99 %-energy rank of ~94/512 for a
+   512-point butterfly (cond ~1e12, rank 27–43 with nblocks 2); training *raises* the rank (to
+   114–123, resp. 60–64, measured on the stage-1 checkpoints), while ortho-initialised layers
+   (W_hh) start at cond 1.0 and drift only to 25–51. Initialisation is the main lever; AdamW's
+   default weight decay (0.01, applied to the twiddles in every run so far) is at most secondary.
+   (ii) the orthogonality penalty forced orthogonal factors **without diagonal scalings**; an
+   orthogonal-butterfly + diagonal hierarchy (Kaleidoscope's OBB) is as expressive as BB* and was
+   not tested, so "constraints cost 0.07" is not established.
 2. Butterflies are very sensitive to input conditioning: A1 (input-mean centring + warmup)
    gave +0.06–0.07, far more than its dead-unit mechanism predicted.
 3. A butterfly is a **frequency-shaped operator**: stage k mixes elements 2^k apart, a
@@ -57,9 +71,13 @@ time; 36.6K ≈ 0.43 ms at 85 MHz, budget 16 ms).
 Engine mapping notes (to check with the engine owner before deploying a winner):
 - A: B₁ with BN folded + ReLU epilogue; B₂ with the residual as the epilogue seed (needs the
   seed at B₂'s accumulator scale). α folds into B₂.
-- B: the DCT-II is fixed and exact. **A real butterfly cannot hold it**: fitting a 256-point
-  butterfly (1–3 blocks, either stride order, with Makhoul input reorder and/or bit-reversed
-  output) leaves ≥ 48 % relative Frobenius error. The engine computes it with its FFT pair
+- B: the DCT-II is fixed and exact. A real butterfly of 1–3 blocks cannot hold it: fitting a
+  256-point butterfly (either stride order, with Makhoul input reorder and/or bit-reversed output)
+  leaves ≥ 48 % relative Frobenius error. *Correction (2026-10-03):* that is a depth / fixed-
+  permutation limit, not a butterfly limit — butterfly–permutation products (BP)² contain the DCT,
+  DST and convolution exactly (Dao et al. 2019, Prop. 1), and with Beneš routing (above) an exact
+  real DCT-II is reachable on the engine at roughly 5–6·log₂n stages. Arm B may have lost for its
+  side-path design rather than for the transform. The engine computes it with its FFT pair
   words (Makhoul reorder at the feature write, a post-twiddle on the Hadamard unit).
 - C-minGRU: one butterfly task with 2 stacks (sigmoid LUT on z, RAW on h̃) + the existing
   Hadamard op. C-LRU: the complex diagonal recurrence is 4 real Hadamard products per step.
