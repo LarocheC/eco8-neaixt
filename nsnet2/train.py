@@ -21,6 +21,7 @@ from common.metrics import pesq_score
 from common.discriminator import MetricDiscriminator, batch_pesq
 from nsnet2.layers import butterfly_ortho_penalty
 from nsnet2.sparsity import SparsityController
+from nsnet2.optim_groups import build_param_groups, describe
 from common.utils import scan_checkpoint, load_checkpoint, save_checkpoint
 
 try:
@@ -170,7 +171,19 @@ def train(rank, a, h):
         generator = DistributedDataParallel(generator, device_ids=[rank]).to(device)
         discriminator = DistributedDataParallel(discriminator, device_ids=[rank]).to(device)
 
-    optim_g = torch.optim.AdamW(generator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
+    # Butterfly twiddles can take their own learning rate and weight decay.
+    # Both default to a no-op, so a config written before this trains exactly
+    # as it did. See nsnet2/optim_groups.py for why either is worth varying.
+    tw_mult = h.get("twiddle_lr_mult", 1.0)
+    tw_wd = h.get("twiddle_weight_decay", None)
+    g_groups = build_param_groups(generator, h.learning_rate,
+                                  twiddle_lr_mult=tw_mult,
+                                  twiddle_weight_decay=tw_wd,
+                                  weight_decay=h.get("weight_decay", None))
+    optim_g = torch.optim.AdamW(g_groups, h.learning_rate, betas=[h.adam_b1, h.adam_b2])
+    if rank == 0 and (tw_mult != 1.0 or tw_wd is not None):
+        for line in describe(g_groups):
+            print('  optim_g {}'.format(line))
     optim_d = torch.optim.AdamW(discriminator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
 
     if state_dict_do is not None:
@@ -469,6 +482,22 @@ def train(rank, a, h):
                         sw.add_scalar("Validation/Magnitude Loss", val_mag_err, steps)
                         sw.add_scalar("Validation/Complex Loss", val_com_err, steps)
                         sw.add_scalar("Validation/Consistency Loss", val_stft_err, steps)
+
+                        # Composed-spectrum tracking (h.log_spectra, default off).
+                        # The rank collapse in these models is present AT INIT and
+                        # training raises rank from there, so the spectrum has to be
+                        # tracked rather than inspected post hoc. Logged here because
+                        # it is also exactly what the later quantisation phase needs,
+                        # and collecting it now costs one validation's worth of time
+                        # instead of re-running every arm.
+                        if h.get("log_spectra", False):
+                            from nsnet2.diagnostics import layer_spectra
+                            gen_inner = generator.module if h.num_gpus > 1 else generator
+                            for lname, sp in layer_spectra(gen_inner).items():
+                                if "error" in sp:
+                                    continue
+                                sw.add_scalar("Cond/{}".format(lname), sp["cond"], steps)
+                                sw.add_scalar("Rank99/{}".format(lname), sp["rank99"], steps)
                         # Phase 6 hook (TRN-01..05; lazy-import gate per TRN-05).
                         if h.get("quant", {}).get("enabled", False):
                             from nsnet2.quant_hook import run_quant_eval
