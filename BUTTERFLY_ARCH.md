@@ -220,3 +220,30 @@ RNG *after* model init and two architectures with the same seed saw **different 
 `"deterministic"`, `"data_generator"` and `"exact_resume"` set, two runs of the real trainer agree
 bitwise, and resume-from-step-k equals the uninterrupted run. See DETERMINISM.md. The flags default
 to off, so the numbers above and the runs that produced them are unaffected.
+
+## Stage 2 results (2026-10-05, all 14 runs finished, no crash or resume)
+
+Last-5 = mean of the epoch 150–190 validations (full test split). Rule: confirmed if the 2-seed mean is
+≥ R + 0.02 **and** the arm beats R on each seed.
+
+| arm | seed 1234 | seed 2345 | mean | Δ mean | Δ 1234 | Δ 2345 | verdict | pairs/frame | params |
+|---|---:|---:|---:|---:|---:|---:|---|---:|---:|
+| `R` | 2.798 | 2.751 | 2.774 | — | — | — | reference | 36.6k | 154k |
+| `A_res` | 2.805 | 2.796 | **2.801** | **+0.026** | +0.008 | +0.045 | **confirmed** | 45.8k | 196k |
+| `D_grid` | 2.792 | 2.804 | 2.798 | +0.024 | −0.006 | +0.053 | not confirmed (seed 1234) | 29.7k | 150k |
+| `R2b` | 2.774 | 2.806 | 2.790 | +0.016 | −0.024 | +0.055 | not confirmed | 73.2k | 301k |
+| `F_wide` | 2.796 | 2.772 | 2.784 | +0.010 | −0.002 | +0.021 | not confirmed | 177.2k | 740k |
+| `E_unet` | 2.784 | 2.781 | 2.783 | +0.008 | −0.013 | +0.030 | not confirmed | 29.7k | 150k |
+
+Pilots (seed 1234, rule: ≥ better parent + 0.02): `A2b` 2.777 vs A 2.805 (−0.028), `Dres` 2.783 vs D 2.792
+(−0.009) — neither combination is additive; both stop.
+
+Readings:
+- **Identity paths (A) are the one confirmed gain**, +0.026 at 1.25× R's engine cost — modest, and against a
+  seed-to-seed spread of 0.047 in R itself.
+- D matches A's mean (+0.024) at 0.81× R's engine cost; it misses the per-seed condition by 0.006, which is
+  inside the noise. It remains the most engine-efficient design but is not a confirmed improvement.
+- The stage-1 leaders by +0.04–0.06 (R2b, F) shrink to +0.01–0.02: stage 1's single-seed R was a low draw.
+- Rank stability (same runs): the 2-seed arm ranking at epochs 80–100 predicts the 150–190 ranking with
+  Spearman ρ = +0.09 (6 arms; ρ = +0.31 over the 14 runs). Stage-1 (100 ep, one seed) vs stage-2 (200 ep, two
+  seeds): ρ = +0.71. At these effect sizes (≤ 0.03), short screens do not rank reliably.
