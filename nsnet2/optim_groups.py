@@ -23,9 +23,23 @@ one attempt to read the paper that would settle the magnitude returned content
 judged fabricated and was discarded. That is exactly why the multiplier is a
 swept variable here and not a prescribed constant.
 
-Config keys, both no-ops at their defaults:
-    "twiddle_lr_mult":       float, default 1.0
-    "twiddle_weight_decay":  float or null, default null (inherit)
+**Recurrent twiddles may want a different multiplier from the rest.** The
+stage-1 sweep (2026-10-04, 6 runs, 50 epochs) found `twiddle_lr_mult` 10 beats
+1 by +0.055 PESQ, but the conditioning diagnostics show it is not a clean win:
+the multiplier helps the randn-initialised feed-forward butterflies
+(99%-energy rank of `fcs.0` 109-112 -> 130-135) and *hurts* the
+orthogonally-initialised recurrent matrix (`rnn.h_proj.0` 438-447 -> 230-282).
+That is mechanically unsurprising -- `W_hh` starts at condition number 1.0 and
+a larger step knocks it off that initialisation faster, while the `fc_*`
+blocks start collapsed and need to move. Hence a separate multiplier for the
+recurrent twiddles, defaulting to "same as the others" so nothing changes
+unless it is set.
+
+Config keys, all no-ops at their defaults:
+    "twiddle_lr_mult":            float, default 1.0
+    "twiddle_weight_decay":       float or null, default null (inherit)
+    "recurrent_twiddle_lr_mult":  float or null, default null (use twiddle_lr_mult)
+    "recurrent_twiddle_patterns": list[str], default ["h_proj"]
 """
 
 from __future__ import annotations
@@ -37,28 +51,50 @@ def is_twiddle(name):
     return name.rsplit(".", 1)[-1] == "twiddle"
 
 
+DEFAULT_RECURRENT_PATTERNS = ("h_proj",)
+
+
+def is_recurrent(name, patterns=DEFAULT_RECURRENT_PATTERNS):
+    """Does this parameter belong to a recurrent (hidden-to-hidden) projection?
+
+    ``ButterflyGRU`` names them ``h_proj.*`` against ``x_proj.*`` for the input
+    projection. Kept as a pattern list rather than hard-coded so other cells
+    (a CIFG-LSTM's recurrent block, say) can opt in without touching this file.
+    """
+    return any(tok in name for tok in patterns)
+
+
 def build_param_groups(model, lr, twiddle_lr_mult=1.0, twiddle_weight_decay=None,
-                       weight_decay=None):
-    """Split a model's parameters into a default group and a twiddle group.
+                       weight_decay=None, recurrent_twiddle_lr_mult=None,
+                       recurrent_patterns=DEFAULT_RECURRENT_PATTERNS):
+    """Split a model's parameters into a default group and one or two twiddle groups.
 
     Returns a list usable directly as an optimiser's first argument. When the
     model has no twiddles, or the settings are at their defaults, the result is
     behaviourally identical to passing ``model.parameters()``.
     """
-    twiddles, rest = [], []
+    split_recurrent = recurrent_twiddle_lr_mult is not None
+    buckets = {"default": [], "twiddle": [], "twiddle_recurrent": []}
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        (twiddles if is_twiddle(name) else rest).append(p)
+        if not is_twiddle(name):
+            buckets["default"].append(p)
+        elif split_recurrent and is_recurrent(name, recurrent_patterns):
+            buckets["twiddle_recurrent"].append(p)
+        else:
+            buckets["twiddle"].append(p)
 
     common = {} if weight_decay is None else {"weight_decay": float(weight_decay)}
+    mults = {"default": 1.0,
+             "twiddle": float(twiddle_lr_mult),
+             "twiddle_recurrent": float(recurrent_twiddle_lr_mult or twiddle_lr_mult)}
     groups = []
-    if rest:
-        groups.append(dict(params=rest, lr=lr, group_name="default", **common))
-    if twiddles:
-        g = dict(params=twiddles, lr=lr * float(twiddle_lr_mult),
-                 group_name="twiddle", **common)
-        if twiddle_weight_decay is not None:
+    for key in ("default", "twiddle", "twiddle_recurrent"):
+        if not buckets[key]:
+            continue
+        g = dict(params=buckets[key], lr=lr * mults[key], group_name=key, **common)
+        if key.startswith("twiddle") and twiddle_weight_decay is not None:
             g["weight_decay"] = float(twiddle_weight_decay)
         groups.append(g)
     return groups

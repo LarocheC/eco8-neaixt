@@ -176,12 +176,16 @@ def train(rank, a, h):
     # as it did. See nsnet2/optim_groups.py for why either is worth varying.
     tw_mult = h.get("twiddle_lr_mult", 1.0)
     tw_wd = h.get("twiddle_weight_decay", None)
-    g_groups = build_param_groups(generator, h.learning_rate,
-                                  twiddle_lr_mult=tw_mult,
-                                  twiddle_weight_decay=tw_wd,
-                                  weight_decay=h.get("weight_decay", None))
+    tw_rec_mult = h.get("recurrent_twiddle_lr_mult", None)
+    g_groups = build_param_groups(
+        generator, h.learning_rate,
+        twiddle_lr_mult=tw_mult,
+        twiddle_weight_decay=tw_wd,
+        weight_decay=h.get("weight_decay", None),
+        recurrent_twiddle_lr_mult=tw_rec_mult,
+        recurrent_patterns=tuple(h.get("recurrent_twiddle_patterns", ["h_proj"])))
     optim_g = torch.optim.AdamW(g_groups, h.learning_rate, betas=[h.adam_b1, h.adam_b2])
-    if rank == 0 and (tw_mult != 1.0 or tw_wd is not None):
+    if rank == 0 and (tw_mult != 1.0 or tw_wd is not None or tw_rec_mult is not None):
         for line in describe(g_groups):
             print('  optim_g {}'.format(line))
     optim_d = torch.optim.AdamW(discriminator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2])
