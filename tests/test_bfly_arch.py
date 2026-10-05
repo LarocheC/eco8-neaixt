@@ -61,3 +61,52 @@ def test_arm_is_causal_and_costed(cfg):
     assert a.shape == mag.shape and com.shape == (*mag.shape, 2)
     assert torch.equal(a[..., :20], b[..., :20])          # nothing leaks from the future
     assert torch.all(a <= mag + 1e-6)                      # a gain in [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# arch.lin: the dense control. With stage-2 showing every butterfly variant
+# inside the reference's own seed spread, "does the butterfly cost anything
+# against dense at matched budget" is the question the study now rests on --
+# and it is the arm the compression literature most often omits.
+# ---------------------------------------------------------------------------
+
+def _cfg(**arch):
+    import copy
+    h = AttrDict(copy.deepcopy(json.load(open("configs/ba_R.json"))))
+    h["arch"] = dict(h["arch"], **arch)
+    return h
+
+
+def test_default_arch_is_unchanged_by_the_lin_switch():
+    """Regression guard: omitting arch.lin must build exactly what it always did."""
+    m = build_generator(_cfg())
+    assert sum(p.numel() for p in m.parameters()) == 154368
+    assert type(m.rnn.x_proj[0]).__name__ == "Butterfly"
+    assert type(m.rnn.h_proj[0]).__name__ == "Butterfly"
+
+
+def test_lin_linear_builds_a_fully_dense_control():
+    m = build_generator(_cfg(hidden=88, lin={"kind": "linear"}))
+    assert isinstance(m.rnn.x_proj[0], torch.nn.Linear)
+    assert isinstance(m.rnn.h_proj[0], torch.nn.Linear)
+    assert isinstance(m.fc_in, torch.nn.Linear)
+    assert isinstance(m.fc_out, torch.nn.Linear)
+    assert not any("twiddle" in n for n, _ in m.named_parameters())
+
+
+def test_dense_control_is_budget_matched_to_the_butterfly_reference():
+    """H=88 is the iso-parameter control, H=85 the iso-MAC one; the study has to
+    report both axes, and the two must not differ much from each other."""
+    n88 = sum(p.numel() for p in build_generator(_cfg(hidden=88, lin={"kind": "linear"})).parameters())
+    n85 = sum(p.numel() for p in build_generator(_cfg(hidden=85, lin={"kind": "linear"})).parameters())
+    assert abs(n88 - 154368) / 154368 < 0.02      # within 2% on parameters
+    assert n85 < n88
+
+
+def test_dense_control_runs_a_forward_pass():
+    m = build_generator(_cfg(hidden=88, lin={"kind": "linear"})).eval()
+    mag = torch.rand(2, 257, 7).clamp_min(1e-4)
+    pha = torch.zeros(2, 257, 7)
+    with torch.no_grad():
+        out_mag, out_pha, out_com = m(mag, pha)
+    assert out_mag.shape == mag.shape and torch.isfinite(out_mag).all()

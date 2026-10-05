@@ -175,13 +175,22 @@ class ButterflyGRU(nn.Module):
     its output differs run to run by up to ~0.9 at batch 64 (and sometimes at 2-8).
     PyTorch gate convention: n = tanh(x_n + r * (W_hn h + b_hn))."""
 
-    def __init__(self, H_in, H, layers, nblocks=1):
+    def __init__(self, H_in, H, layers, nblocks=1, cfg=None):
         super().__init__()
         self.H = H
-        self.x_proj = nn.ModuleList([make_linear(H_in if i == 0 else H, 3 * H, cfg={
-            "kind": "butterfly", "nblocks": nblocks, "init": "randn"}) for i in range(layers)])
-        self.h_proj = nn.ModuleList([make_linear(H, 3 * H, cfg={
-            "kind": "butterfly", "nblocks": nblocks, "init": "ortho"}) for i in range(layers)])
+        # cfg=None reproduces the original hard-coded behaviour exactly. Passing
+        # {"kind": "linear"} gives the dense control the study needs -- the arm a
+        # compression paper is most often asked for and most often skips. The
+        # x/h init asymmetry is preserved and is load-bearing: W_hh starts ortho
+        # (measured cond 1.0, 99%-energy rank 507 of 512) while the input
+        # projection starts randn, and only the latter is collapsed at init.
+        base = dict(cfg) if cfg else {"kind": "butterfly", "nblocks": nblocks}
+        x_cfg = dict(base, init=base.get("x_init", "randn"))
+        h_cfg = dict(base, init=base.get("h_init", "ortho"))
+        self.x_proj = nn.ModuleList([make_linear(H_in if i == 0 else H, 3 * H, cfg=x_cfg)
+                                     for i in range(layers)])
+        self.h_proj = nn.ModuleList([make_linear(H, 3 * H, cfg=h_cfg)
+                                     for i in range(layers)])
 
     def forward(self, x):
         H = self.H
@@ -281,7 +290,10 @@ class BflyNSNet(nn.Module):
         self.h = h
         a = h.arch
         F, H, nb = N_BINS, a.get("hidden", 512), a.get("nblocks", 1)
-        lin = {"kind": "butterfly", "nblocks": nb, "init": "randn"}
+        # arch.lin overrides the layer type for the whole net; omitted, it is
+        # the butterfly the branch was built for. {"kind": "linear"} builds the
+        # dense control at the same topology.
+        lin = dict(a.get("lin", {"kind": "butterfly", "nblocks": nb, "init": "randn"}))
         self.cepstral = a.get("encoder", "butterfly") == "cepstral"
         mean = _load_mean(h)
         self.input_norm = mean is not None
@@ -293,7 +305,7 @@ class BflyNSNet(nn.Module):
 
         rnn = a.get("rnn", "gru")
         if rnn == "gru":
-            self.rnn = ButterflyGRU(H, H, 2, nblocks=nb)
+            self.rnn = ButterflyGRU(H, H, 2, nblocks=nb, cfg=lin)
         else:
             self.rnn = RecurrentStack(rnn, H, 2, lin, tuple(a.get("lru_r", (0.5, 0.99))))
 
