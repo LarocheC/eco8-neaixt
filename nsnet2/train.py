@@ -17,6 +17,7 @@ from nsnet2.model import NSNet2
 from common.metrics import pesq_score
 from common.discriminator import MetricDiscriminator, batch_pesq
 from nsnet2.layers import butterfly_ortho_penalty
+from nsnet2.run_record import RunRecord, check_fresh_run_dir, parse_epoch_list
 from common.utils import scan_checkpoint, load_checkpoint, save_checkpoint
 
 try:
@@ -41,6 +42,24 @@ def train(rank, a, h):
 
     generator = NSNet2(h).to(device)
     discriminator = MetricDiscriminator().to(device)
+
+    # Snapshots and run records (--snapshot_epochs, --state_epochs, --init_only,
+    # --init_from): g_e000 is written here, after --init_from, before any
+    # optimiser step. Nothing below draws from a random generator.
+    rec = None
+    if rank == 0 and a.recorded:
+        rec = RunRecord(a.checkpoint_path, a.config, h.seed, a.snapshot_list, a.state_list)
+        if a.init_from:
+            rec.init_from(generator, a.init_from, a.init_keys)
+        fingerprint = rec.start(generator)
+        print('Initial weights: {} (fingerprint {})'.format(
+            os.path.join(a.checkpoint_path, 'snapshots', 'g_e000'), fingerprint))
+        if a.expect_fingerprint and fingerprint != a.expect_fingerprint:
+            raise SystemExit('fingerprint of g_e000 {} differs from --expect_fingerprint {}'.format(
+                fingerprint, a.expect_fingerprint))
+        if a.init_only:
+            rec.finish()
+            return
 
     if rank == 0:
         print(generator)
@@ -107,6 +126,8 @@ def train(rank, a, h):
                               batch_size=h.batch_size,
                               pin_memory=True,
                               drop_last=True)
+    if rec is not None:
+        rec.update(steps_per_epoch=len(train_loader))
     if rank == 0:
         validset = Dataset(hf['test'], h.segment_size, h.sampling_rate,
                            split=False, shuffle=False, seed=h.seed)
@@ -284,6 +305,8 @@ def train(rank, a, h):
                         sw.add_scalar("Validation/Magnitude Loss", val_mag_err, steps)
                         sw.add_scalar("Validation/Complex Loss", val_com_err, steps)
                         sw.add_scalar("Validation/Consistency Loss", val_stft_err, steps)
+                        if rec is not None:
+                            rec.validation(steps, epoch, val_pesq_score, val_mag_err, val_com_err, val_stft_err)
                         # Phase 6 hook (TRN-01..05; lazy-import gate per TRN-05).
                         if h.get("quant", {}).get("enabled", False):
                             from nsnet2.quant_hook import run_quant_eval
@@ -300,6 +323,8 @@ def train(rank, a, h):
                             best_checkpoint_path = "{}/g_best".format(a.checkpoint_path)
                             save_checkpoint(best_checkpoint_path,
                                             {'generator': (generator.module if h.num_gpus > 1 else generator).state_dict()})
+                            if rec is not None:
+                                rec.best(steps, epoch, best_pesq)
 
                     generator.train()
 
@@ -308,8 +333,15 @@ def train(rank, a, h):
         scheduler_g.step()
         scheduler_d.step()
 
+        if rec is not None:
+            rec.end_of_epoch(epoch + 1, steps, generator, discriminator, optim_g, optim_d,
+                             scheduler_g, scheduler_d, best_pesq)
+
         if rank == 0:
             print('Time taken for epoch {} is {} sec\n'.format(epoch + 1, int(time.time() - start)))
+
+    if rec is not None:
+        rec.finish()
 
 
 def main():
@@ -328,15 +360,53 @@ def main():
     parser.add_argument('--summary_interval', default=100, type=int)
     parser.add_argument('--validation_interval', default=5000, type=int)
     parser.add_argument('--best_checkpoint_start_epoch', default=40, type=int)
+    # All off by default; a run without them behaves as before.
+    parser.add_argument('--seed', default=None, type=int,
+                        help='Override the seed of the config (initial weights and data order); the '
+                             'config.json of the run carries the effective seed.')
+    parser.add_argument('--snapshot_epochs', default='',
+                        help='Save the generator to <run>/snapshots/g_eNNN after NNN finished epochs, '
+                             'e.g. "0-20,25-200:5". g_e000 (the initial weights) is always written. '
+                             'Also writes <run>/run.json, best.json and val.jsonl.')
+    parser.add_argument('--state_epochs', default='',
+                        help='Save the full training state to <run>/states/s_eNNN at the end of these '
+                             'epochs, e.g. "50,100,150,200".')
+    parser.add_argument('--init_only', action='store_true',
+                        help='Write <run>/snapshots/g_e000 and run.json, then exit.')
+    parser.add_argument('--init_from', default=None,
+                        help='After the model is built, overwrite the tensors whose keys start with '
+                             '--init_keys by those of this snapshot or checkpoint.')
+    parser.add_argument('--init_keys', default=None,
+                        help='Key prefix for --init_from, e.g. "gru.cells.0.x_proj".')
+    parser.add_argument('--expect_fingerprint', default=None,
+                        help='Stop if the fingerprint of g_e000 differs from this value.')
 
     a = parser.parse_args()
+    if (a.init_from is None) != (a.init_keys is None):
+        parser.error('--init_from and --init_keys go together')
+    a.snapshot_list = parse_epoch_list(a.snapshot_epochs)
+    a.state_list = parse_epoch_list(a.state_epochs)
+    a.recorded = bool(a.snapshot_epochs or a.state_epochs or a.init_only or a.init_from)
+    if a.expect_fingerprint and not a.recorded:
+        parser.error('--expect_fingerprint needs --snapshot_epochs, --state_epochs, --init_only or --init_from')
+    if a.recorded:
+        # No resuming: train.py resumes from rolling checkpoints when it finds them.
+        check_fresh_run_dir(a.checkpoint_path)
 
     with open(a.config) as f:
         data = f.read()
 
     json_config = json.loads(data)
+    if a.seed is not None:
+        json_config['seed'] = a.seed
     h = AttrDict(json_config)
-    build_env(a.config, 'config.json', a.checkpoint_path)
+    if a.seed is None:
+        build_env(a.config, 'config.json', a.checkpoint_path)
+    else:
+        os.makedirs(a.checkpoint_path, exist_ok=True)
+        with open(os.path.join(a.checkpoint_path, 'config.json'), 'w') as f:
+            json.dump(json_config, f, indent=4)
+            f.write('\n')
 
     torch.manual_seed(h.seed)
     if torch.cuda.is_available():
@@ -344,6 +414,12 @@ def main():
         h.num_gpus = torch.cuda.device_count()
         h.batch_size = int(h.batch_size / max(h.num_gpus, 1))
         print('Batch size per GPU :', h.batch_size)
+
+    if a.recorded and h.num_gpus > 1:
+        # With several GPUs the model is built in spawned workers, whose CPU
+        # generator is not seeded with h.seed, and the batch is divided.
+        raise SystemExit('--snapshot_epochs, --state_epochs, --init_only and --init_from need a single '
+                         'visible GPU: set CUDA_VISIBLE_DEVICES=<id>.')
 
     if h.num_gpus > 1:
         mp.spawn(train, nprocs=h.num_gpus, args=(a, h,))

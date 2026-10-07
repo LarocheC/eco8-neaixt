@@ -31,6 +31,12 @@ Two registries:
 All ``cfg`` blocks accept the per-backend knobs (e.g. ``nblocks`` for
 butterfly/blockdiag/monarch, ``init`` for butterfly).
 
+``make_linear`` also accepts ``"mixed_radix"``: ``nsnet2.mixed_radix.MixedRadixButterfly``,
+a butterfly whose stages have the block sizes listed in ``radices`` (``init`` is
+``randn``, ``ortho`` or ``rownorm``). A butterfly ``gru`` block with ``x_radices``
+builds every GRU input projection (W_ih) this way, with ``x_init``; the recurrent
+projection is unchanged.
+
 The ``triton``/``triton_blockdiag``/``triton_monarch``/``triton_butterfly``
 GRU kinds route the recurrence through ``gru_qat.GRULayer`` (persistent Triton
 hidden kernel on CUDA, per-step fallback elsewhere). ``triton_*`` structures
@@ -78,6 +84,8 @@ except ImportError:
     MonarchLinear = None
     HAVE_MONARCH = False
 
+from nsnet2.mixed_radix import MixedRadixButterfly
+
 try:
     from gru_qat import GRULayer as _GRULayer
     from gru_qat import QuantRecipe as _QuantRecipe
@@ -92,7 +100,7 @@ except ImportError:
 # Linear factory
 # ---------------------------------------------------------------------------
 
-LINEAR_KINDS = ("linear", "butterfly", "blockdiag", "monarch")
+LINEAR_KINDS = ("linear", "butterfly", "blockdiag", "monarch", "mixed_radix")
 
 
 def make_linear(in_size: int, out_size: int, bias: bool = True, *,
@@ -130,6 +138,14 @@ def make_linear(in_size: int, out_size: int, bias: bool = True, *,
         return MonarchLinear(
             in_features=in_size, out_features=out_size, bias=bias,
             nblocks=cfg.get("nblocks", 4),
+        )
+
+    if kind == "mixed_radix":
+        if "radices" not in cfg:
+            raise ValueError("kind='mixed_radix' needs 'radices', e.g. [2, 4, 4, 4, 4]")
+        return MixedRadixButterfly(
+            in_size, out_size, radices=cfg["radices"], bias=bias,
+            init=cfg.get("init", "randn"),
         )
 
     raise ValueError(f"Unknown linear kind: {kind!r} (expected one of {LINEAR_KINDS})")
@@ -307,9 +323,15 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
     For butterfly recurrence, the W_hh projection defaults to ``init='ortho'``
     to keep the recurrent dynamics stable; override by setting
     ``cfg["h_init"]``.
+
+    With kind ``"butterfly"``, ``cfg["x_radices"]`` (a list of block sizes)
+    makes every W_ih a ``MixedRadixButterfly`` with those radices and
+    ``init=cfg["x_init"]`` (default ``randn``); W_hh is built as without it.
     """
     cfg = dict(cfg or {})
     kind = cfg.get("kind", "gru")
+    if "x_radices" in cfg and kind != "butterfly":
+        raise ValueError(f"x_radices needs gru kind 'butterfly', got {kind!r}")
 
     if kind == "gru":
         return nn.GRU(input_size, hidden_size, num_layers=num_layers, batch_first=True)
@@ -369,12 +391,14 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
     if kind not in ("butterfly", "blockdiag", "monarch"):
         raise ValueError(f"Unknown gru kind: {kind!r} (expected one of {GRU_KINDS})")
 
-    base = {k: v for k, v in cfg.items() if k not in ("kind", "h_init", "x_init")}
+    base = {k: v for k, v in cfg.items() if k not in ("kind", "h_init", "x_init", "x_radices")}
     x_cfg = dict(base, kind=kind)
     h_cfg = dict(base, kind=kind)
     if kind == "butterfly":
         x_cfg["init"] = cfg.get("x_init", cfg.get("init", "randn"))
         h_cfg["init"] = cfg.get("h_init", "ortho")
+        if "x_radices" in cfg:
+            x_cfg = {"kind": "mixed_radix", "radices": list(cfg["x_radices"]), "init": x_cfg["init"]}
     return StructuredGRU(input_size, hidden_size, num_layers, x_cfg=x_cfg, h_cfg=h_cfg)
 
 
