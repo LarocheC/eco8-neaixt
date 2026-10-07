@@ -340,6 +340,67 @@ Per-backend kwargs (all optional): butterfly takes `nblocks` (1+), `init`
 two-factor construction (the runs below are all `blockdiag`).
 See `nsnet2/layers.py` for the factory and `StructuredGRU`.
 
+A butterfly `gru` block also takes `x_radices`, a list of block sizes such as
+`[2, 4, 4, 4, 4]`: every GRU input projection is then a
+`nsnet2.mixed_radix.MixedRadixButterfly` with stages of those sizes (applied in
+that order, with increasing stride) and `x_init` = `randn` (entries
+N(0, 1/b)), `ortho` (Haar-orthogonal blocks) or `rownorm` (Gaussian blocks
+with unit rows). The recurrent projection is built as without it.
+`[2] * 9` is the library's radix-2 butterfly and `[4, 4, 4, 4, 2]` its base-4
+form, with the same 9216 coefficients per 512-point stack as `[2, 4, 4, 4, 4]`.
+The layer is also available to `make_linear` as `{"kind": "mixed_radix",
+"radices": [...], "init": ...}`.
+
+### Initialisation × layout sweep
+
+The int8 findings above compare one run per initialisation, and the two
+published configurations also differ in their FC layers. `configs/ig_*.json`
+vary only the two GRU input projections: the `ig_r*` arms have the
+architecture and hyperparameters of `butterfly_ortho` (FC layers and
+recurrent projections: library butterflies with `ortho` init) and differ in
+`x_radices` (`[2] * 9`, `[2, 4, 4, 4, 4]`, `[4, 4, 4, 4, 2]`) and `x_init`
+(`randn`, `ortho`, plus `rownorm` with `[2] * 9`); `ig_full` is a copy of
+`butterfly_full`. The new layer draws one integer from the global generator
+and everything else from a private one, so at a given seed the `ig_r*` arms
+share every other initial weight and the data order, and the three
+initialisations of a layout are built from the same Gaussian blocks.
+
+```bash
+./run_init_sweep.sh                                   # every arm, seeds 1235-1237, 200 epochs
+ARMS="ig_r24_randn ig_r42_randn" SEEDS=1235 ./run_init_sweep.sh
+```
+
+The sweep passes these opt-in options of `nsnet2.train` (a run without them
+behaves as before):
+
+- `--seed N` overrides the seed of the config (initial weights and data
+  order); the run's `config.json` carries the effective seed.
+- `--snapshot_epochs "0-20,25-200:5"` saves the generator to
+  `snapshots/g_eNNN` after NNN finished epochs, from CPU copies, in the format
+  of `g_best` plus `epoch` and `steps`; `g_e000` holds the initial weights,
+  written before any optimiser step. `--state_epochs "50,100,150,200"` saves
+  the full training state (both models, optimisers and schedulers, step,
+  epoch, random-generator states) to `states/s_eNNN`.
+- `--init_only` writes `g_e000` and exits. `--init_from FILE --init_keys PREFIX`
+  overwrites the tensors whose keys start with PREFIX by those of a snapshot,
+  after the model is built and without drawing from any generator.
+- Such runs also write `run.json` (config, seed, commit and `git status`,
+  command, library and CUDA versions, sha256 of `uv.lock`, GPU, start and end
+  time, steps per epoch, fingerprint of `g_e000`), `val.jsonl` (one line per
+  validation) and `best.json` (when `g_best` is written). The fingerprint of a
+  state dict is the sha256 of the float32 bytes of its tensors in sorted key
+  order; unlike the hash of a `torch.save` file, it does not depend on the
+  device or the PyTorch version. `--expect_fingerprint` stops a run whose
+  `g_e000` differs.
+- They refuse to start in a directory that holds rolling checkpoints,
+  snapshots or a `run.json`: `train.py` would resume from them. The sweep
+  skips finished runs, moves a partial run to `<dir>.aborted<k>` and starts it
+  again from the same initial weights, and prunes only the rolling
+  checkpoints of a finished run.
+- Run one process per GPU (`CUDA_VISIBLE_DEVICES=<id>`): with several visible
+  GPUs `train.py` builds the model in spawned workers, whose CPU generator is
+  not seeded, and divides the batch. These options refuse to run that way.
+
 The `analyze_sweep.ipynb` notebook loads each run's `g_best`, plots PESQ
 trajectories, visualizes the equivalent dense weight matrices for every
 linear and GRU projection, and runs inference on a few test items with
