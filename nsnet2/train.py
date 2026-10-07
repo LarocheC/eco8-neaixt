@@ -211,10 +211,27 @@ def train(rank, a, h):
         for grp, lr in zip(optim_d.param_groups, scheduler_d.get_last_lr()):
             grp['lr'] = lr
 
+    # h.seed drives BOTH the model init and the data pipeline. h.data_seed
+    # (default: follow h.seed) decouples them, which is what lets the two
+    # components of run-to-run variance be measured separately:
+    #   same seed, different data_seed -> isolates DATA-order noise
+    #   different seed, same data_seed -> isolates INIT noise
+    # That matters because seed-pairing cancels only the shared component. A
+    # recipe change on one architecture shares both init and data, and the
+    # 4090 measured its paired SD at 0.014 against ~0.039 unpaired. An
+    # ARCHITECTURE change cannot share the init (different shapes consume the
+    # RNG differently), so it keeps only the data half of that benefit -- and
+    # how much that is worth is currently unmeasured, with the answer bounded
+    # between 0.014 and 0.039. It sets the seed budget for every remaining arm.
+    data_seed = h.get("data_seed", None)
+    data_seed = h.seed if data_seed is None else int(data_seed)
+    if rank == 0 and data_seed != h.seed:
+        print('Data seed {} decoupled from init seed {}'.format(data_seed, h.seed))
+
     hf = load_voicebank_demand(cache_dir=a.hf_cache_dir)
 
     trainset = Dataset(hf['train'], h.segment_size, h.sampling_rate,
-                       split=True, shuffle=False if h.num_gpus > 1 else True, seed=h.seed)
+                       split=True, shuffle=False if h.num_gpus > 1 else True, seed=data_seed)
 
     # Test hook (default off): shorten the epoch so the determinism acceptance
     # tests can cross several epoch boundaries in a handful of steps. At the
@@ -232,7 +249,7 @@ def train(rank, a, h):
     # with the same seed consume different amounts of RNG and see different
     # crops. A seeded generator pins the base seed; seed_worker then pins the
     # per-worker python/numpy RNGs that Dataset.__getitem__ crops with.
-    data_gen = data_generator(h.seed) if use_data_gen else None
+    data_gen = data_generator(data_seed) if use_data_gen else None
     loader_kw = dict(worker_init_fn=seed_worker, generator=data_gen) if use_data_gen else {}
 
     train_loader = DataLoader(trainset, num_workers=h.num_workers, shuffle=False,
