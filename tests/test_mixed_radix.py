@@ -322,3 +322,44 @@ def test_forward_and_backward_are_finite(arm):
     assert torch.isfinite(out_mag).all() and torch.isfinite(loss)
     for name, p in model.named_parameters():
         assert p.grad is not None and torch.isfinite(p.grad).all(), name
+
+
+def test_radices_by_n_picks_the_smallest_width_that_fits():
+    cfg = {"kind": "mixed_radix", "radices_by_n": {"512": [8, 8, 8], "1024": [8, 8, 16]}, "init": "ortho"}
+    assert make_linear(257, 400, cfg=cfg).radices == [8, 8, 8]
+    assert make_linear(512, 600, cfg=cfg).radices == [8, 8, 8]
+    assert make_linear(600, 600, cfg=cfg).radices == [8, 8, 16]
+    with pytest.raises(ValueError, match="fits"):
+        make_linear(1025, 16, cfg=cfg)
+    with pytest.raises(ValueError, match="product"):
+        make_linear(16, 16, cfg={"kind": "mixed_radix", "radices_by_n": {"512": [8, 8]}})
+
+
+def test_h_radices_builds_mixed_radix_recurrent_projections():
+    torch.manual_seed(15)
+    gru = make_gru(64, 64, 2, cfg={"kind": "butterfly", "nblocks": 1, "x_radices": [8, 8],
+                                    "x_init": "randn", "h_radices": [4, 16], "h_init": "ortho"})
+    for cell in gru.cells:
+        assert isinstance(cell.x_proj, MixedRadixButterfly) and cell.x_proj.radices == [8, 8]
+        assert isinstance(cell.h_proj, MixedRadixButterfly) and cell.h_proj.radices == [4, 16]
+        assert cell.x_proj.init == "randn" and cell.h_proj.init == "ortho"
+    with pytest.raises(ValueError, match="h_radices"):
+        make_gru(16, 16, 1, cfg={"kind": "blockdiag", "nblocks": 4, "h_radices": [4, 4]})
+
+
+def test_mr8_ortho_is_mixed_radix_everywhere():
+    h = load_config("mr8_ortho")
+    torch.manual_seed(16)
+    model = NSNet2(h)
+    layers = {n: m for n, m in model.named_modules() if isinstance(m, MixedRadixButterfly)}
+    assert not any(isinstance(m, Butterfly) for m in model.modules())
+    assert len(layers) == 8
+    for n, m in layers.items():
+        assert m.init == "ortho"
+        assert m.radices == ([8, 8, 16] if m.in_size == 600 else [8, 8, 8]), n
+    mag = torch.rand(2, 257, 6)
+    pha = torch.rand(2, 257, 6) * 6.28 - 3.14
+    out_mag, _, out_com = model(mag, pha)
+    (out_mag.pow(2).mean() + out_com.abs().mean()).backward()
+    for name, p in model.named_parameters():
+        assert p.grad is not None and torch.isfinite(p.grad).all(), name

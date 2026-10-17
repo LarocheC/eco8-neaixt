@@ -349,7 +349,20 @@ with unit rows). The recurrent projection is built as without it.
 `[2] * 9` is the library's radix-2 butterfly and `[4, 4, 4, 4, 2]` its base-4
 form, with the same 9216 coefficients per 512-point stack as `[2, 4, 4, 4, 4]`.
 The layer is also available to `make_linear` as `{"kind": "mixed_radix",
-"radices": [...], "init": ...}`.
+"radices": [...], "init": ...}`, or with `"radices_by_n"`: a map from the
+padded width n to radices whose product is n. Each layer takes the smallest n
+that holds its input, so `{"512": [8, 8, 8], "1024": [8, 8, 16]}` covers the
+257-, 400- and 600-wide inputs. `h_radices` (with `h_init`) does for the
+recurrent projections what `x_radices` does for the input projections.
+
+`configs/mr8_ortho.json` uses both: every butterfly layer of `butterfly_ortho`
+(FC layers, GRU input and recurrent projections) becomes an `ortho`
+mixed-radix butterfly with three stages, 8.8.8 (8.8.16 for the 600-wide
+inputs). That is the layout the STM32N6 runs fastest: one grouped conv and
+one transpose per stage (nsnet_dse `deploy/sparse_nsnet2`, "Merged
+butterfly"). It has 256,513 parameters (`butterfly_ortho`: 0.19 M). Train it
+with `ARMS=mr8_ortho SEEDS=1234 ./run_init_sweep.sh`; `azure/job.sh` runs
+the same on an Azure ML node.
 
 ### Initialisation × layout sweep
 

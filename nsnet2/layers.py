@@ -34,8 +34,9 @@ butterfly/blockdiag/monarch, ``init`` for butterfly).
 ``make_linear`` also accepts ``"mixed_radix"``: ``nsnet2.mixed_radix.MixedRadixButterfly``,
 a butterfly whose stages have the block sizes listed in ``radices`` (``init`` is
 ``randn``, ``ortho`` or ``rownorm``). A butterfly ``gru`` block with ``x_radices``
-builds every GRU input projection (W_ih) this way, with ``x_init``; the recurrent
-projection is unchanged.
+builds every GRU input projection (W_ih) this way, with ``x_init``, and ``h_radices``
+every recurrent projection (W_hh), with ``h_init``. A ``mixed_radix`` linear block may
+give ``radices_by_n`` (padded width -> radices) instead of one ``radices`` list.
 
 The ``triton``/``triton_blockdiag``/``triton_monarch``/``triton_butterfly``
 GRU kinds route the recurrence through ``gru_qat.GRULayer`` (persistent Triton
@@ -100,6 +101,29 @@ except ImportError:
 # Linear factory
 # ---------------------------------------------------------------------------
 
+def pick_radices(cfg: dict, in_size: int) -> list[int]:
+    """Radices of a ``mixed_radix`` layer: ``cfg["radices"]`` (one list for every
+    layer), or ``cfg["radices_by_n"]``, a map from the padded width n to a list
+    whose product is n; the smallest n >= ``in_size`` is used. So
+    ``{"512": [8, 8, 8], "1024": [8, 8, 16]}`` gives 8.8.8 to the 257- and
+    400-wide inputs and 8.8.16 to the 600-wide ones."""
+    if "radices" in cfg:
+        return [int(b) for b in cfg["radices"]]
+    if "radices_by_n" not in cfg:
+        raise ValueError("kind='mixed_radix' needs 'radices' (e.g. [2, 4, 4, 4, 4]) or 'radices_by_n'")
+    table = {int(n): [int(b) for b in r] for n, r in cfg["radices_by_n"].items()}
+    for n, r in table.items():
+        prod = 1
+        for b in r:
+            prod *= b
+        if prod != n:
+            raise ValueError(f"radices_by_n[{n}] = {r} has product {prod}")
+    fits = [n for n in table if n >= in_size]
+    if not fits:
+        raise ValueError(f"no radices_by_n entry fits in_size={in_size} (have {sorted(table)})")
+    return table[min(fits)]
+
+
 LINEAR_KINDS = ("linear", "butterfly", "blockdiag", "monarch", "mixed_radix")
 
 
@@ -141,10 +165,8 @@ def make_linear(in_size: int, out_size: int, bias: bool = True, *,
         )
 
     if kind == "mixed_radix":
-        if "radices" not in cfg:
-            raise ValueError("kind='mixed_radix' needs 'radices', e.g. [2, 4, 4, 4, 4]")
         return MixedRadixButterfly(
-            in_size, out_size, radices=cfg["radices"], bias=bias,
+            in_size, out_size, radices=pick_radices(cfg, in_size), bias=bias,
             init=cfg.get("init", "randn"),
         )
 
@@ -326,12 +348,14 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
 
     With kind ``"butterfly"``, ``cfg["x_radices"]`` (a list of block sizes)
     makes every W_ih a ``MixedRadixButterfly`` with those radices and
-    ``init=cfg["x_init"]`` (default ``randn``); W_hh is built as without it.
+    ``init=cfg["x_init"]`` (default ``randn``); ``cfg["h_radices"]`` does the
+    same for every W_hh, with ``init=cfg["h_init"]`` (default ``ortho``).
     """
     cfg = dict(cfg or {})
     kind = cfg.get("kind", "gru")
-    if "x_radices" in cfg and kind != "butterfly":
-        raise ValueError(f"x_radices needs gru kind 'butterfly', got {kind!r}")
+    for key in ("x_radices", "h_radices"):
+        if key in cfg and kind != "butterfly":
+            raise ValueError(f"{key} needs gru kind 'butterfly', got {kind!r}")
 
     if kind == "gru":
         return nn.GRU(input_size, hidden_size, num_layers=num_layers, batch_first=True)
@@ -391,7 +415,8 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
     if kind not in ("butterfly", "blockdiag", "monarch"):
         raise ValueError(f"Unknown gru kind: {kind!r} (expected one of {GRU_KINDS})")
 
-    base = {k: v for k, v in cfg.items() if k not in ("kind", "h_init", "x_init", "x_radices")}
+    base = {k: v for k, v in cfg.items()
+            if k not in ("kind", "h_init", "x_init", "x_radices", "h_radices")}
     x_cfg = dict(base, kind=kind)
     h_cfg = dict(base, kind=kind)
     if kind == "butterfly":
@@ -399,6 +424,8 @@ def make_gru(input_size: int, hidden_size: int, num_layers: int = 1, *,
         h_cfg["init"] = cfg.get("h_init", "ortho")
         if "x_radices" in cfg:
             x_cfg = {"kind": "mixed_radix", "radices": list(cfg["x_radices"]), "init": x_cfg["init"]}
+        if "h_radices" in cfg:
+            h_cfg = {"kind": "mixed_radix", "radices": list(cfg["h_radices"]), "init": h_cfg["init"]}
     return StructuredGRU(input_size, hidden_size, num_layers, x_cfg=x_cfg, h_cfg=h_cfg)
 
 
