@@ -26,6 +26,8 @@
 #                        (nsnet2/train.py --init_from / --init_keys)
 #   REF_DIR              each run must start from the weights recorded in
 #                        $REF_DIR/<arm>/s<seed>/run.json (e.g. an --init_only pass)
+#   VAL_SPEAKERS         train speakers held out for validation and best-checkpoint
+#                        selection, e.g. "p226,p287" (default: validate on the test split)
 #   EXPECT_FINGERPRINT   fingerprint that g_e000 must have (takes precedence
 #                        over REF_DIR; meant for a single run)
 # Examples:
@@ -58,6 +60,7 @@ INIT_FROM="${INIT_FROM:-}"
 INIT_KEYS="${INIT_KEYS:-}"
 REF_DIR="${REF_DIR:-}"
 EXPECT_FINGERPRINT="${EXPECT_FINGERPRINT:-}"
+VAL_SPEAKERS="${VAL_SPEAKERS:-}"
 
 if [[ ! -d .venv ]]; then
     echo "ERROR: no .venv found. Run 'uv sync' first." >&2
@@ -133,6 +136,9 @@ for seed in $SEEDS; do
               --snapshot_epochs "$SNAPSHOT_EPOCHS" --state_epochs "$STATE_EPOCHS")
         if [[ -n $INIT_FROM ]]; then
             args+=(--init_from "$INIT_FROM" --init_keys "$INIT_KEYS")
+        fi
+        if [[ -n $VAL_SPEAKERS ]]; then
+            args+=(--val_speakers "$VAL_SPEAKERS")
         fi
         if [[ -n $expect ]]; then
             args+=(--expect_fingerprint "$expect")

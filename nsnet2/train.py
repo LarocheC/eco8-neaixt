@@ -115,8 +115,23 @@ def train(rank, a, h):
             grp['lr'] = lr
 
     hf = load_voicebank_demand(cache_dir=a.hf_cache_dir)
+    train_hf, valid_hf = hf['train'], hf['test']
+    if a.val_speakers:
+        # Hold these speakers out of training and select the best checkpoint on
+        # them, so the test split is never seen before the final evaluation.
+        held = set(a.val_speakers.split(','))
+        spk = [i.split('_')[0] for i in hf['train']['id']]
+        missing = held - set(spk)
+        if missing:
+            raise ValueError(f'--val_speakers not in the train split: {sorted(missing)}')
+        valid_hf = hf['train'].select([k for k, s in enumerate(spk) if s in held])
+        train_hf = hf['train'].select([k for k, s in enumerate(spk) if s not in held])
+        if rank == 0:
+            print(f'val_speakers {sorted(held)}: {len(train_hf)} train / {len(valid_hf)} validation utterances')
+        if rec is not None:
+            rec.update(val_speakers=sorted(held), n_train_utts=len(train_hf), n_valid_utts=len(valid_hf))
 
-    trainset = Dataset(hf['train'], h.segment_size, h.sampling_rate,
+    trainset = Dataset(train_hf, h.segment_size, h.sampling_rate,
                        split=True, shuffle=False if h.num_gpus > 1 else True, seed=h.seed)
 
     train_sampler = DistributedSampler(trainset) if h.num_gpus > 1 else None
@@ -129,7 +144,7 @@ def train(rank, a, h):
     if rec is not None:
         rec.update(steps_per_epoch=len(train_loader))
     if rank == 0:
-        validset = Dataset(hf['test'], h.segment_size, h.sampling_rate,
+        validset = Dataset(valid_hf, h.segment_size, h.sampling_rate,
                            split=False, shuffle=False, seed=h.seed)
 
         validation_loader = DataLoader(validset, num_workers=1, shuffle=False,
@@ -378,6 +393,9 @@ def main():
                              '--init_keys by those of this snapshot or checkpoint.')
     parser.add_argument('--init_keys', default=None,
                         help='Key prefix for --init_from, e.g. "gru.cells.0.x_proj".')
+    parser.add_argument('--val_speakers', default='',
+                        help='Comma-separated train speakers (e.g. "p226,p287") held out of training and '
+                             'used for validation and best-checkpoint selection instead of the test split.')
     parser.add_argument('--expect_fingerprint', default=None,
                         help='Stop if the fingerprint of g_e000 differs from this value.')
 
